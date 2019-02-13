@@ -34,6 +34,11 @@ static driver_t nvmeorocev2_pci_driver = {
 
 static devclass_t nvmeorocev2_devclass;
 
+/*
+ * Invoked whenever the routine is registered with ib_register_client()
+ * below or when an IB interface is added to the system.  In the former case
+ * the routine is invoked for every IB interface already known.
+ */
 static void
 nvmeorocev2_add_one(struct ib_device *ib_device)
 {
@@ -41,6 +46,11 @@ nvmeorocev2_add_one(struct ib_device *ib_device)
 	    rdma_node_get_transport(ib_device->node_type));
 }
 
+/*
+ * Invoked whenever the routine is unregistered with ib_unregister_client()
+ * below or when an IB interface is removed from the system.  In the former case
+ * the routine is invoked for every IB interface already known.
+ */
 static void
 nvmeorocev2_remove_one(struct ib_device *ib_device, void *client_data)
 {
