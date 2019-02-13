@@ -8,4 +8,9 @@ SRCS= \
 	opt_inet.h opt_inet6.h opt_rss.h opt_ratelimit.h \
 	opt_cam.h opt_nvme.h
 
+CFLAGS+= -I${SRCTOP}/sys/ofed/include
+CFLAGS+= -I${SRCTOP}/sys/ofed/include/uapi
+CFLAGS+= -I${SRCTOP}/sys/compat/linuxkpi/common/include
+CFLAGS+= -DINET
+
 .include <bsd.kmod.mk>

@@ -10,6 +10,8 @@
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
+#include <rdma/ib_verbs.h>
+
 #define SPEWCMN(prefix, format, ...) printf(prefix "%s(%d) " format, \
     __func__, __LINE__, ## __VA_ARGS__)
 #define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
@@ -33,15 +35,41 @@ static driver_t nvmeorocev2_pci_driver = {
 static devclass_t nvmeorocev2_devclass;
 
 static void
-nvmeorocev2_load(void)
+nvmeorocev2_add_one(struct ib_device *ib_device)
 {
-	return;
+	SPEW("rdma_node_get_transport(%p)> %d\n", ib_device,
+	    rdma_node_get_transport(ib_device->node_type));
 }
 
+static void
+nvmeorocev2_remove_one(struct ib_device *ib_device, void *client_data)
+{
+	SPEW("%p removed\n", ib_device);
+}
+
+static struct ib_client nvmeofrocev2 = {
+	.name   = "nvmeofrocev2_ib_client",
+	.add    = nvmeorocev2_add_one,
+	.remove = nvmeorocev2_remove_one
+};
+
+
+static void
+nvmeorocev2_load(void)
+{
+	int retval;
+
+	retval = ib_register_client(&nvmeofrocev2);
+	if (retval != 0) {
+		printf("ib_register_client() for NVMeoF failed, ret:%d\n",
+		    retval);
+	}
+}
 
 static void
 nvmeorocev2_unload(void)
 {
+	ib_unregister_client(&nvmeofrocev2);
 	return;
 }
 
@@ -74,4 +102,5 @@ nvmeorocev2_modevent(module_t mod, int type, void *arg)
 
 DRIVER_MODULE(nvmeorocev2, pci, nvmeorocev2_pci_driver, nvmeorocev2_devclass,
     nvmeorocev2_modevent, 0);
+MODULE_DEPEND(nvmeorocev2, ibcore, 1, 1, 1);
 MODULE_VERSION(nvmeorocev2, 1);
