@@ -21,6 +21,7 @@
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
 
+static struct rdma_cm_id *glbl_cm_id = NULL;
 /*
  * Invoked whenever the routine is registered with ib_register_client()
  * below or when an IB interface is added to the system.  In the former case
@@ -141,6 +142,7 @@ nrev2_init(void)
 		goto out;
 	}
 	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
+	glbl_cm_id = cm_id;
 	cm_id = NULL;
 
 out:
@@ -153,6 +155,11 @@ out:
 static void
 nrev2_uninit(void)
 {
+	DBGSPEW("Uninit invoked\n");
+	if (glbl_cm_id != NULL) {
+		rdma_destroy_id(glbl_cm_id);
+	}
+
 	ib_unregister_client(&nvmeofrocev2);
 }
 
