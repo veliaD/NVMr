@@ -57,7 +57,8 @@ __FBSDID("$FreeBSD$");
 #define PFX "krping: "
 
 extern int krping_debug;
-#define DEBUG_LOG(...) do { if (krping_debug) log(LOG_INFO, __VA_ARGS__); } while (0)
+#define DEBUG_LOG(format, ...) do { if (krping_debug) printf("%s@%d> " format, \
+    __func__, __LINE__, ## __VA_ARGS__); } while (0)
 #define BIND_INFO 1
 
 MODULE_AUTHOR("Steve Wise");

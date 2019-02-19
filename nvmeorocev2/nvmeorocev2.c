@@ -60,7 +60,7 @@ nrev2_addr_resolved(struct rdma_cm_id *cm_id)
 	retval = rdma_resolve_route(cm_id, 2000);
 	if (retval != 0) {
 		ERRSPEW("rdma_resolve_route() failed w/%d\n", retval);
-		rdma_destroy_id(cm_id);
+		/* rdma_destroy_id(cm_id); */
 	} else {
 		DBGSPEW("Successfully invoked rdma_resolve_route()\n");
 	}
@@ -70,9 +70,8 @@ nrev2_addr_resolved(struct rdma_cm_id *cm_id)
 static void
 nrev2_route_resolved(struct rdma_cm_id *cm_id)
 {
-	dump_stack();
 	DBGSPEW("\nRoute Resolved!\n");
-	rdma_destroy_id(cm_id);
+	/* rdma_destroy_id(cm_id); */
 }
 
 
