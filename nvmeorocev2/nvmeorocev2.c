@@ -22,6 +22,8 @@
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
 
 static struct rdma_cm_id *glbl_cm_id = NULL;
+static struct ib_device  *glbl_ibdev = NULL;
+static struct ib_pd      *glbl_ibpd  = NULL;
 /*
  * Invoked whenever the routine is registered with ib_register_client()
  * below or when an IB interface is added to the system.  In the former case
@@ -57,22 +59,37 @@ static void
 nrev2_addr_resolved(struct rdma_cm_id *cm_id)
 {
 	int retval;
+	struct ib_pd *ibpd;
+
+	if (!(cm_id->device->attrs.device_cap_flags &
+	    IB_DEVICE_MEM_MGT_EXTENSIONS)) {
+		ERRSPEW("Memory management extensions not supported. 0x%lX\n",
+		    cm_id->device->attrs.device_cap_flags);
+		goto out;
+	}
+
+	ibpd  = ib_alloc_pd(cm_id->device, 0);
+	if (IS_ERR(ibpd)) {
+		ERRSPEW("ib_alloc_pd() failed: 0x%lx\n", PTR_ERR(ibpd));
+		goto out;
+	}
+	glbl_ibpd  = ibpd;
+	glbl_ibdev = cm_id->device;
 
 	retval = rdma_resolve_route(cm_id, 2000);
 	if (retval != 0) {
 		ERRSPEW("rdma_resolve_route() failed w/%d\n", retval);
-		/* rdma_destroy_id(cm_id); */
 	} else {
 		DBGSPEW("Successfully invoked rdma_resolve_route()\n");
 	}
+out:
+	return;
 }
 
 
 static void
 nrev2_route_resolved(struct rdma_cm_id *cm_id)
 {
-	DBGSPEW("\nRoute Resolved!\n");
-	/* rdma_destroy_id(cm_id); */
 }
 
 
@@ -110,9 +127,11 @@ nrev2_init(void)
 	cm_id = NULL;
 	sin4 = (struct sockaddr_in *)&saddr;
 	/* rdmaport = 0x4411; */
-	rdmaport = 0x0E28;
+	/* rdmaport = 0x0E28; */
+	rdmaport = 0x4411;
 	/* ipaddr = 0x0A0A0A0AU; */
-	ipaddr = 0xC90A0A0B;
+	/* ipaddr = 0xC80A0A0BU; */
+	ipaddr = 0xC80A0A0BU;
 
 	retval = ib_register_client(&nvmeofrocev2);
 	if (retval != 0) {
@@ -156,8 +175,17 @@ static void
 nrev2_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
+
+	if (glbl_ibpd != NULL) {
+		DBGSPEW("Invoking ib_dealloc_pd(%p)...\n", glbl_ibpd);
+		ib_dealloc_pd(glbl_ibpd);
+		glbl_ibpd = NULL;
+	}
+
 	if (glbl_cm_id != NULL) {
+		DBGSPEW("Invoking rdma_destroy_id(%p)...\n", glbl_cm_id);
 		rdma_destroy_id(glbl_cm_id);
+		glbl_cm_id = NULL;
 	}
 
 	ib_unregister_client(&nvmeofrocev2);
