@@ -21,7 +21,7 @@
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
 
-static struct rdma_cm_id *glbl_cm_id = NULL;
+static struct rdma_cm_id *glbl_cmid = NULL;
 static struct ib_device  *glbl_ibdev = NULL;
 static struct ib_pd      *glbl_ibpd  = NULL;
 static struct ib_cq      *glbl_ibcq  = NULL;
@@ -62,6 +62,8 @@ nrev2_addr_resolved(struct rdma_cm_id *cm_id)
 	int retval;
 	struct ib_pd *ibpd;
 
+	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
+
 	if (!(cm_id->device->attrs.device_cap_flags &
 	    IB_DEVICE_MEM_MGT_EXTENSIONS)) {
 		ERRSPEW("Memory management extensions not supported. 0x%lX\n",
@@ -87,21 +89,58 @@ out:
 	return;
 }
 
+static void
+nrev2_qphndlr(struct ib_event *ev, void *ctx)
+{
+	DBGSPEW("Event \"%s\" on QP:%p\n", ib_event_msg(ev->event), ctx);
+}
+
+#define MAX_ADMIN_WORK_REQUESTS 32
 
 static void
 nrev2_route_resolved(struct rdma_cm_id *cm_id)
 {
+	int retval;
 	struct ib_cq *ib_cq;
+	struct ib_qp_init_attr init_attr;
 
-	ib_cq = ib_alloc_cq(glbl_ibdev, NULL /* priv */, 17 /* num cqe */,
-	    0 /* completion vector */, IB_POLL_WORKQUEUE);
+	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
+
+	ib_cq = ib_alloc_cq(glbl_ibdev, NULL /* priv */,
+	    (MAX_ADMIN_WORK_REQUESTS* 4) + 1, 0 /* completion vector */,
+	    IB_POLL_WORKQUEUE);
 
 	if (IS_ERR(ib_cq)) {
 		ERRSPEW("ib_alloc_cq() failed with 0x%lX\n", PTR_ERR(ib_cq));
+		goto out;
 	} else {
 		DBGSPEW("ib_alloc_cq() returned %p\n", ib_cq);
 		glbl_ibcq = ib_cq;
 	}
+
+	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL), ("Global(s) NULL"));
+
+	memset(&init_attr, 0, sizeof(init_attr));
+	init_attr.cap.max_send_wr = (MAX_ADMIN_WORK_REQUESTS * 3) + 1;
+	init_attr.cap.max_recv_wr = MAX_ADMIN_WORK_REQUESTS + 1;
+	init_attr.cap.max_recv_sge = 1;
+	init_attr.cap.max_send_sge = 1 + 1;
+	init_attr.qp_type = IB_QPT_RC;
+	init_attr.send_cq = glbl_ibcq;
+	init_attr.recv_cq = glbl_ibcq;
+	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
+
+	init_attr.event_handler = nrev2_qphndlr;
+
+	retval = rdma_create_qp(glbl_cmid, glbl_ibpd, &init_attr);
+	if (retval != 0) {
+		ERRSPEW("rdma_create_qp() failed with %d\n", retval);
+	} else {
+		DBGSPEW("Successfully created QP!\n");
+	}
+
+out:
+	return;
 }
 
 
@@ -110,6 +149,8 @@ nrev2_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 {
 	DBGSPEW("Event \"%s\" returned status \"%d\" for cm_id:%p\n",
 	    rdma_event_msg(event->event), event->status, cm_id);
+
+	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
 
 	switch(event->event) {
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
@@ -173,7 +214,7 @@ nrev2_init(void)
 		goto out;
 	}
 	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
-	glbl_cm_id = cm_id;
+	glbl_cmid = cm_id;
 	cm_id = NULL;
 
 out:
@@ -188,6 +229,11 @@ nrev2_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
 
+	if ((glbl_ibcq != NULL) && (glbl_ibpd != NULL) && (glbl_cmid != NULL)) {
+		DBGSPEW("Invoking rdma_destroy_qp(%p)...\n", glbl_cmid);
+		rdma_destroy_qp(glbl_cmid);
+	}
+
 	if (glbl_ibcq != NULL) {
 		DBGSPEW("Invoking ib_free_cq(%p)...\n", glbl_ibcq);
 		ib_free_cq(glbl_ibcq);
@@ -200,10 +246,10 @@ nrev2_uninit(void)
 		glbl_ibpd = NULL;
 	}
 
-	if (glbl_cm_id != NULL) {
-		DBGSPEW("Invoking rdma_destroy_id(%p)...\n", glbl_cm_id);
-		rdma_destroy_id(glbl_cm_id);
-		glbl_cm_id = NULL;
+	if (glbl_cmid != NULL) {
+		DBGSPEW("Invoking rdma_destroy_id(%p)...\n", glbl_cmid);
+		rdma_destroy_id(glbl_cmid);
+		glbl_cmid = NULL;
 	}
 
 	ib_unregister_client(&nvmeofrocev2);
