@@ -103,6 +103,7 @@ nrev2_route_resolved(struct rdma_cm_id *cm_id)
 	int retval;
 	struct ib_cq *ib_cq;
 	struct ib_qp_init_attr init_attr;
+	struct rdma_conn_param conn_param;
 
 	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
 
@@ -139,6 +140,18 @@ nrev2_route_resolved(struct rdma_cm_id *cm_id)
 		DBGSPEW("Successfully created QP!\n");
 	}
 
+	memset(&conn_param, 0, sizeof conn_param);
+	conn_param.responder_resources = 1;
+	conn_param.initiator_depth = 1;
+	conn_param.retry_count = 1;
+
+	retval = rdma_connect(glbl_cmid, &conn_param);
+	if (retval != 0) {
+		ERRSPEW("rdma_connect() failed with %d\n", retval);
+	} else {
+		DBGSPEW("Successfully rdma_connected()!\n");
+	}
+
 out:
 	return;
 }
@@ -160,6 +173,7 @@ nrev2_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 		nrev2_route_resolved(cm_id);
 		break;
 	default:
+		dump_stack();
 		break;
 	}
 
@@ -230,6 +244,8 @@ nrev2_uninit(void)
 	DBGSPEW("Uninit invoked\n");
 
 	if ((glbl_ibcq != NULL) && (glbl_ibpd != NULL) && (glbl_cmid != NULL)) {
+		DBGSPEW("Invoking rdma_disconnect(%p)...\n", glbl_cmid);
+		rdma_disconnect(glbl_cmid);
 		DBGSPEW("Invoking rdma_destroy_qp(%p)...\n", glbl_cmid);
 		rdma_destroy_qp(glbl_cmid);
 	}
