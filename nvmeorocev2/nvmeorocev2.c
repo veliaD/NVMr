@@ -24,6 +24,7 @@
 static struct rdma_cm_id *glbl_cm_id = NULL;
 static struct ib_device  *glbl_ibdev = NULL;
 static struct ib_pd      *glbl_ibpd  = NULL;
+static struct ib_cq      *glbl_ibcq  = NULL;
 /*
  * Invoked whenever the routine is registered with ib_register_client()
  * below or when an IB interface is added to the system.  In the former case
@@ -90,6 +91,17 @@ out:
 static void
 nrev2_route_resolved(struct rdma_cm_id *cm_id)
 {
+	struct ib_cq *ib_cq;
+
+	ib_cq = ib_alloc_cq(glbl_ibdev, NULL /* priv */, 17 /* num cqe */,
+	    0 /* completion vector */, IB_POLL_WORKQUEUE);
+
+	if (IS_ERR(ib_cq)) {
+		ERRSPEW("ib_alloc_cq() failed with 0x%lX\n", PTR_ERR(ib_cq));
+	} else {
+		DBGSPEW("ib_alloc_cq() returned %p\n", ib_cq);
+		glbl_ibcq = ib_cq;
+	}
 }
 
 
@@ -175,6 +187,12 @@ static void
 nrev2_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
+
+	if (glbl_ibcq != NULL) {
+		DBGSPEW("Invoking ib_free_cq(%p)...\n", glbl_ibcq);
+		ib_free_cq(glbl_ibcq);
+		glbl_ibcq = NULL;
+	}
 
 	if (glbl_ibpd != NULL) {
 		DBGSPEW("Invoking ib_dealloc_pd(%p)...\n", glbl_ibpd);
