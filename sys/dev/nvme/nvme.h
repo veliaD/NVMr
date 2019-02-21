@@ -38,6 +38,8 @@
 #include <sys/param.h>
 #include <sys/endian.h>
 
+#include <dev/nvme/nvme_shared.h>
+
 #define	NVME_PASSTHROUGH_CMD		_IOWR('n', 0, struct nvme_pt_command)
 #define	NVME_RESET_CONTROLLER		_IO('n', 1)
 
@@ -454,25 +456,6 @@ struct nvme_command
 } __packed;
 
 _Static_assert(sizeof(struct nvme_command) == 16 * 4, "bad size for nvme_command");
-
-struct nvme_completion {
-
-	/* dword 0 */
-	uint32_t		cdw0;	/* command-specific */
-
-	/* dword 1 */
-	uint32_t		rsvd1;
-
-	/* dword 2 */
-	uint16_t		sqhd;	/* submission queue head pointer */
-	uint16_t		sqid;	/* submission queue identifier */
-
-	/* dword 3 */
-	uint16_t		cid;	/* command identifier */
-	uint16_t		status;
-} __packed;
-
-_Static_assert(sizeof(struct nvme_completion) == 4 * 4, "bad size for nvme_completion");
 
 struct nvme_dsm_range {
 	uint32_t attributes;

@@ -15,11 +15,24 @@
 #include <rdma/rdma_cm.h>
 #include <rdma/ib_verbs.h>
 
+#include <dev/nvme/nvme_shared.h>
+
 #define SPEWCMN(prefix, format, ...) printf(prefix "%s@%d> " format, \
     __func__, __LINE__, ## __VA_ARGS__)
 #define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
+
+#define MAX_ADMIN_WORK_REQUESTS 32
+
+struct nvmr_ncmplcont {
+	struct nvme_completion	*nvmrsp_nvmecompl;
+	u64			nvmrsp_dmaddr;
+	struct ib_cqe		nvmrsp_cqe;
+};
+
+struct nvmr_ncmplcont ncmplcntarr[MAX_ADMIN_WORK_REQUESTS];
+struct nvme_completion ncmplsarr[MAX_ADMIN_WORK_REQUESTS];
 
 static struct rdma_cm_id *glbl_cmid = NULL;
 static struct ib_device  *glbl_ibdev = NULL;
@@ -50,8 +63,8 @@ nvmr_remove_ibif(struct ib_device *ib_device, void *client_data)
 }
 
 
-static struct ib_client nvmrdma = {
-	.name   = "nvmr_ib_client",
+static struct ib_client nvmr_ib_client = {
+	.name   = "nvmrdma",
 	.add    = nvmr_add_ibif,
 	.remove = nvmr_remove_ibif
 };
@@ -95,12 +108,11 @@ nvmr_qphndlr(struct ib_event *ev, void *ctx)
 	DBGSPEW("Event \"%s\" on QP:%p\n", ib_event_msg(ev->event), ctx);
 }
 
-#define MAX_ADMIN_WORK_REQUESTS 32
-
 static void
 nvmr_route_resolved(struct rdma_cm_id *cm_id)
 {
-	int retval;
+	u64 dmaddr;
+	int retval, count;
 	struct ib_cq *ib_cq;
 	struct ib_qp_init_attr init_attr;
 	struct rdma_conn_param conn_param;
@@ -119,7 +131,8 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 		glbl_ibcq = ib_cq;
 	}
 
-	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL), ("Global(s) NULL"));
+	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL) &&
+	    (glbl_ibdev != NULL), ("Global(s) NULL"));
 
 	memset(&init_attr, 0, sizeof(init_attr));
 	init_attr.cap.max_send_wr = (MAX_ADMIN_WORK_REQUESTS * 3) + 1;
@@ -152,6 +165,17 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 		DBGSPEW("Successfully rdma_connected()!\n");
 	}
 
+	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+		dmaddr =  ib_dma_map_single(glbl_ibdev, ncmplsarr + count,
+		    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
+		if (ib_dma_mapping_error(glbl_ibdev, dmaddr) != 0) {
+			ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
+			break;
+		} else {
+			(ncmplcntarr+count)->nvmrsp_dmaddr = dmaddr;
+		}
+	}
+
 out:
 	return;
 }
@@ -169,9 +193,15 @@ nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
 		nvmr_addr_resolved(cm_id);
 		break;
+
 	case RDMA_CM_EVENT_ROUTE_RESOLVED:
 		nvmr_route_resolved(cm_id);
 		break;
+
+	case RDMA_CM_EVENT_ESTABLISHED:
+	case RDMA_CM_EVENT_DISCONNECTED:
+		break;
+
 	default:
 		dump_stack();
 		break;
@@ -200,7 +230,7 @@ nvmr_init(void)
 	/* ipaddr = 0xC80A0A0BU; */
 	ipaddr = 0xC80A0A0BU;
 
-	retval = ib_register_client(&nvmrdma);
+	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
 		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
 		    retval);
@@ -241,9 +271,17 @@ out:
 static void
 nvmr_uninit(void)
 {
+	int count;
+
 	DBGSPEW("Uninit invoked\n");
 
 	if ((glbl_ibcq != NULL) && (glbl_ibpd != NULL) && (glbl_cmid != NULL)) {
+		DBGSPEW("Invoking ib_dma_unmap_single()s...\n");
+		for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+			ib_dma_unmap_single(glbl_ibdev,
+			    (ncmplcntarr+count)->nvmrsp_dmaddr,
+			    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
+		}
 		DBGSPEW("Invoking rdma_disconnect(%p)...\n", glbl_cmid);
 		rdma_disconnect(glbl_cmid);
 		DBGSPEW("Invoking rdma_destroy_qp(%p)...\n", glbl_cmid);
@@ -268,7 +306,7 @@ nvmr_uninit(void)
 		glbl_cmid = NULL;
 	}
 
-	ib_unregister_client(&nvmrdma);
+	ib_unregister_client(&nvmr_ib_client);
 }
 
 
