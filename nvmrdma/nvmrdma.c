@@ -31,7 +31,7 @@ static struct ib_cq      *glbl_ibcq  = NULL;
  * the routine is invoked for every IB interface already known.
  */
 static void
-nrev2_add_ibif(struct ib_device *ib_device)
+nvmr_add_ibif(struct ib_device *ib_device)
 {
 	DBGSPEW("rdma_node_get_transport(%p)> %d\n", ib_device,
 	    rdma_node_get_transport(ib_device->node_type));
@@ -44,20 +44,20 @@ nrev2_add_ibif(struct ib_device *ib_device)
  * the routine is invoked for every IB interface already known.
  */
 static void
-nrev2_remove_ibif(struct ib_device *ib_device, void *client_data)
+nvmr_remove_ibif(struct ib_device *ib_device, void *client_data)
 {
 	DBGSPEW("%p removed\n", ib_device);
 }
 
 
-static struct ib_client nvmeofrocev2 = {
-	.name   = "nrev2_ib_client",
-	.add    = nrev2_add_ibif,
-	.remove = nrev2_remove_ibif
+static struct ib_client nvmrdma = {
+	.name   = "nvmr_ib_client",
+	.add    = nvmr_add_ibif,
+	.remove = nvmr_remove_ibif
 };
 
 static void
-nrev2_addr_resolved(struct rdma_cm_id *cm_id)
+nvmr_addr_resolved(struct rdma_cm_id *cm_id)
 {
 	int retval;
 	struct ib_pd *ibpd;
@@ -90,7 +90,7 @@ out:
 }
 
 static void
-nrev2_qphndlr(struct ib_event *ev, void *ctx)
+nvmr_qphndlr(struct ib_event *ev, void *ctx)
 {
 	DBGSPEW("Event \"%s\" on QP:%p\n", ib_event_msg(ev->event), ctx);
 }
@@ -98,7 +98,7 @@ nrev2_qphndlr(struct ib_event *ev, void *ctx)
 #define MAX_ADMIN_WORK_REQUESTS 32
 
 static void
-nrev2_route_resolved(struct rdma_cm_id *cm_id)
+nvmr_route_resolved(struct rdma_cm_id *cm_id)
 {
 	int retval;
 	struct ib_cq *ib_cq;
@@ -131,7 +131,7 @@ nrev2_route_resolved(struct rdma_cm_id *cm_id)
 	init_attr.recv_cq = glbl_ibcq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
 
-	init_attr.event_handler = nrev2_qphndlr;
+	init_attr.event_handler = nvmr_qphndlr;
 
 	retval = rdma_create_qp(glbl_cmid, glbl_ibpd, &init_attr);
 	if (retval != 0) {
@@ -158,7 +158,7 @@ out:
 
 
 static int
-nrev2_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
+nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 {
 	DBGSPEW("Event \"%s\" returned status \"%d\" for cm_id:%p\n",
 	    rdma_event_msg(event->event), event->status, cm_id);
@@ -167,10 +167,10 @@ nrev2_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 
 	switch(event->event) {
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
-		nrev2_addr_resolved(cm_id);
+		nvmr_addr_resolved(cm_id);
 		break;
 	case RDMA_CM_EVENT_ROUTE_RESOLVED:
-		nrev2_route_resolved(cm_id);
+		nvmr_route_resolved(cm_id);
 		break;
 	default:
 		dump_stack();
@@ -182,7 +182,7 @@ nrev2_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 
 
 static void
-nrev2_init(void)
+nvmr_init(void)
 {
 	int retval;
 	struct rdma_cm_id *cm_id;
@@ -200,15 +200,15 @@ nrev2_init(void)
 	/* ipaddr = 0xC80A0A0BU; */
 	ipaddr = 0xC80A0A0BU;
 
-	retval = ib_register_client(&nvmeofrocev2);
+	retval = ib_register_client(&nvmrdma);
 	if (retval != 0) {
 		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
 		    retval);
 		goto out;
 	}
 
-	cm_id = rdma_create_id(TD_TO_VNET(curthread), nrev2_cm_handler,
-	    nrev2_init, RDMA_PS_TCP, IB_QPT_RC);
+	cm_id = rdma_create_id(TD_TO_VNET(curthread), nvmr_cm_handler,
+	    nvmr_init, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cm_id)) {
 		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cm_id));
 		cm_id = NULL;
@@ -239,7 +239,7 @@ out:
 
 
 static void
-nrev2_uninit(void)
+nvmr_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
 
@@ -268,12 +268,12 @@ nrev2_uninit(void)
 		glbl_cmid = NULL;
 	}
 
-	ib_unregister_client(&nvmeofrocev2);
+	ib_unregister_client(&nvmrdma);
 }
 
 
-SYSINIT(nrev2, SI_SUB_DRIVERS, SI_ORDER_ANY, nrev2_init, NULL);
-SYSUNINIT(nrev2, SI_SUB_DRIVERS, SI_ORDER_ANY, nrev2_uninit, NULL);
-MODULE_DEPEND(nrev2, linuxkpi, 1, 1, 1);
-MODULE_DEPEND(nrev2, ibcore, 1, 1, 1);
-MODULE_VERSION(nrev2, 1);
+SYSINIT(nvmr, SI_SUB_DRIVERS, SI_ORDER_ANY, nvmr_init, NULL);
+SYSUNINIT(nvmr, SI_SUB_DRIVERS, SI_ORDER_ANY, nvmr_uninit, NULL);
+MODULE_DEPEND(nvmr, linuxkpi, 1, 1, 1);
+MODULE_DEPEND(nvmr, ibcore, 1, 1, 1);
+MODULE_VERSION(nvmr, 1);
