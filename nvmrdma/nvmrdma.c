@@ -26,9 +26,9 @@
 #define MAX_ADMIN_WORK_REQUESTS 32
 
 struct nvmr_ncmplcont {
+	struct ib_cqe		nvmrsp_cqe;
 	struct nvme_completion	*nvmrsp_nvmecompl;
 	u64			nvmrsp_dmaddr;
-	struct ib_cqe		nvmrsp_cqe;
 };
 
 struct nvmr_ncmplcont ncmplcntarr[MAX_ADMIN_WORK_REQUESTS];
@@ -38,6 +38,7 @@ static struct rdma_cm_id *glbl_cmid = NULL;
 static struct ib_device  *glbl_ibdev = NULL;
 static struct ib_pd      *glbl_ibpd  = NULL;
 static struct ib_cq      *glbl_ibcq  = NULL;
+static struct ib_qp      *glbl_ibqp  = NULL;
 /*
  * Invoked whenever the routine is registered with ib_register_client()
  * below or when an IB interface is added to the system.  In the former case
@@ -105,14 +106,13 @@ out:
 static void
 nvmr_qphndlr(struct ib_event *ev, void *ctx)
 {
-	DBGSPEW("Event \"%s\" on QP:%p\n", ib_event_msg(ev->event), ctx);
+	ERRSPEW("Event \"%s\" on QP:%p\n", ib_event_msg(ev->event), ctx);
 }
 
 static void
 nvmr_route_resolved(struct rdma_cm_id *cm_id)
 {
-	u64 dmaddr;
-	int retval, count;
+	int retval;
 	struct ib_cq *ib_cq;
 	struct ib_qp_init_attr init_attr;
 	struct rdma_conn_param conn_param;
@@ -151,6 +151,7 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 		ERRSPEW("rdma_create_qp() failed with %d\n", retval);
 	} else {
 		DBGSPEW("Successfully created QP!\n");
+		glbl_ibqp = glbl_cmid->qp;
 	}
 
 	memset(&conn_param, 0, sizeof conn_param);
@@ -165,17 +166,74 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 		DBGSPEW("Successfully rdma_connected()!\n");
 	}
 
+out:
+	return;
+}
+
+
+static void
+nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
+{
+	struct nvmr_ncmplcont *rcve;
+
+	rcve = container_of(wc->wr_cqe, struct nvmr_ncmplcont, nvmrsp_cqe);
+
+	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
+	    ib_wc_status_msg(wc->status));
+
+	ib_dma_sync_single_for_cpu(glbl_ibdev, rcve->nvmrsp_dmaddr,
+	    sizeof(*(rcve->nvmrsp_nvmecompl)), DMA_FROM_DEVICE);
+}
+
+
+static void
+nvmr_event_established(struct rdma_cm_id *cm_id)
+{
+	struct ib_recv_wr rqwr, *bad_wr;
+	struct nvmr_ncmplcont *rcve;
+	struct ib_sge sgl;
+	int retval, count;
+	u64 dmaddr;
+
+	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
+	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL) &&
+	    (glbl_ibdev != NULL), ("Global(s) NULL"));
+
 	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
 		dmaddr =  ib_dma_map_single(glbl_ibdev, ncmplsarr + count,
 		    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
 		if (ib_dma_mapping_error(glbl_ibdev, dmaddr) != 0) {
 			ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
-			break;
+			goto out;
 		} else {
 			(ncmplcntarr+count)->nvmrsp_dmaddr = dmaddr;
 		}
 	}
 
+	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+		rcve = ncmplcntarr + count;
+
+		memset(&rcve->nvmrsp_nvmecompl, 0,
+		    sizeof(*(rcve->nvmrsp_nvmecompl)));
+
+		sgl.addr   = rcve->nvmrsp_dmaddr;
+		sgl.length = sizeof(*(rcve->nvmrsp_nvmecompl));
+		sgl.lkey   = glbl_ibpd->local_dma_lkey;
+
+		rcve->nvmrsp_cqe.done = nvmr_recv_cmplhndlr;
+
+		rqwr.sg_list = &sgl;
+		rqwr.num_sge = 1;
+		rqwr.wr_cqe  = &rcve->nvmrsp_cqe;
+		rqwr.next    = NULL;
+
+		retval = ib_post_recv(glbl_ibqp, &rqwr, &bad_wr);
+		if (retval != 0) {
+			ERRSPEW("ib_post_recv() failed for #%d with %d\n",
+			    count, retval);
+			goto out;
+		}
+	}
 out:
 	return;
 }
@@ -199,6 +257,9 @@ nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 		break;
 
 	case RDMA_CM_EVENT_ESTABLISHED:
+		nvmr_event_established(cm_id);
+		break;
+
 	case RDMA_CM_EVENT_DISCONNECTED:
 		break;
 
@@ -276,6 +337,9 @@ nvmr_uninit(void)
 	DBGSPEW("Uninit invoked\n");
 
 	if ((glbl_ibcq != NULL) && (glbl_ibpd != NULL) && (glbl_cmid != NULL)) {
+		DBGSPEW("Invoking ib_drain_qp(%p)...\n", glbl_ibqp);
+		ib_drain_qp(glbl_ibqp);
+
 		DBGSPEW("Invoking ib_dma_unmap_single()s...\n");
 		for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
 			ib_dma_unmap_single(glbl_ibdev,
@@ -284,8 +348,12 @@ nvmr_uninit(void)
 		}
 		DBGSPEW("Invoking rdma_disconnect(%p)...\n", glbl_cmid);
 		rdma_disconnect(glbl_cmid);
+	}
+
+	if (glbl_ibqp != NULL) {
 		DBGSPEW("Invoking rdma_destroy_qp(%p)...\n", glbl_cmid);
 		rdma_destroy_qp(glbl_cmid);
+		glbl_ibqp = NULL;
 	}
 
 	if (glbl_ibcq != NULL) {
