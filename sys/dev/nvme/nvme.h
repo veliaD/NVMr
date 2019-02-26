@@ -423,40 +423,6 @@ struct nvme_registers
 
 _Static_assert(sizeof(struct nvme_registers) == 0x1008, "bad size for nvme_registers");
 
-struct nvme_command
-{
-	/* dword 0 */
-	uint8_t opc;		/* opcode */
-	uint8_t fuse;		/* fused operation */
-	uint16_t cid;		/* command identifier */
-
-	/* dword 1 */
-	uint32_t nsid;		/* namespace identifier */
-
-	/* dword 2-3 */
-	uint32_t rsvd2;
-	uint32_t rsvd3;
-
-	/* dword 4-5 */
-	uint64_t mptr;		/* metadata pointer */
-
-	/* dword 6-7 */
-	uint64_t prp1;		/* prp entry 1 */
-
-	/* dword 8-9 */
-	uint64_t prp2;		/* prp entry 2 */
-
-	/* dword 10-15 */
-	uint32_t cdw10;		/* command-specific */
-	uint32_t cdw11;		/* command-specific */
-	uint32_t cdw12;		/* command-specific */
-	uint32_t cdw13;		/* command-specific */
-	uint32_t cdw14;		/* command-specific */
-	uint32_t cdw15;		/* command-specific */
-} __packed;
-
-_Static_assert(sizeof(struct nvme_command) == 16 * 4, "bad size for nvme_command");
-
 struct nvme_dsm_range {
 	uint32_t attributes;
 	uint32_t length;

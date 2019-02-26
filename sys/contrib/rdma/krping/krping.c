@@ -251,8 +251,9 @@ static int krping_cma_event_handler(struct rdma_cm_id *cma_id,
 	int ret;
 	struct krping_cb *cb = cma_id->context;
 
-	DEBUG_LOG("cma_event type %d cma_id %p (%s)\n", event->event, cma_id,
-		  (cma_id == cb->cm_id) ? "parent" : "child");
+	DEBUG_LOG("cma_event type \"%s\"(%d) cma_id %p (%s)\n",
+	    rdma_event_msg(event->event), event->event, cma_id,
+	    (cma_id == cb->cm_id) ? "parent" : "child");
 
 	switch (event->event) {
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
@@ -554,6 +555,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		cb->start_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
 						      &cb->start_dma_addr,
 						      GFP_KERNEL);
+		DEBUG_LOG("start_dma_addr is %p\n", &cb->start_dma_addr);
 		if (!cb->start_buf) {
 			DEBUG_LOG(PFX "start_buf malloc failed\n");
 			ret = -ENOMEM;
@@ -763,6 +765,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf)
 	 * sends have no data.
 	 */
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
+		DEBUG_LOG("Invoking krping_rdma_rkey()\n");
 		rkey = krping_rdma_rkey(cb, buf, !cb->server_invalidate);
 		info->buf = htonll(buf);
 		info->rkey = htonl(rkey);
@@ -1501,6 +1504,7 @@ static void krping_test_client(struct krping_cb *cb)
 			start = 65;
 		cb->start_buf[cb->size - 1] = 0;
 
+		DEBUG_LOG("Invoking krping_format_send()\n");
 		krping_format_send(cb, cb->start_dma_addr);
 		if (cb->state == ERROR) {
 			printk(KERN_ERR PFX "krping_format_send failed\n");
@@ -1515,12 +1519,15 @@ static void krping_test_client(struct krping_cb *cb)
 		/* Wait for server to ACK */
 		wait_event_interruptible(cb->sem, cb->state >= RDMA_WRITE_ADV);
 		if (cb->state != RDMA_WRITE_ADV) {
+			DEBUG_LOG("state:%d not RDMA_WRITE_ADV:%d\n", cb->state,
+			    RDMA_WRITE_ADV);
 			printk(KERN_ERR PFX 
 			       "wait for RDMA_WRITE_ADV state %d\n",
 			       cb->state);
 			break;
 		}
 
+		DEBUG_LOG("Invoking krping_format_send()\n");
 		krping_format_send(cb, cb->rdma_dma_addr);
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
@@ -1561,6 +1568,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
+	DEBUG_LOG("Invoking krping_format_send()\n");
 	krping_format_send(cb, cb->start_dma_addr);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "krping_format_send failed\n");
@@ -1651,6 +1659,7 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
+	DEBUG_LOG("Invoking krping_format_send()\n");
 	krping_format_send(cb, cb->start_dma_addr);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "krping_format_send failed\n");
@@ -1690,6 +1699,7 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
+	DEBUG_LOG("Invoking krping_format_send()\n");
 	krping_format_send(cb, cb->start_dma_addr);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "krping_format_send failed\n");

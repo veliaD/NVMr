@@ -3,9 +3,10 @@
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/bus.h>
+#include <sys/uuid.h>
 #include <sys/conf.h>
-#include <sys/module.h>
 #include <sys/systm.h>
+#include <sys/module.h>
 
 #include <netinet/in.h>
 
@@ -24,15 +25,27 @@
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
 
 #define MAX_ADMIN_WORK_REQUESTS 32
+#define MAX_NVME_RDMA_SEGMENTS 256
 
 struct nvmr_ncmplcont {
 	struct ib_cqe		nvmrsp_cqe;
-	struct nvme_completion	*nvmrsp_nvmecompl;
+	struct nvme_completion *nvmrsp_nvmecompl;
 	u64			nvmrsp_dmaddr;
+};
+
+struct nvmr_ncommcont {
+	struct ib_cqe		nvmsnd_cqe;
+	struct nvme_command     *nvmsnd_nvmecoomm;
+	u64			nvmsnd_dmaddr;
 };
 
 struct nvmr_ncmplcont ncmplcntarr[MAX_ADMIN_WORK_REQUESTS];
 struct nvme_completion ncmplsarr[MAX_ADMIN_WORK_REQUESTS];
+
+struct nvmr_ncommcont ncommcntarr[MAX_ADMIN_WORK_REQUESTS];
+struct nvme_command ncommsarr[MAX_ADMIN_WORK_REQUESTS];
+
+struct ib_mr *nsndmrarr[MAX_ADMIN_WORK_REQUESTS];
 
 static struct rdma_cm_id *glbl_cmid = NULL;
 static struct ib_device  *glbl_ibdev = NULL;
@@ -163,7 +176,7 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 	if (retval != 0) {
 		ERRSPEW("rdma_connect() failed with %d\n", retval);
 	} else {
-		DBGSPEW("Successfully rdma_connected()!\n");
+		DBGSPEW("Wait for \"established\" after rdma_connected()...\n");
 	}
 
 out:
@@ -186,19 +199,45 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 
+struct nvmrdma_connect_data {
+	struct uuid nvmrcd_hostid;
+	uint16_t    nvmrcd_cntlid;
+	uint8_t     nvmrcd_resv0[238];
+	uint8_t     nvmrcd_subnqn[256];
+	uint8_t     nvmrcd_hostnqn[256];
+	uint8_t     nvmrcd_resv1[256];
+} __packed;
+CTASSERT(sizeof(struct nvmrdma_connect_data) == 1024);
+struct nvmrdma_connect_data glbl_ncdata;
+
+#define NVMR_DYNANYCNTLID 0xFFFF
+
+#define HOSTNQN_TEMPLATE "nqn.2014-08.org.nvmexpress:uuid:%s"
+#define DISCOVERY_SUBNQN "nqn.2014-08.org.nvmexpress.discovery"
+
+char nvrdma_host_uuid_string[80];
+struct uuid nvrdma_host_uuid;
+
+
 static void
 nvmr_event_established(struct rdma_cm_id *cm_id)
 {
 	struct ib_recv_wr rqwr, *bad_wr;
+	struct nvme_completion *cmplp;
 	struct nvmr_ncmplcont *rcve;
 	struct ib_sge sgl;
 	int retval, count;
+	struct ib_mr *mr;
 	u64 dmaddr;
 
 	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
 	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL) &&
 	    (glbl_ibdev != NULL), ("Global(s) NULL"));
 
+	/*
+	 * The first loop maps the NVMe completion buffers, the next posts
+	 * them to the IB RCV Q
+	 */
 	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
 		dmaddr =  ib_dma_map_single(glbl_ibdev, ncmplsarr + count,
 		    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
@@ -208,13 +247,15 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 		} else {
 			(ncmplcntarr+count)->nvmrsp_dmaddr = dmaddr;
 		}
+		ib_dma_sync_single_for_device(glbl_ibdev, dmaddr,
+		    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
 	}
-
 	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
 		rcve = ncmplcntarr + count;
+		cmplp = ncmplsarr + count;
 
-		memset(&rcve->nvmrsp_nvmecompl, 0,
-		    sizeof(*(rcve->nvmrsp_nvmecompl)));
+		memset(cmplp, 0, sizeof(*cmplp));
+		rcve->nvmrsp_nvmecompl = cmplp;
 
 		sgl.addr   = rcve->nvmrsp_dmaddr;
 		sgl.length = sizeof(*(rcve->nvmrsp_nvmecompl));
@@ -234,6 +275,59 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 			goto out;
 		}
 	}
+	DBGSPEW("Successfully posted receive buffers for NVMe completions\n");
+
+
+	/*
+	 * Allocate MR structures for use by any data that the NVMe commands
+	 * posted to the IB SND Q
+	 */
+	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+		mr = ib_alloc_mr(glbl_ibpd, IB_MR_TYPE_MEM_REG,
+		    MAX_NVME_RDMA_SEGMENTS);
+		if (IS_ERR(mr)) {
+			ERRSPEW("ib_alloc_mr() failed with \"%ld\" for "
+			    "count #%d\n", PTR_ERR(mr), count);
+			goto out;
+		}
+		nsndmrarr[count] = mr;
+	}
+	DBGSPEW("Successfully allocated MRs for Admin commands\n");
+
+	/*
+	 * The next loop maps the NVMe command buffers
+	 */
+	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+		dmaddr =  ib_dma_map_single(glbl_ibdev, ncommsarr + count,
+		    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
+		if (ib_dma_mapping_error(glbl_ibdev, dmaddr) != 0) {
+			ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
+			goto out;
+		} else {
+			(ncommcntarr+count)->nvmsnd_dmaddr = dmaddr;
+		}
+		/* Retain ownership with the driver until we actually use it */
+		ib_dma_sync_single_for_cpu(glbl_ibdev, dmaddr,
+		    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
+	}
+/**********
+ We need to send out a CONNECT message and have that responded to.  We already
+ have the NVMe Completion buffers posted at this point.  The NVMe Command
+ buffer has been mapped but not been relinquished for use by the HCA.
+ **********/
+
+	kern_uuidgen(&nvrdma_host_uuid, 1);
+	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
+	    &nvrdma_host_uuid);
+	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
+
+	glbl_ncdata.nvmrcd_hostid = nvrdma_host_uuid;
+	glbl_ncdata.nvmrcd_cntlid = htole16(NVMR_DYNANYCNTLID);
+	snprintf(glbl_ncdata.nvmrcd_subnqn, sizeof(glbl_ncdata.nvmrcd_subnqn),
+	    DISCOVERY_SUBNQN);
+	snprintf(glbl_ncdata.nvmrcd_hostnqn, sizeof(glbl_ncdata.nvmrcd_hostnqn),
+	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string); 
+	
 out:
 	return;
 }
@@ -336,16 +430,35 @@ nvmr_uninit(void)
 
 	DBGSPEW("Uninit invoked\n");
 
+	DBGSPEW("Invoking ib_dereg_mr() on non-NULL MR elements...\n");
+	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+		if (nsndmrarr[count] == NULL) {
+			continue;
+		}
+		ib_dereg_mr(nsndmrarr[count]);
+		nsndmrarr[count] = NULL;
+	}
+
 	if ((glbl_ibcq != NULL) && (glbl_ibpd != NULL) && (glbl_cmid != NULL)) {
 		DBGSPEW("Invoking ib_drain_qp(%p)...\n", glbl_ibqp);
 		ib_drain_qp(glbl_ibqp);
 
-		DBGSPEW("Invoking ib_dma_unmap_single()s...\n");
+		DBGSPEW("Invoking ib_dma_unmap_single()s on NVMe "
+		    "completions...\n");
 		for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
 			ib_dma_unmap_single(glbl_ibdev,
 			    (ncmplcntarr+count)->nvmrsp_dmaddr,
 			    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
 		}
+
+		DBGSPEW("Invoking ib_dma_unmap_single()s on NVMe "
+		    "commands...\n");
+		for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
+			ib_dma_unmap_single(glbl_ibdev,
+			    (ncommcntarr+count)->nvmsnd_dmaddr,
+			    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
+		}
+
 		DBGSPEW("Invoking rdma_disconnect(%p)...\n", glbl_cmid);
 		rdma_disconnect(glbl_cmid);
 	}
