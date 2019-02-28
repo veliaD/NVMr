@@ -35,7 +35,7 @@ struct nvmr_ncmplcont {
 
 struct nvmr_ncommcont {
 	struct ib_cqe		nvmsnd_cqe;
-	struct nvme_command     *nvmsnd_nvmecoomm;
+	struct nvme_command    *nvmsnd_nvmecomm;
 	u64			nvmsnd_dmaddr;
 };
 
@@ -188,6 +188,7 @@ static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct nvmr_ncmplcont *rcve;
+	struct nvme_completion *c;
 
 	rcve = container_of(wc->wr_cqe, struct nvmr_ncmplcont, nvmrsp_cqe);
 
@@ -196,8 +197,19 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 
 	ib_dma_sync_single_for_cpu(glbl_ibdev, rcve->nvmrsp_dmaddr,
 	    sizeof(*(rcve->nvmrsp_nvmecompl)), DMA_FROM_DEVICE);
+
+	if (wc->status == IB_WC_SUCCESS) {
+		c = rcve->nvmrsp_nvmecompl;
+		DBGSPEW("c:0x%08X r:0x%08X hd:0x%04hX id:0x%04hX cid:0x%04hX "
+		    "status:0x%04hX\n", c->cdw0, c->rsvd1, c->sqhd, c->sqid,
+		    c->cid, c->status);
+	}
 }
 
+
+#define MAX_SGS	2
+#define CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(data_structure) \
+    CTASSERT(MAX_SGS >= ((sizeof(data_structure)/PAGE_SIZE)+1))
 
 struct nvmrdma_connect_data {
 	struct uuid nvmrcd_hostid;
@@ -208,8 +220,11 @@ struct nvmrdma_connect_data {
 	uint8_t     nvmrcd_resv1[256];
 } __packed;
 CTASSERT(sizeof(struct nvmrdma_connect_data) == 1024);
+CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
+
 struct nvmrdma_connect_data glbl_ncdata;
 
+#define NVMR_FOURK (4096)
 #define NVMR_DYNANYCNTLID 0xFFFF
 
 #define HOSTNQN_TEMPLATE "nqn.2014-08.org.nvmexpress:uuid:%s"
@@ -218,16 +233,80 @@ struct nvmrdma_connect_data glbl_ncdata;
 char nvrdma_host_uuid_string[80];
 struct uuid nvrdma_host_uuid;
 
+struct ib_cqe regcqe, sndcqe;
+
+static void
+nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
+{
+	struct ib_cqe *rcve;
+
+	rcve = wc->wr_cqe;
+
+	DBGSPEW("regcqe:%p, rcve:%p, wc_status:\"%s\"\n", &regcqe, rcve,
+	    ib_wc_status_msg(wc->status));
+}
+
+
+typedef struct {
+	uint8_t  nvmrcon_opcode;
+	uint8_t  nvmrcon_sgl_fuse;
+	uint16_t nvmrcon_cid;
+	uint8_t  nvmrcon_fctype; 
+	uint8_t  nvmrcon_resv1[19]; 
+	struct {
+		uint64_t nvmrconk_address; 
+		uint8_t  nvmrconk_length[3]; 
+		uint32_t nvmrconk_key; 
+		uint8_t  nvmrconk_sgl_identifier; 
+	} __packed;
+	uint16_t nvmrcon_recfmt;
+	uint16_t nvmrcon_qid;
+	uint16_t nvmrcon_sqsize; 
+	uint8_t  nvmrcon_cattr;
+	uint8_t  nvmrcon_resv2;
+	uint32_t nvmrcon_kato;
+	uint8_t  nvmrcon_resv3[12];
+} __packed nvmr_connect_t;
+CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
+
+nvmr_connect_t glbl_connect;
+#define NVMR_DEFAULT_KATO 0x1D4C0
+#define NVMF_FCTYPE_CONNECT 0x1
+#define NVMR_PSDT_SHIFT 6
+#define NVMF_SINGLE_BUF_SGL (0x1 << NVMR_PSDT_SHIFT)
+#define NVMF_MULT_SEG_SGL   (0x2 << NVMR_PSDT_SHIFT)
+#define NVMF_KEYED_SGL_NO_INVALIDATE 0x40
+#define NVMF_KEYED_SGL_INVALIDATE    0x4F
+
+
+static void
+nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
+{
+	struct ib_cqe *rcve;
+
+	rcve = wc->wr_cqe;
+
+	DBGSPEW("ncommcntarr:%p, rcve:%p, wc_status:\"%s\"\n", &ncommcntarr,
+	    rcve, ib_wc_status_msg(wc->status));
+}
+
 
 static void
 nvmr_event_established(struct rdma_cm_id *cm_id)
 {
-	struct ib_recv_wr rqwr, *bad_wr;
+	int retval, count, offset, n, nn, nnn;
+	struct scatterlist scl[MAX_SGS], *s;
+	struct ib_recv_wr rcvwr, *badrcvwrp;
+	struct ib_send_wr sndwr, *badsndwrp;
 	struct nvme_completion *cmplp;
 	struct nvmr_ncmplcont *rcve;
+	struct nvmr_ncommcont *snde;
+	nvmr_connect_t *connectp;
+	struct ib_reg_wr regwr;
+	size_t len, translen;
 	struct ib_sge sgl;
-	int retval, count;
 	struct ib_mr *mr;
+	void *cbuf;
 	u64 dmaddr;
 
 	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
@@ -255,6 +334,8 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 		cmplp = ncmplsarr + count;
 
 		memset(cmplp, 0, sizeof(*cmplp));
+		memset(&rcvwr, 0, sizeof(rcvwr));
+		memset(&sgl, 0, sizeof(sgl));
 		rcve->nvmrsp_nvmecompl = cmplp;
 
 		sgl.addr   = rcve->nvmrsp_dmaddr;
@@ -263,12 +344,12 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 
 		rcve->nvmrsp_cqe.done = nvmr_recv_cmplhndlr;
 
-		rqwr.sg_list = &sgl;
-		rqwr.num_sge = 1;
-		rqwr.wr_cqe  = &rcve->nvmrsp_cqe;
-		rqwr.next    = NULL;
+		rcvwr.sg_list = &sgl;
+		rcvwr.num_sge = 1;
+		rcvwr.wr_cqe  = &rcve->nvmrsp_cqe;
+		rcvwr.next    = NULL;
 
-		retval = ib_post_recv(glbl_ibqp, &rqwr, &bad_wr);
+		retval = ib_post_recv(glbl_ibqp, &rcvwr, &badrcvwrp);
 		if (retval != 0) {
 			ERRSPEW("ib_post_recv() failed for #%d with %d\n",
 			    count, retval);
@@ -310,24 +391,143 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 		ib_dma_sync_single_for_cpu(glbl_ibdev, dmaddr,
 		    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
 	}
-/**********
- We need to send out a CONNECT message and have that responded to.  We already
- have the NVMe Completion buffers posted at this point.  The NVMe Command
- buffer has been mapped but not been relinquished for use by the HCA.
- **********/
 
+	/* Generate UUID et al for CONNECT Data */
 	kern_uuidgen(&nvrdma_host_uuid, 1);
 	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
 	    &nvrdma_host_uuid);
 	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
-
 	glbl_ncdata.nvmrcd_hostid = nvrdma_host_uuid;
 	glbl_ncdata.nvmrcd_cntlid = htole16(NVMR_DYNANYCNTLID);
 	snprintf(glbl_ncdata.nvmrcd_subnqn, sizeof(glbl_ncdata.nvmrcd_subnqn),
 	    DISCOVERY_SUBNQN);
 	snprintf(glbl_ncdata.nvmrcd_hostnqn, sizeof(glbl_ncdata.nvmrcd_hostnqn),
 	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string); 
-	
+
+	/* Map the CONNECT Data for remote access */
+	/* 1) Translate to a scatterlist array of pages a la iser_buf_to_sg() */
+	translen = sizeof(glbl_ncdata);
+	cbuf = &glbl_ncdata;
+	for (n = 0; (0 < translen) && (n < MAX_SGS); n++, translen -= len) {
+		s = scl + n;
+		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
+		len = min(PAGE_SIZE - offset, translen);
+		sg_set_buf(s, cbuf, len);
+		cbuf = (void *)(((u64)cbuf) + (u64)len);
+	}
+	if (translen != 0) {
+		ERRSPEW("Could not complete translation of CONNECT Data. n:%d "
+		    "translen:%zu\n", n, translen);
+		goto out;
+	} else {
+		DBGSPEW("&glbl_ncdata is 0x%p\n", &glbl_ncdata);
+		for (count = 0; count < n; count++) {
+			DBGSPEW("scl[%d](hex) p:%16lX o:%8X l:%8X a:%16lX\n",
+			count,
+			scl[count].page_link,
+			scl[count].offset,
+			scl[count].length,
+			scl[count].address);
+		}
+	}
+
+	/* 2) Map the scatterlist array per the restrictions of the IB device */
+	nn = ib_dma_map_sg(glbl_ibdev, scl, n, DMA_TO_DEVICE);
+	if (nn < 1) {
+		ERRSPEW("ib_dma_map_sg() failed with count:%d\n", nn);
+		goto out;
+	} else {
+		DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn);
+	}
+
+	/* 3) Map the scatterlist elements to the MR  */
+	mr = nsndmrarr[0];
+	nnn = ib_map_mr_sg(mr, scl, nn, NULL, NVMR_FOURK);
+	if (nnn < nn) {
+		ERRSPEW("ib_map_mr_sg() failed. nnn:%d < nn:%d\n", nnn, nn);
+		goto out;
+	} else {
+		DBGSPEW("ib_map_mr_sg() returned a count of %d\n", nnn);
+	}
+	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
+
+	/* 4) Craft the memory registration work-request and post it */
+	regcqe.done = nvmr_rg_done;
+	memset(&regwr, 0, sizeof(regwr));
+	/* NB the Registration work-request contains a Send work-request */
+	regwr.wr.num_sge = 0; /* No send/recv buffers are being posted */
+	regwr.wr.send_flags = IB_SEND_SIGNALED; /* Invoke .done when done */
+	regwr.wr.opcode = IB_WR_REG_MR;
+	regwr.wr.wr_cqe = &regcqe;
+	regwr.wr.next = NULL;
+
+	regwr.access = IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ |
+	    IB_ACCESS_REMOTE_WRITE;
+	regwr.key = mr->rkey;
+	regwr.mr = mr;
+
+	badsndwrp = NULL;
+	retval = ib_post_send(glbl_ibqp, &regwr.wr, &badsndwrp);
+	if (retval != 0) {
+		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
+		    &regwr, retval, badsndwrp);
+		goto out;
+	} else {
+		DBGSPEW("ib_post_send() returned without incident\n");
+	}
+
+	/* 5) Craft an NVMeoF Connect Command and post it */
+	ncommcntarr[0].nvmsnd_nvmecomm = &ncommsarr[0];
+	snde = &ncommcntarr[0];
+	KASSERT(sizeof(*connectp) == sizeof(*snde->nvmsnd_nvmecomm), ("Hm..."));
+	connectp = (nvmr_connect_t *)snde->nvmsnd_nvmecomm;
+	memset(connectp, 0, sizeof(*connectp));
+
+	connectp->nvmrcon_opcode = NVME_OPC_FABRIC_COMMAND;
+	connectp->nvmrcon_sgl_fuse = NVMF_SINGLE_BUF_SGL;
+	connectp->nvmrcon_fctype = NVMF_FCTYPE_CONNECT;
+
+	connectp->nvmrconk_address = htole64(mr->iova);
+	connectp->nvmrconk_length[0] = htole32(mr->length) & 0xFF;
+	connectp->nvmrconk_length[1] = (htole32(mr->length)>>8) & 0xFF;
+	connectp->nvmrconk_length[2] = (htole32(mr->length)>>16) & 0xFF;
+	connectp->nvmrconk_key = htole32(mr->rkey);
+	connectp->nvmrconk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
+
+	connectp->nvmrcon_recfmt = 0;
+	connectp->nvmrcon_qid = 0;
+	connectp->nvmrcon_sqsize = MAX_ADMIN_WORK_REQUESTS - 1; /* 0 based */
+	connectp->nvmrcon_cattr = 0;
+	connectp->nvmrcon_kato = NVMR_DEFAULT_KATO;
+
+	memset(&sndwr, 0, sizeof(sndwr));
+	memset(&sgl, 0, sizeof(sgl));
+
+	sgl.addr   = snde->nvmsnd_dmaddr;
+	sgl.length = sizeof(*(snde->nvmsnd_nvmecomm));
+	sgl.lkey   = glbl_ibpd->local_dma_lkey;
+
+	snde->nvmsnd_cqe.done = nvmr_snd_done;
+
+	sndwr.next  = NULL;
+	sndwr.wr_cqe = &snde->nvmsnd_cqe;
+	sndwr.sg_list = &sgl;
+	sndwr.num_sge = 1;
+	sndwr.opcode = IB_WR_SEND;
+	sndwr.send_flags = IB_SEND_SIGNALED;
+	ib_dma_sync_single_for_device(glbl_ibdev, snde->nvmsnd_dmaddr,
+	    sizeof(*(snde->nvmsnd_nvmecomm)), DMA_TO_DEVICE);
+
+	badsndwrp = NULL;
+	retval = ib_post_send(glbl_ibqp, &sndwr, &badsndwrp);
+	if (retval != 0) {
+		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
+		    &sndwr, retval, badsndwrp);
+		goto out;
+	} else {
+		DBGSPEW("ib_post_send(&sndwr) returned without incident\n");
+	}
+
 out:
 	return;
 }
@@ -383,7 +583,7 @@ nvmr_init(void)
 	rdmaport = 0x4411;
 	/* ipaddr = 0x0A0A0A0AU; */
 	/* ipaddr = 0xC80A0A0BU; */
-	ipaddr = 0xC80A0A0BU;
+	ipaddr = 0xC257010AU;
 
 	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
