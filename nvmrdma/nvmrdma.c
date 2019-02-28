@@ -83,6 +83,9 @@ static struct ib_client nvmr_ib_client = {
 	.remove = nvmr_remove_ibif
 };
 
+/*
+ * Invoked on event RDMA_CM_EVENT_ADDR_RESOLVED.  Invokes rdma_resolve_route()
+ */
 static void
 nvmr_addr_resolved(struct rdma_cm_id *cm_id)
 {
@@ -122,6 +125,22 @@ nvmr_qphndlr(struct ib_event *ev, void *ctx)
 	ERRSPEW("Event \"%s\" on QP:%p\n", ib_event_msg(ev->event), ctx);
 }
 
+typedef struct {
+	uint16_t nvmrcr_recfmt;
+	uint16_t nvmrcr_qid;
+	uint16_t nvmrcr_hrqsize;
+	uint16_t nvmrcr_hsqsize;
+	uint8_t  nvmrcr_resv0[24];
+} __packed nvmr_rdma_cm_request_t;
+CTASSERT(sizeof(nvmr_rdma_cm_request_t) == 32);
+
+/*
+ * Invoked on event RDMA_CM_EVENT_ROUTE_RESOLVED.
+ * A Queue-Pair to the RDMA sub-system is created along with a Completion-Queue
+ * for its use internally.  An RDMA connection is established which generates
+ * the first packets on the wite.  The NVMeoF RDMA spec requires that the
+ * initiator pass along a parameters block in the private data section.
+ */
 static void
 nvmr_route_resolved(struct rdma_cm_id *cm_id)
 {
@@ -129,6 +148,7 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 	struct ib_cq *ib_cq;
 	struct ib_qp_init_attr init_attr;
 	struct rdma_conn_param conn_param;
+	nvmr_rdma_cm_request_t privdata;
 
 	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
 
@@ -167,10 +187,23 @@ nvmr_route_resolved(struct rdma_cm_id *cm_id)
 		glbl_ibqp = glbl_cmid->qp;
 	}
 
-	memset(&conn_param, 0, sizeof conn_param);
-	conn_param.responder_resources = 1;
-	conn_param.initiator_depth = 1;
-	conn_param.retry_count = 1;
+	/*
+	 * NB: The conn_param has to pass in an NVMeoF RDMA Private Data
+	 * structure for the NVMeoF RDMA target to setup its Q sizes et al.
+	 */
+	memset(&conn_param, 0, sizeof(conn_param));
+	memset(&privdata, 0, sizeof(privdata));
+	privdata.nvmrcr_recfmt = 0;
+	privdata.nvmrcr_qid = 0;
+	privdata.nvmrcr_hrqsize = htole16(MAX_ADMIN_WORK_REQUESTS);
+	privdata.nvmrcr_hsqsize = htole16(MAX_ADMIN_WORK_REQUESTS - 1);
+	conn_param.responder_resources = glbl_ibdev->attrs.max_qp_rd_atom;
+	conn_param.qp_num = glbl_ibqp->qp_num;
+	conn_param.flow_control = 1;
+	conn_param.retry_count = 3;
+	conn_param.rnr_retry_count = 3;
+	conn_param.private_data = &privdata;
+	conn_param.private_data_len = sizeof(privdata);
 
 	retval = rdma_connect(glbl_cmid, &conn_param);
 	if (retval != 0) {
@@ -183,6 +216,23 @@ out:
 	return;
 }
 
+
+#define MAX_SGS	2
+#define CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(data_structure) \
+    CTASSERT(MAX_SGS >= ((sizeof(data_structure)/PAGE_SIZE)+1))
+
+struct nvmrdma_connect_data {
+	struct uuid nvmrcd_hostid;
+	uint16_t    nvmrcd_cntlid;
+	uint8_t     nvmrcd_resv0[238];
+	uint8_t     nvmrcd_subnqn[256];
+	uint8_t     nvmrcd_hostnqn[256];
+	uint8_t     nvmrcd_resv1[256];
+} __packed;
+CTASSERT(sizeof(struct nvmrdma_connect_data) == 1024);
+CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
+
+struct nvmrdma_connect_data glbl_ncdata;
 
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
@@ -203,26 +253,13 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 		DBGSPEW("c:0x%08X r:0x%08X hd:0x%04hX id:0x%04hX cid:0x%04hX "
 		    "status:0x%04hX\n", c->cdw0, c->rsvd1, c->sqhd, c->sqid,
 		    c->cid, c->status);
+		if (c->status == 0) {
+			DBGSPEW("NVMe Command succeeded for Host \"%s\"\n",
+			    glbl_ncdata.nvmrcd_hostnqn);
+		}
 	}
 }
 
-
-#define MAX_SGS	2
-#define CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(data_structure) \
-    CTASSERT(MAX_SGS >= ((sizeof(data_structure)/PAGE_SIZE)+1))
-
-struct nvmrdma_connect_data {
-	struct uuid nvmrcd_hostid;
-	uint16_t    nvmrcd_cntlid;
-	uint8_t     nvmrcd_resv0[238];
-	uint8_t     nvmrcd_subnqn[256];
-	uint8_t     nvmrcd_hostnqn[256];
-	uint8_t     nvmrcd_resv1[256];
-} __packed;
-CTASSERT(sizeof(struct nvmrdma_connect_data) == 1024);
-CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
-
-struct nvmrdma_connect_data glbl_ncdata;
 
 #define NVMR_FOURK (4096)
 #define NVMR_DYNANYCNTLID 0xFFFF
@@ -251,17 +288,17 @@ typedef struct {
 	uint8_t  nvmrcon_opcode;
 	uint8_t  nvmrcon_sgl_fuse;
 	uint16_t nvmrcon_cid;
-	uint8_t  nvmrcon_fctype; 
-	uint8_t  nvmrcon_resv1[19]; 
+	uint8_t  nvmrcon_fctype;
+	uint8_t  nvmrcon_resv1[19];
 	struct {
-		uint64_t nvmrconk_address; 
-		uint8_t  nvmrconk_length[3]; 
-		uint32_t nvmrconk_key; 
-		uint8_t  nvmrconk_sgl_identifier; 
+		uint64_t nvmrconk_address;
+		uint8_t  nvmrconk_length[3];
+		uint32_t nvmrconk_key;
+		uint8_t  nvmrconk_sgl_identifier;
 	} __packed;
 	uint16_t nvmrcon_recfmt;
 	uint16_t nvmrcon_qid;
-	uint16_t nvmrcon_sqsize; 
+	uint16_t nvmrcon_sqsize;
 	uint8_t  nvmrcon_cattr;
 	uint8_t  nvmrcon_resv2;
 	uint32_t nvmrcon_kato;
@@ -271,6 +308,7 @@ CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
 
 nvmr_connect_t glbl_connect;
 #define NVMR_DEFAULT_KATO 0x1D4C0
+#define NVMR_DISCOVERY_KATO 0x0 /* DISCOVERY KATO has to be 0 */
 #define NVMF_FCTYPE_CONNECT 0x1
 #define NVMR_PSDT_SHIFT 6
 #define NVMF_SINGLE_BUF_SGL (0x1 << NVMR_PSDT_SHIFT)
@@ -291,6 +329,23 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 
+/*
+ * Invoked on event RDMA_CM_EVENT_ESTABLISHED after the rdma_connect() and
+ * associated data are accepted by the NVMeoF target.
+ * Now we setup the Queue-Pair for Admin use:
+ * 1) The Receive Queue will only receive nvme_completion messages
+ * 2) The Send Queue will take nvme_command messages, with optional data
+ *    represented in an SGL.  The latter means that Memory Registrations will
+ *    be needed to describe the location of the data which will be sent over
+ *    to the target. The target will RDMA this data over to itself.
+ * 3) Posting Recv buffers (nvme_completion) and Send buffers (nvme_command) is
+ *    collectively called posting Work Requests (WRs).  When posting WRs it
+ *    is necessary to post a Completion Queue Entry structure to the RDMA
+ *    stack which will be used internally in its CQ, unless we don't care
+ *    to be notified of the WR having completed and the completion status.
+ * 4) Memory Registrations are made by posting Memory Registration (MR) WRs
+ *    to the Send Queue
+ */
 static void
 nvmr_event_established(struct rdma_cm_id *cm_id)
 {
@@ -361,7 +416,7 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 
 	/*
 	 * Allocate MR structures for use by any data that the NVMe commands
-	 * posted to the IB SND Q
+	 * posted to the IB SND Q need to describe
 	 */
 	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
 		mr = ib_alloc_mr(glbl_ibpd, IB_MR_TYPE_MEM_REG,
@@ -392,7 +447,15 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 		    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
 	}
 
-	/* Generate UUID et al for CONNECT Data */
+
+	/*
+	 * Craft a CONNECT command to begin discovery: Steps 1 through 5
+	 */
+
+	/*
+	 * 1) Generate UUID et al for CONNECT Data.  Translate to a scatterlist
+	 *    array of pages a la iser_buf_to_sg()
+	 */
 	kern_uuidgen(&nvrdma_host_uuid, 1);
 	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
 	    &nvrdma_host_uuid);
@@ -402,10 +465,8 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 	snprintf(glbl_ncdata.nvmrcd_subnqn, sizeof(glbl_ncdata.nvmrcd_subnqn),
 	    DISCOVERY_SUBNQN);
 	snprintf(glbl_ncdata.nvmrcd_hostnqn, sizeof(glbl_ncdata.nvmrcd_hostnqn),
-	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string); 
+	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string);
 
-	/* Map the CONNECT Data for remote access */
-	/* 1) Translate to a scatterlist array of pages a la iser_buf_to_sg() */
 	translen = sizeof(glbl_ncdata);
 	cbuf = &glbl_ncdata;
 	for (n = 0; (0 < translen) && (n < MAX_SGS); n++, translen -= len) {
@@ -498,7 +559,7 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 	connectp->nvmrcon_qid = 0;
 	connectp->nvmrcon_sqsize = MAX_ADMIN_WORK_REQUESTS - 1; /* 0 based */
 	connectp->nvmrcon_cattr = 0;
-	connectp->nvmrcon_kato = NVMR_DEFAULT_KATO;
+	connectp->nvmrcon_kato = NVMR_DISCOVERY_KATO;
 
 	memset(&sndwr, 0, sizeof(sndwr));
 	memset(&sgl, 0, sizeof(sgl));
@@ -582,8 +643,9 @@ nvmr_init(void)
 	/* rdmaport = 0x0E28; */
 	rdmaport = 0x4411;
 	/* ipaddr = 0x0A0A0A0AU; */
-	/* ipaddr = 0xC80A0A0BU; */
-	ipaddr = 0xC257010AU;
+	/* ipaddr = 0xC80A0A0BU; 11.10.10.200 */
+	/* ipaddr = 0xC257010AU; 10.1.87.194 */
+	ipaddr = 0xC80A0A0BU;
 
 	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
