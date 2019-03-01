@@ -343,7 +343,7 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
  *    is necessary to post a Completion Queue Entry structure to the RDMA
  *    stack which will be used internally in its CQ, unless we don't care
  *    to be notified of the WR having completed and the completion status.
- * 4) Memory Registrations are made by posting Memory Registration (MR) WRs
+ * 4) Memory Region (MR) Registrations are made by posting MR registration WRs
  *    to the Send Queue
  */
 static void
@@ -512,7 +512,7 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 	}
 	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
 
-	/* 4) Craft the memory registration work-request and post it */
+	/* 4) Craft the memory registration work-request but don't post it */
 	regcqe.done = nvmr_rg_done;
 	memset(&regwr, 0, sizeof(regwr));
 	/* NB the Registration work-request contains a Send work-request */
@@ -527,6 +527,7 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 	regwr.key = mr->rkey;
 	regwr.mr = mr;
 
+#if 0 /* Commented out so we can chain the regwr to the sndwr below */
 	badsndwrp = NULL;
 	retval = ib_post_send(glbl_ibqp, &regwr.wr, &badsndwrp);
 	if (retval != 0) {
@@ -536,6 +537,7 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 	} else {
 		DBGSPEW("ib_post_send() returned without incident\n");
 	}
+#endif /* 0 */
 
 	/* 5) Craft an NVMeoF Connect Command and post it */
 	ncommcntarr[0].nvmsnd_nvmecomm = &ncommsarr[0];
@@ -570,7 +572,7 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 
 	snde->nvmsnd_cqe.done = nvmr_snd_done;
 
-	sndwr.next  = NULL;
+	sndwr.next  = &regwr.wr; /* Chain the MR registration WR into send WR */
 	sndwr.wr_cqe = &snde->nvmsnd_cqe;
 	sndwr.sg_list = &sgl;
 	sndwr.num_sge = 1;
@@ -645,7 +647,7 @@ nvmr_init(void)
 	/* ipaddr = 0x0A0A0A0AU; */
 	/* ipaddr = 0xC80A0A0BU; 11.10.10.200 */
 	/* ipaddr = 0xC257010AU; 10.1.87.194 */
-	ipaddr = 0xC80A0A0BU;
+	ipaddr = 0xC257010AU;
 
 	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
