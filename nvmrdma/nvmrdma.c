@@ -1,3 +1,5 @@
+#undef VELOLD
+
 #include <sys/cdefs.h>
 #include <sys/types.h>
 #include <sys/param.h>
@@ -23,6 +25,8 @@
 #define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
+
+#ifdef VELOLD
 
 #define MAX_ADMIN_WORK_REQUESTS 32
 #define MAX_NVME_RDMA_SEGMENTS 256
@@ -52,37 +56,6 @@ static struct ib_device  *glbl_ibdev = NULL;
 static struct ib_pd      *glbl_ibpd  = NULL;
 static struct ib_cq      *glbl_ibcq  = NULL;
 static struct ib_qp      *glbl_ibqp  = NULL;
-/*
- * Invoked whenever the routine is registered with ib_register_client()
- * below or when an IB interface is added to the system.  In the former case
- * the routine is invoked for every IB interface already known.
- */
-static void
-nvmr_add_ibif(struct ib_device *ib_device)
-{
-	DBGSPEW("rdma_node_get_transport(%p)> %d\n", ib_device,
-	    rdma_node_get_transport(ib_device->node_type));
-}
-
-
-/*
- * Invoked whenever the routine is unregistered with ib_unregister_client()
- * below or when an IB interface is removed from the system.  In the former case
- * the routine is invoked for every IB interface already known.
- */
-static void
-nvmr_remove_ibif(struct ib_device *ib_device, void *client_data)
-{
-	DBGSPEW("%p removed\n", ib_device);
-}
-
-
-static struct ib_client nvmr_ib_client = {
-	.name   = "nvmrdma",
-	.add    = nvmr_add_ibif,
-	.remove = nvmr_remove_ibif
-};
-
 /*
  * Invoked on event RDMA_CM_EVENT_ADDR_RESOLVED.  Invokes rdma_resolve_route()
  */
@@ -527,18 +500,6 @@ nvmr_event_established(struct rdma_cm_id *cm_id)
 	regwr.key = mr->rkey;
 	regwr.mr = mr;
 
-#if 0 /* Commented out so we can chain the regwr to the sndwr below */
-	badsndwrp = NULL;
-	retval = ib_post_send(glbl_ibqp, &regwr.wr, &badsndwrp);
-	if (retval != 0) {
-		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
-		    &regwr, retval, badsndwrp);
-		goto out;
-	} else {
-		DBGSPEW("ib_post_send() returned without incident\n");
-	}
-#endif /* 0 */
-
 	/* 5) Craft an NVMeoF Connect Command and post it */
 	ncommcntarr[0].nvmsnd_nvmecomm = &ncommsarr[0];
 	snde = &ncommcntarr[0];
@@ -595,7 +556,6 @@ out:
 	return;
 }
 
-
 static int
 nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 {
@@ -628,18 +588,173 @@ nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 	return 0;
 }
 
+#else /* VELOLD */
+
+static int
+nvmr_connmgmt_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
+{
+	DBGSPEW("Event \"%s\" returned status \"%d\" for cm_id:%p\n",
+	    rdma_event_msg(event->event), event->status, cm_id);
+
+	return 0;
+}
+
+#define NUMIPV4OCTETS 4
+
+typedef uint8_t nvmripv4_t[NUMIPV4OCTETS];
+
+typedef struct {
+	struct rdma_cm_id *nvmrctr_cmid;
+	nvmripv4_t         nvmrctr_ipv4;
+	uint16_t           nvmrctr_port;
+} nvmr_cntrlr_t;
+
+typedef void (*nvmr_crtcntrlrcb_t)(nvmr_cntrlr_t cntrlr);
+
+static void
+nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
+{
+	return;
+}
+
+#define NVMRTO 3000
+
+static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
+
+static int
+nvmr_create_cntrlr(char *ipaddr, char *portnum, nvmr_crtcntrlrcb_t func)
+{
+	uint8_t  ipv4[NUMIPV4OCTETS];
+	struct sockaddr_storage saddr;
+	struct sockaddr_in *sin4;
+	struct rdma_cm_id *cmid;
+	nvmr_cntrlr_t *cntrlr;
+	int error, retval;
+	unsigned long tmp;
+	uint16_t port;
+	char *retp;
+
+	error = EDOOFUS;
+	sin4 = (struct sockaddr_in *)&saddr;
+
+	if (inet_pton(AF_INET, ipaddr, &ipv4) != 1) {
+		ERRSPEW("Parsing failed for IPV4 address \"%s\"\n", ipaddr);
+		error = EINVAL;
+		goto out;
+	}
+
+	tmp = strtoul(portnum, &retp, 0);
+	if ((*retp != '\0') || (tmp > UINT16_MAX)) {
+		ERRSPEW("Parsing failed with %lu for RDMA port \"%s\"\n",
+		    tmp, portnum);
+		error = EINVAL;
+		goto out;
+	}
+	port = htons((uint16_t)tmp);
+	
+	cntrlr = malloc(sizeof(nvmr_cntrlr_t), M_NVMR, M_WAITOK|M_ZERO);
+	if (cntrlr == NULL) {
+		ERRSPEW("NVMr Controller allocation sized \"%zu\" failed\n",
+		    sizeof(*cntrlr));
+		error = ENOMEM;
+		goto out;
+	}
+
+	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_connmgmt_handler,
+	    NULL, RDMA_PS_TCP, IB_QPT_RC);
+	if (IS_ERR(cmid)) {
+		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cmid));
+		goto out;
+	}
+	DBGSPEW("rdma_create_id() succeeded:%p\n", cmid);
+
+	memset(&saddr, 0, sizeof(saddr));
+	sin4->sin_len = sizeof(*sin4);
+	sin4->sin_family = AF_INET;
+	memcpy((void *)&sin4->sin_addr.s_addr, &ipv4, sizeof(ipv4));
+	sin4->sin_port = port;
+	retval = rdma_resolve_addr(cmid, NULL, (struct sockaddr *)sin4, NVMRTO);
+	if (retval != 0) {
+		ERRSPEW("Failed, rdma_resolve_addr()> %d\n", retval);
+		error = retval;
+		goto out;
+	}
+	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
+
+	error = 0;
+
+out:
+	if (error == 0) {
+		goto outret;
+	}
+
+	ERRSPEW("Returning with error \"%d\"\n", error);
+
+	if (cntrlr != NULL) {
+		free(cntrlr, M_NVMR);
+	}
+
+outret:
+	return error;
+}
+#endif /* VELOLD */
+
+/*
+ * Invoked whenever the routine is registered with ib_register_client()
+ * below or when an IB interface is added to the system.  In the former case
+ * the routine is invoked for every IB interface already known.
+ */
+static void
+nvmr_add_ibif(struct ib_device *ib_device)
+{
+	DBGSPEW("rdma_node_get_transport(%p)> %d\n", ib_device,
+	    rdma_node_get_transport(ib_device->node_type));
+}
+
+
+/*
+ * Invoked whenever the routine is unregistered with ib_unregister_client()
+ * below or when an IB interface is removed from the system.  In the former case
+ * the routine is invoked for every IB interface already known.
+ */
+static void
+nvmr_remove_ibif(struct ib_device *ib_device, void *client_data)
+{
+	DBGSPEW("%p removed\n", ib_device);
+}
+
+
+static struct ib_client nvmr_ib_client = {
+	.name   = "nvmrdma",
+	.add    = nvmr_add_ibif,
+	.remove = nvmr_remove_ibif
+};
+
+#define IPADDRESS "10.1.87.194"
+#define PORTNUM   "4420"
 
 static void
 nvmr_init(void)
 {
 	int retval;
-	struct rdma_cm_id *cm_id;
+	struct rdma_cm_id *cmid;
+#ifdef VELOLD
 	struct sockaddr_storage saddr;
 	struct sockaddr_in *sin4;
 	uint32_t ipaddr;
 	uint16_t rdmaport;
+#else /* VELOLD */
+#endif /* VELOLD */
 
-	cm_id = NULL;
+	cmid = NULL;
+	retval = ib_register_client(&nvmr_ib_client);
+	if (retval != 0) {
+		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
+		    retval);
+		goto out;
+	}
+
+#ifdef VELOLD
 	sin4 = (struct sockaddr_in *)&saddr;
 	/* rdmaport = 0x4411; */
 	/* rdmaport = 0x0E28; */
@@ -649,21 +764,14 @@ nvmr_init(void)
 	/* ipaddr = 0xC257010AU; 10.1.87.194 */
 	ipaddr = 0xC257010AU;
 
-	retval = ib_register_client(&nvmr_ib_client);
-	if (retval != 0) {
-		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
-		    retval);
-		goto out;
-	}
-
-	cm_id = rdma_create_id(TD_TO_VNET(curthread), nvmr_cm_handler,
+	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_cm_handler,
 	    nvmr_init, RDMA_PS_TCP, IB_QPT_RC);
-	if (IS_ERR(cm_id)) {
-		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cm_id));
-		cm_id = NULL;
+	if (IS_ERR(cmid)) {
+		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cmid));
+		cmid = NULL;
 		goto out;
 	} else {
-		DBGSPEW("rdma_create_id() succeeded:%p\n", cm_id);
+		DBGSPEW("rdma_create_id() succeeded:%p\n", cmid);
 	}
 
 	memset(&saddr, 0, sizeof(saddr));
@@ -671,18 +779,29 @@ nvmr_init(void)
 	sin4->sin_family = AF_INET;
 	memcpy((void *)&sin4->sin_addr.s_addr, &ipaddr, sizeof(ipaddr));
 	sin4->sin_port = rdmaport;
-	retval = rdma_resolve_addr(cm_id, NULL, (struct sockaddr *)sin4, 2000);
+	retval = rdma_resolve_addr(cmid, NULL, (struct sockaddr *)sin4, 2000);
 	if (retval != 0) {
 		ERRSPEW("Failed, rdma_resolve_addr()> %d\n", retval);
 		goto out;
 	}
 	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
-	glbl_cmid = cm_id;
-	cm_id = NULL;
+	glbl_cmid = cmid;
+	cmid = NULL;
+
+#else /* VELOLD */
+	
+	retval = nvmr_create_cntrlr("10.1.87.194", "4420", nvmr_discov_cntrlr);
+	if (retval != 0) {
+		ERRSPEW("nvmr_create_cntrlr(\"%s\", \"%s\") failed with %d\n",
+		    IPADDRESS, PORTNUM, retval);
+		goto out;
+	}
+
+#endif /* VELOLD */
 
 out:
-	if (cm_id != NULL) {
-		rdma_destroy_id(cm_id);
+	if (cmid != NULL) {
+		rdma_destroy_id(cmid);
 	}
 }
 
@@ -690,9 +809,10 @@ out:
 static void
 nvmr_uninit(void)
 {
-	int count;
-
 	DBGSPEW("Uninit invoked\n");
+
+#ifdef VELOLD
+	int count;
 
 	DBGSPEW("Invoking ib_dereg_mr() on non-NULL MR elements...\n");
 	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
@@ -751,6 +871,7 @@ nvmr_uninit(void)
 		glbl_cmid = NULL;
 	}
 
+#endif /* VELOLD */
 	ib_unregister_client(&nvmr_ib_client);
 }
 
