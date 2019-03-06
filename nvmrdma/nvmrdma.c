@@ -26,15 +26,15 @@
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
 
-#ifdef VELOLD
-
 #define MAX_ADMIN_WORK_REQUESTS 32
 #define MAX_NVME_RDMA_SEGMENTS 256
 
 struct nvmr_ncmplcont {
-	struct ib_cqe		nvmrsp_cqe;
-	struct nvme_completion *nvmrsp_nvmecompl;
-	u64			nvmrsp_dmaddr;
+	struct ib_cqe			nvmrsp_cqe;
+	STAILQ_ENTRY(nvmr_ncmplcont)	nvmrsp_next;
+	struct nvme_completion	       *nvmrsp_nvmecompl;
+	struct nvme_completion	        nvmrsp_nvmecmpl;
+	u64				nvmrsp_dmaddr;
 };
 
 struct nvmr_ncommcont {
@@ -43,6 +43,7 @@ struct nvmr_ncommcont {
 	u64			nvmsnd_dmaddr;
 };
 
+#ifdef VELOLD
 struct nvmr_ncmplcont ncmplcntarr[MAX_ADMIN_WORK_REQUESTS];
 struct nvme_completion ncmplsarr[MAX_ADMIN_WORK_REQUESTS];
 
@@ -590,26 +591,52 @@ nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
 
 #else /* VELOLD */
 
-static int
-nvmr_connmgmt_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
-{
-	DBGSPEW("Event \"%s\" returned status \"%d\" for cm_id:%p\n",
-	    rdma_event_msg(event->event), event->status, cm_id);
-
-	return 0;
-}
-
 #define NUMIPV4OCTETS 4
-
 typedef uint8_t nvmripv4_t[NUMIPV4OCTETS];
 
+struct nvmr_cntrlr_tag;
+typedef void (*nvmr_crtcntrlrcb_t)(struct nvmr_cntrlr_tag *cntrlr);
+
 typedef struct {
-	struct rdma_cm_id *nvmrctr_cmid;
+	size_t nvmrpq_numqueues;
+	size_t nvmrpq_numsndqe;
+	size_t nvmrpq_numrcvqe;
+} nvmr_qprof_t;
+
+typedef enum {
+	NVMR_QTYPE_ADMIN = 0,
+	NVMR_QTYPE_IO,
+	NVMR_NUM_QTYPES
+} nvmr_qndx_t;
+
+static char *nvmr_qndxnames[NVMR_NUM_QTYPES] = {
+	[NVMR_QTYPE_ADMIN] = "Admin Q",
+	[NVMR_QTYPE_IO] = "I/O Q",
+};
+
+static inline char *
+nvmr_qndx2name(nvmr_qndx_t qndx)
+{
+	KASSERT(qndx < NVMR_NUM_QTYPES, ("qndx:%d", qndx));
+	return nvmr_qndxnames[qndx];
+}
+
+typedef struct {
+	nvmr_qprof_t	   nvmrp_qprofs[NVMR_NUM_QTYPES];
+	nvmr_crtcntrlrcb_t nvmrp_cbfunc;
+} nvmr_cntrlrprof_t;
+
+typedef struct {
+	struct rdma_cm_id      *nvmrq_cmid;
+	struct nvmr_cntrlr_tag *nvmrq_cntrlr; /* Points to owning Controller */
+} *nvmr_queue_t;
+
+typedef struct nvmr_cntrlr_tag {
+	nvmr_queue_t	  *nvmrctr_qarr; 
+	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
 	uint16_t           nvmrctr_port;
-} nvmr_cntrlr_t;
-
-typedef void (*nvmr_crtcntrlrcb_t)(nvmr_cntrlr_t cntrlr);
+} *nvmr_cntrlr_t;
 
 static void
 nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
@@ -617,62 +644,111 @@ nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
 	return;
 }
 
+nvmr_cntrlrprof_t nvmr_discoveryprof = {
+	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
+		.nvmrpq_numqueues = 1,
+		.nvmrpq_numsndqe = (3 * MAX_ADMIN_WORK_REQUESTS) + 1,
+		.nvmrpq_numrcvqe = MAX_ADMIN_WORK_REQUESTS + 1
+	},
+	.nvmrp_cbfunc   = nvmr_discov_cntrlr,
+};
+
+static int
+nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
+{
+	nvmr_cntrlr_t cntrlr;
+
+	DBGSPEW("Event \"%s\" returned status \"%d\" for cmid:%p\n",
+	    rdma_event_msg(event->event), event->status, cmid);
+
+	/* Every cmid is associated with a controller or a queue? */
+	cntrlr = cmid->context;
+
+	return 0;
+}
+
+struct {
+	char *nvmra_ipaddr;
+	char *nvmra_port;
+} nvmr_addr_t;
+
 #define NVMRTO 3000
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
-static int
-nvmr_create_cntrlr(char *ipaddr, char *portnum, nvmr_crtcntrlrcb_t func)
+static void
+nvmr_destroy_queue(nvmr_queue_t q)
 {
-	uint8_t  ipv4[NUMIPV4OCTETS];
+	if (q == NULL) {
+		goto out;
+	}
+
+out:
+	return;
+}
+
+static void
+nvmr_destroy_cntrlr(nvmr_cntrlr_t cntrlr)
+{
+	if (cntrlr == NULL) {
+		goto out;
+	}
+
+	if (cntrlr->nvmrctr_cmid != NULL) {
+		DBGSPEW("rdma_destroy_id(%p)...\n", cntrlr->nvmrctr_cmid);
+		rdma_destroy_id((cntrlr)->nvmrctr_cmid);
+		cntrlr->nvmrctr_cmid = NULL;
+	}
+
+	free(cntrlr, M_NVMR);
+out:
+	return;
+}
+
+static int
+nvmr_create_queue(nvmr_qprof_t prof, nvmr_cntrlr_t cntrlr)
+{
 	struct sockaddr_storage saddr;
 	struct sockaddr_in *sin4;
 	struct rdma_cm_id *cmid;
-	nvmr_cntrlr_t *cntrlr;
-	int error, retval;
-	unsigned long tmp;
-	uint16_t port;
-	char *retp;
+	nvmr_queue_t q;
+	int error;
 
 	error = EDOOFUS;
 	sin4 = (struct sockaddr_in *)&saddr;
 
-	if (inet_pton(AF_INET, ipaddr, &ipv4) != 1) {
-		ERRSPEW("Parsing failed for IPV4 address \"%s\"\n", ipaddr);
-		error = EINVAL;
-		goto out;
-	}
-
-	tmp = strtoul(portnum, &retp, 0);
-	if ((*retp != '\0') || (tmp > UINT16_MAX)) {
-		ERRSPEW("Parsing failed with %lu for RDMA port \"%s\"\n",
-		    tmp, portnum);
-		error = EINVAL;
-		goto out;
-	}
-	port = htons((uint16_t)tmp);
-	
-	cntrlr = malloc(sizeof(nvmr_cntrlr_t), M_NVMR, M_WAITOK|M_ZERO);
-	if (cntrlr == NULL) {
-		ERRSPEW("NVMr Controller allocation sized \"%zu\" failed\n",
-		    sizeof(*cntrlr));
+	q = malloc(sizeof *q, M_NVMR, M_WAITOK|M_ZERO);
+	if (q == NULL) {
+		ERRSPEW("NVMr Q allocation sized \"%zu\" failed\n",
+		    sizeof *q);
 		error = ENOMEM;
 		goto out;
+	} else {
+		DBGSPEW("NVMr Q allocation of size \"%zu\"\n",
+		    sizeof *q);
 	}
+	q->nvmrq_cntrlr = cntrlr;
 
 	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_connmgmt_handler,
-	    NULL, RDMA_PS_TCP, IB_QPT_RC);
+	    cntrlr, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cmid)) {
 		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cmid));
+		error = EINVAL;
 		goto out;
 	}
-	DBGSPEW("rdma_create_id() succeeded:%p\n", cmid);
+	q->nvmrq_cmid = cmid;
+	DBGSPEW("rdma_create_id() succeeded:%p\n", cntrlr->nvmrctr_cmid);
 
 	memset(&saddr, 0, sizeof(saddr));
 	sin4->sin_len = sizeof(*sin4);
 	sin4->sin_family = AF_INET;
 	memcpy((void *)&sin4->sin_addr.s_addr, &ipv4, sizeof(ipv4));
 	sin4->sin_port = port;
+
+	/*
+	 * NB Once the following is called nvmr_connmgmt_handler() can be
+	 * invoked.  Keep cntrlr consistent as it can be reached via cmid
+	 */
 	retval = rdma_resolve_addr(cmid, NULL, (struct sockaddr *)sin4, NVMRTO);
 	if (retval != 0) {
 		ERRSPEW("Failed, rdma_resolve_addr()> %d\n", retval);
@@ -680,6 +756,80 @@ nvmr_create_cntrlr(char *ipaddr, char *portnum, nvmr_crtcntrlrcb_t func)
 		goto out;
 	}
 	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
+	error = 0;
+
+out:
+	if (error == 0) {
+		goto outret;
+	}
+
+	nvmr_destroy_queue(q);
+
+outret:
+	return error;
+}
+
+static int
+nvmr_create_cntrlr(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
+    nvmr_cntrlr_t *retcntrlrp)
+{
+	nvmr_cntrlr_t cntrlr;
+	nvmr_qndx_t qtndx;
+	int error, retval;
+	unsigned long tmp;
+	nvmripv4_t ipv4;
+	uint16_t port;
+	char *retp;
+
+	error = EDOOFUS;
+
+	if (inet_pton(AF_INET, addr->nvmra_ipaddr, &ipv4) != 1) {
+		ERRSPEW("Parsing failed for IPV4 address \"%s\"\n",
+		    addr->nvmra_ipaddr);
+		error = EINVAL;
+		goto out;
+	}
+
+	tmp = strtoul(addr->nvmra_port, &retp, 0);
+	if ((*retp != '\0') || (tmp > UINT16_MAX)) {
+		ERRSPEW("Parsing failed with %lu for RDMA port \"%s\"\n", tmp,
+		    addr->nvmra_port);
+		error = EINVAL;
+		goto out;
+	}
+	port = htons((uint16_t)tmp);
+	
+	cntrlr = malloc(sizeof *cntrlr, M_NVMR, M_WAITOK|M_ZERO);
+	if (cntrlr == NULL) {
+		ERRSPEW("NVMr Controller allocation sized \"%zu\" failed\n",
+		    sizeof *cntrlr);
+		error = ENOMEM;
+		goto out;
+	} else {
+		DBGSPEW("NVMr Controller allocation of size \"%zu\"\n",
+		    sizeof *cntrlr);
+	}
+	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof cntrlr->nvmrctr_ipv4);
+	cntrlr->nvmrctr_port = port;
+	cntrlr->nvmrctr_prof = prof;
+	*retcntrlrp = cntrlr;
+
+	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
+		for (count = 0;
+		    count < prof->nvmrp_qprofs[qtndx].nvmrpq_numqueues;
+		    count++) {
+			retval = nvmr_create_queue(prof->nvmrp_admqp, cntrlr);
+			if (retval != 0) {
+				ERRSPEW("%s#%d creation failed with %d\n",
+				    nvmr_qndx2name(qtndx), count, retval);
+				break;
+			}
+		}
+		if (count != prof->nvmrp_qprofs[qtndx].nvmrpq_numqueues) {
+			error = retval;
+			goto out;
+		}
+	}
 
 	error = 0;
 
@@ -690,9 +840,8 @@ out:
 
 	ERRSPEW("Returning with error \"%d\"\n", error);
 
-	if (cntrlr != NULL) {
-		free(cntrlr, M_NVMR);
-	}
+	nvmr_destroy_cntrlr(cntrlr);
+	*retcntrlrp = NULL;
 
 outret:
 	return error;
@@ -730,8 +879,11 @@ static struct ib_client nvmr_ib_client = {
 	.remove = nvmr_remove_ibif
 };
 
-#define IPADDRESS "10.1.87.194"
-#define PORTNUM   "4420"
+nvmr_addr_t r640gent07eno1 = {
+	"10.1.87.194", "4420"
+};
+
+static nvmr_cntrlr_t glbl_discovctrlrp;
 
 static void
 nvmr_init(void)
@@ -790,7 +942,8 @@ nvmr_init(void)
 
 #else /* VELOLD */
 	
-	retval = nvmr_create_cntrlr("10.1.87.194", "4420", nvmr_discov_cntrlr);
+	retval = nvmr_create_cntrlr(r640gent07eno1, &nvmr_discoveryprof,
+	    &glbl_discovctrlrp);
 	if (retval != 0) {
 		ERRSPEW("nvmr_create_cntrlr(\"%s\", \"%s\") failed with %d\n",
 		    IPADDRESS, PORTNUM, retval);
@@ -871,7 +1024,23 @@ nvmr_uninit(void)
 		glbl_cmid = NULL;
 	}
 
+#else /* VELOLD */
+	if (glbl_discovctrlrp == NULL) {
+		goto out;
+	}
+	
+	if (glbl_discovctrlrp->nvmrctr_cmid != NULL) {
+		DBGSPEW("Invoking rdma_destroy_id(%p)...\n",
+		    glbl_discovctrlrp->nvmrctr_cmid);
+		rdma_destroy_id(glbl_discovctrlrp->nvmrctr_cmid);
+		glbl_discovctrlrp->nvmrctr_cmid = NULL;
+	}
+
+	DBGSPEW("free()ing glbl_discovctrlrp:%p...\n", glbl_discovctrlrp);
+	free(glbl_discovctrlrp, M_NVMR);
+	
 #endif /* VELOLD */
+out:
 	ib_unregister_client(&nvmr_ib_client);
 }
 
