@@ -36,12 +36,15 @@ struct nvmr_ncmplcont {
 	struct nvme_completion	        nvmrsp_nvmecmpl;
 	u64				nvmrsp_dmaddr;
 };
+typedef struct nvmr_ncmplcont nvmr_ncmplcon_t;
 
 struct nvmr_ncommcont {
-	struct ib_cqe		nvmsnd_cqe;
-	struct nvme_command    *nvmsnd_nvmecomm;
-	u64			nvmsnd_dmaddr;
+	struct ib_cqe		     nvmsnd_cqe;
+	STAILQ_ENTRY(nvmr_ncommcont) nvmsnd_next;
+	struct nvme_command         *nvmsnd_nvmecomm;
+	u64			     nvmsnd_dmaddr;
 };
+typedef struct nvmr_ncommcont nvmr_ncommcon_t;
 
 #ifdef VELOLD
 struct nvmr_ncmplcont ncmplcntarr[MAX_ADMIN_WORK_REQUESTS];
@@ -598,9 +601,9 @@ struct nvmr_cntrlr_tag;
 typedef void (*nvmr_crtcntrlrcb_t)(struct nvmr_cntrlr_tag *cntrlr);
 
 typedef struct {
-	size_t nvmrpq_numqueues;
-	size_t nvmrpq_numsndqe;
-	size_t nvmrpq_numrcvqe;
+	int nvmrpq_numqueues;
+	int nvmrpq_numsndqe;
+	int nvmrpq_numrcvqe;
 } nvmr_qprof_t;
 
 typedef enum {
@@ -627,14 +630,19 @@ typedef struct {
 } nvmr_cntrlrprof_t;
 
 typedef struct {
-	struct rdma_cm_id      *nvmrq_cmid;
-	struct nvmr_cntrlr_tag *nvmrq_cntrlr; /* Points to owning Controller */
+	struct rdma_cm_id             *nvmrq_cmid;
+	struct nvmr_cntrlr_tag        *nvmrq_cntrlr;   /* Owning Controller */
+	STAILQ_HEAD(, nvmr_ncommcont) nvmrq_comms;
+	STAILQ_HEAD(, nvmr_ncmplcont) nvmrq_cmpls;
+	int                           nvmrq_numsndqe; /* nvmrq_comms count */
+	int                           nvmrq_numrcvqe; /* nvmrq_cmpls count */
 } *nvmr_queue_t;
 
 typedef struct nvmr_cntrlr_tag {
-	nvmr_queue_t	  *nvmrctr_qarr; 
+	nvmr_queue_t      *nvmrctr_qarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
+	int                nvmrctr_numqs; /* Q count not always fixed in prof */
 	uint16_t           nvmrctr_port;
 } *nvmr_cntrlr_t;
 
@@ -667,7 +675,7 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 	return 0;
 }
 
-struct {
+typedef struct {
 	char *nvmra_ipaddr;
 	char *nvmra_port;
 } nvmr_addr_t;
@@ -679,40 +687,55 @@ static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 static void
 nvmr_destroy_queue(nvmr_queue_t q)
 {
+	nvmr_ncmplcon_t *cmplp, *tcmplp;
+	nvmr_ncommcon_t *commp, *tcommp;
+	int count;
+
 	if (q == NULL) {
 		goto out;
 	}
 
-out:
-	return;
-}
-
-static void
-nvmr_destroy_cntrlr(nvmr_cntrlr_t cntrlr)
-{
-	if (cntrlr == NULL) {
-		goto out;
+	if (q->nvmrq_cmid != NULL) {
+		DBGSPEW("rdma_destroy_id(%p)...\n", q->nvmrq_cmid);
+		rdma_destroy_id(q->nvmrq_cmid);
+		q->nvmrq_cmid = NULL;
 	}
 
-	if (cntrlr->nvmrctr_cmid != NULL) {
-		DBGSPEW("rdma_destroy_id(%p)...\n", cntrlr->nvmrctr_cmid);
-		rdma_destroy_id((cntrlr)->nvmrctr_cmid);
-		cntrlr->nvmrctr_cmid = NULL;
+	count = 0;
+	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmsnd_next, tcommp) {
+		free(commp, M_NVMR);
+		count++;
 	}
+	KASSERT(count == q->nvmrq_numsndqe, ("%s@%d count:%d numsndqe:%d",
+	    __func__, __LINE__, count, q->nvmrq_numsndqe));
+	DBGSPEW("Freed %d command containers\n", q->nvmrq_numsndqe);
 
-	free(cntrlr, M_NVMR);
+	count = 0;
+	STAILQ_FOREACH_SAFE(cmplp, &q->nvmrq_cmpls, nvmrsp_next, tcmplp) {
+		free(cmplp, M_NVMR);
+		count++;
+	}
+	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
+	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
+	DBGSPEW("Freed %d completion containers\n", q->nvmrq_numrcvqe);
+
+	DBGSPEW("free(%p)ing Q\n", q);
+	free(q, M_NVMR);
+
 out:
 	return;
 }
 
 static int
-nvmr_create_queue(nvmr_qprof_t prof, nvmr_cntrlr_t cntrlr)
+nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 {
 	struct sockaddr_storage saddr;
 	struct sockaddr_in *sin4;
 	struct rdma_cm_id *cmid;
+	int error, retval, count;
+	nvmr_ncmplcon_t *cmplp;
+	nvmr_ncommcon_t *commp;
 	nvmr_queue_t q;
-	int error;
 
 	error = EDOOFUS;
 	sin4 = (struct sockaddr_in *)&saddr;
@@ -723,11 +746,41 @@ nvmr_create_queue(nvmr_qprof_t prof, nvmr_cntrlr_t cntrlr)
 		    sizeof *q);
 		error = ENOMEM;
 		goto out;
-	} else {
-		DBGSPEW("NVMr Q allocation of size \"%zu\"\n",
-		    sizeof *q);
 	}
+	DBGSPEW("NVMr Q allocation of size \"%zu\"\n", sizeof *q);
 	q->nvmrq_cntrlr = cntrlr;
+	STAILQ_INIT(&q->nvmrq_comms);
+	STAILQ_INIT(&q->nvmrq_cmpls);
+
+	for (count = 0; count < prof->nvmrpq_numsndqe; count++) {
+		commp = malloc(sizeof(*commp),  M_NVMR, M_WAITOK|M_ZERO);
+		if (commp == NULL) {
+			ERRSPEW("Command Q container allocation failed after"
+			    " %d iterations\n", count);
+			error = ENOMEM;
+			/* For now bail.  This needs to be more robust */
+			goto out;
+		} else {
+			STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmsnd_next);
+			q->nvmrq_numsndqe++;
+		}
+	}
+	DBGSPEW("Alloced %d command Q containers\n", q->nvmrq_numsndqe);
+
+	for (count = 0; count < prof->nvmrpq_numrcvqe; count++) {
+		cmplp = malloc(sizeof(*cmplp),  M_NVMR, M_WAITOK|M_ZERO);
+		if (cmplp == NULL) {
+			ERRSPEW("Completion Q container allocation failed after"
+			    " %d iterations\n", count);
+			error = ENOMEM;
+			/* For now bail.  This needs to be more robust */
+			goto out;
+		} else {
+			STAILQ_INSERT_HEAD(&q->nvmrq_cmpls, cmplp, nvmrsp_next);
+			q->nvmrq_numrcvqe++;
+		}
+	}
+	DBGSPEW("Allocated %d completion Q containers\n", q->nvmrq_numrcvqe);
 
 	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_connmgmt_handler,
 	    cntrlr, RDMA_PS_TCP, IB_QPT_RC);
@@ -737,13 +790,14 @@ nvmr_create_queue(nvmr_qprof_t prof, nvmr_cntrlr_t cntrlr)
 		goto out;
 	}
 	q->nvmrq_cmid = cmid;
-	DBGSPEW("rdma_create_id() succeeded:%p\n", cntrlr->nvmrctr_cmid);
+	DBGSPEW("rdma_create_id() succeeded:%p\n", q->nvmrq_cmid);
 
 	memset(&saddr, 0, sizeof(saddr));
 	sin4->sin_len = sizeof(*sin4);
 	sin4->sin_family = AF_INET;
-	memcpy((void *)&sin4->sin_addr.s_addr, &ipv4, sizeof(ipv4));
-	sin4->sin_port = port;
+	memcpy((void *)&sin4->sin_addr.s_addr, &cntrlr->nvmrctr_ipv4,
+	    sizeof sin4->sin_addr.s_addr);
+	sin4->sin_port = cntrlr->nvmrctr_port;
 
 	/*
 	 * NB Once the following is called nvmr_connmgmt_handler() can be
@@ -756,7 +810,9 @@ nvmr_create_queue(nvmr_qprof_t prof, nvmr_cntrlr_t cntrlr)
 		goto out;
 	}
 	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
+
 	error = 0;
+	*qp = q;
 
 out:
 	if (error == 0) {
@@ -769,13 +825,38 @@ outret:
 	return error;
 }
 
+static void
+nvmr_destroy_cntrlr(nvmr_cntrlr_t cntrlr)
+{
+	int count;
+
+	if (cntrlr == NULL) {
+		goto out;
+	}
+
+	if (cntrlr->nvmrctr_qarr != NULL) {
+		for (count = 0; count < cntrlr->nvmrctr_numqs; count++) {
+			nvmr_destroy_queue(cntrlr->nvmrctr_qarr[count]);
+			cntrlr->nvmrctr_qarr[count] = NULL;
+		}
+		DBGSPEW("free(%p)ing Q array\n", cntrlr->nvmrctr_qarr);
+		free(cntrlr->nvmrctr_qarr, M_NVMR);
+	}
+
+	DBGSPEW("free(%p)ing NVMr controller\n", cntrlr);
+	free(cntrlr, M_NVMR);
+out:
+	return;
+}
+
 static int
 nvmr_create_cntrlr(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp)
 {
+	int error, retval, count, qcount, qarrndx;
 	nvmr_cntrlr_t cntrlr;
+	nvmr_queue_t *qarr;
 	nvmr_qndx_t qtndx;
-	int error, retval;
 	unsigned long tmp;
 	nvmripv4_t ipv4;
 	uint16_t port;
@@ -799,30 +880,54 @@ nvmr_create_cntrlr(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	}
 	port = htons((uint16_t)tmp);
 	
-	cntrlr = malloc(sizeof *cntrlr, M_NVMR, M_WAITOK|M_ZERO);
+	cntrlr = malloc(sizeof(*cntrlr), M_NVMR, M_WAITOK|M_ZERO);
 	if (cntrlr == NULL) {
-		ERRSPEW("NVMr Controller allocation sized \"%zu\" failed\n",
-		    sizeof *cntrlr);
+		ERRSPEW("Controller allocation sized \"%zu\" failed\n",
+		    sizeof(*cntrlr));
 		error = ENOMEM;
 		goto out;
-	} else {
-		DBGSPEW("NVMr Controller allocation of size \"%zu\"\n",
-		    sizeof *cntrlr);
 	}
-	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof cntrlr->nvmrctr_ipv4);
+	DBGSPEW("Controller allocation of size \"%zu\"\n", sizeof(*cntrlr));
+	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof(cntrlr->nvmrctr_ipv4));
 	cntrlr->nvmrctr_port = port;
 	cntrlr->nvmrctr_prof = prof;
-	*retcntrlrp = cntrlr;
 
+	qcount = 0;
 	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
 		for (count = 0;
 		    count < prof->nvmrp_qprofs[qtndx].nvmrpq_numqueues;
 		    count++) {
-			retval = nvmr_create_queue(prof->nvmrp_admqp, cntrlr);
+			qcount++;
+		}
+	}
+	DBGSPEW("Q count is %d\n", qcount);
+	cntrlr->nvmrctr_numqs = qcount;
+
+	qarr = malloc(qcount * sizeof(nvmr_queue_t), M_NVMR, M_WAITOK|M_ZERO);
+	if (qarr == NULL) {
+		ERRSPEW("Controller Q array allocation sized \"%zu\" failed\n",
+		    qcount * sizeof(nvmr_queue_t));
+		error = ENOMEM;
+		goto out;
+	}
+	DBGSPEW("Controller Q array allocation of size \"%zu\"\n",
+	    qcount * sizeof(nvmr_queue_t));
+	cntrlr->nvmrctr_qarr = qarr;
+
+	/* Allocate the queues and store pointers to them in the qarr */
+	qarrndx = 0;
+	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
+		for (count = 0;
+		    count < prof->nvmrp_qprofs[qtndx].nvmrpq_numqueues;
+		    count++) {
+			retval = nvmr_create_queue(&prof->nvmrp_qprofs[qtndx],
+			    cntrlr, &qarr[qarrndx]);
 			if (retval != 0) {
 				ERRSPEW("%s#%d creation failed with %d\n",
 				    nvmr_qndx2name(qtndx), count, retval);
 				break;
+			} else {
+				qarrndx++;
 			}
 		}
 		if (count != prof->nvmrp_qprofs[qtndx].nvmrpq_numqueues) {
@@ -830,8 +935,11 @@ nvmr_create_cntrlr(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 			goto out;
 		}
 	}
+	KASSERT(qarrndx == cntrlr->nvmrctr_numqs,("qarrndx:%d numqs:%d",
+	    qarrndx, cntrlr->nvmrctr_numqs));
 
 	error = 0;
+	*retcntrlrp = cntrlr;
 
 out:
 	if (error == 0) {
@@ -889,16 +997,17 @@ static void
 nvmr_init(void)
 {
 	int retval;
-	struct rdma_cm_id *cmid;
 #ifdef VELOLD
+	struct rdma_cm_id *cmid;
 	struct sockaddr_storage saddr;
 	struct sockaddr_in *sin4;
 	uint32_t ipaddr;
 	uint16_t rdmaport;
+
+	cmid = NULL;
 #else /* VELOLD */
 #endif /* VELOLD */
 
-	cmid = NULL;
 	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
 		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
@@ -942,20 +1051,27 @@ nvmr_init(void)
 
 #else /* VELOLD */
 	
-	retval = nvmr_create_cntrlr(r640gent07eno1, &nvmr_discoveryprof,
+	retval = nvmr_create_cntrlr(&r640gent07eno1, &nvmr_discoveryprof,
 	    &glbl_discovctrlrp);
 	if (retval != 0) {
 		ERRSPEW("nvmr_create_cntrlr(\"%s\", \"%s\") failed with %d\n",
-		    IPADDRESS, PORTNUM, retval);
+		    r640gent07eno1.nvmra_ipaddr, r640gent07eno1.nvmra_port,
+		    retval);
 		goto out;
 	}
 
 #endif /* VELOLD */
 
 out:
+
+#ifdef VELOLD
 	if (cmid != NULL) {
 		rdma_destroy_id(cmid);
 	}
+#else /* VELOLD */
+#endif /* VELOLD */
+
+	return;
 }
 
 
@@ -1029,15 +1145,8 @@ nvmr_uninit(void)
 		goto out;
 	}
 	
-	if (glbl_discovctrlrp->nvmrctr_cmid != NULL) {
-		DBGSPEW("Invoking rdma_destroy_id(%p)...\n",
-		    glbl_discovctrlrp->nvmrctr_cmid);
-		rdma_destroy_id(glbl_discovctrlrp->nvmrctr_cmid);
-		glbl_discovctrlrp->nvmrctr_cmid = NULL;
-	}
-
-	DBGSPEW("free()ing glbl_discovctrlrp:%p...\n", glbl_discovctrlrp);
-	free(glbl_discovctrlrp, M_NVMR);
+	nvmr_destroy_cntrlr(glbl_discovctrlrp);
+	glbl_discovctrlrp = NULL;
 	
 #endif /* VELOLD */
 out:
