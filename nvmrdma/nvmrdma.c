@@ -629,20 +629,31 @@ typedef struct {
 	nvmr_crtcntrlrcb_t nvmrp_cbfunc;
 } nvmr_cntrlrprof_t;
 
+typedef enum {
+	NVMRQ_PRE_INIT = 0,
+	NVMRQ_PRE_ADDR_RESOLV,
+	NVMRQ_POST_ADDR_RESOLV_FAILED,
+	NVMRQ_POST_ADDR_RESOLV_SUCCESS,
+} nvmr_queue_state_t;
+
 typedef struct {
 	struct rdma_cm_id             *nvmrq_cmid;
-	struct nvmr_cntrlr_tag        *nvmrq_cntrlr;   /* Owning Controller */
+	struct nvmr_cntrlr_tag        *nvmrq_cntrlr; /* Owning Controller */
 	STAILQ_HEAD(, nvmr_ncommcont) nvmrq_comms;
 	STAILQ_HEAD(, nvmr_ncmplcont) nvmrq_cmpls;
-	int                           nvmrq_numsndqe; /* nvmrq_comms count */
-	int                           nvmrq_numrcvqe; /* nvmrq_cmpls count */
+	int                           nvmrq_numsndqe;/* nvmrq_comms count */
+	int                           nvmrq_numrcvqe;/* nvmrq_cmpls count */
+	int                           nvmrq_last_cm_status;
+	volatile nvmr_queue_state_t   nvmrq_state;   /* nvmrctr_lock protects */
 } *nvmr_queue_t;
 
 typedef struct nvmr_cntrlr_tag {
+	struct mtx         nvmrctr_lock;
 	nvmr_queue_t      *nvmrctr_qarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
 	int                nvmrctr_numqs; /* Q count not always fixed in prof */
+	volatile int       nvmrctr_refcount;
 	uint16_t           nvmrctr_port;
 } *nvmr_cntrlr_t;
 
@@ -661,16 +672,178 @@ nvmr_cntrlrprof_t nvmr_discoveryprof = {
 	.nvmrp_cbfunc   = nvmr_discov_cntrlr,
 };
 
+static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
+
+static void
+nvmr_queue_destroy(nvmr_queue_t q)
+{
+	nvmr_ncmplcon_t *cmplp, *tcmplp;
+	nvmr_ncommcon_t *commp, *tcommp;
+	struct ib_device *ibd;
+	int count;
+
+	if (q == NULL) {
+		goto out;
+	}
+	ibd = q->nvmrq_cmid->device;
+
+	/*
+	 * Loop through the list of completion container structures unmapping
+	 * the NVMe completion structure and then free'ing the containers
+	 * themselves
+	 */
+	count = 0;
+	STAILQ_FOREACH_SAFE(cmplp, &q->nvmrq_cmpls, nvmrsp_next, tcmplp) {
+		if (cmplp->nvmrsp_dmaddr != 0) {
+			ib_dma_sync_single_for_cpu(ibd, cmplp->nvmrsp_dmaddr,
+			    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
+			ib_dma_unmap_single(ibd, cmplp->nvmrsp_dmaddr,
+			    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
+		}
+		free(cmplp, M_NVMR);
+		count++;
+	}
+	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
+	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
+	DBGSPEW("Freed %d completion containers\n", q->nvmrq_numrcvqe);
+
+	count = 0;
+	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmsnd_next, tcommp) {
+		free(commp, M_NVMR);
+		count++;
+	}
+	KASSERT(count == q->nvmrq_numsndqe, ("%s@%d count:%d numsndqe:%d",
+	    __func__, __LINE__, count, q->nvmrq_numsndqe));
+	DBGSPEW("Freed %d command containers\n", q->nvmrq_numsndqe);
+
+	if (q->nvmrq_cmid != NULL) {
+		DBGSPEW("rdma_destroy_id(%p)...\n", q->nvmrq_cmid);
+		rdma_destroy_id(q->nvmrq_cmid);
+		q->nvmrq_cmid = NULL;
+	}
+
+	DBGSPEW("free(%p)ing Q\n", q);
+	free(q, M_NVMR);
+
+out:
+	return;
+}
+
+
+static void
+nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
+{
+	int count;
+
+	if (cntrlr == NULL) {
+		goto out;
+	}
+
+	if (cntrlr->nvmrctr_qarr != NULL) {
+		for (count = 0; count < cntrlr->nvmrctr_numqs; count++) {
+			nvmr_queue_destroy(cntrlr->nvmrctr_qarr[count]);
+			cntrlr->nvmrctr_qarr[count] = NULL;
+		}
+		DBGSPEW("free(%p)ing Q array\n", cntrlr->nvmrctr_qarr);
+		free(cntrlr->nvmrctr_qarr, M_NVMR);
+	}
+
+	DBGSPEW("free(%p)ing NVMr controller\n", cntrlr);
+	free(cntrlr, M_NVMR);
+out:
+	return;
+}
+
+
+static void
+nvmr_cntrlr_rele(nvmr_cntrlr_t cntrlr)
+{
+	int retval;
+
+	retval = atomic_fetchadd_int(&cntrlr->nvmrctr_refcount, -1);
+	KASSERT(retval > 0, ("%s@%d refcount:%d cntrlr:%p\n", __func__,
+	    __LINE__, retval, cntrlr));
+	if (retval == 1) {
+		nvmr_cntrlr_destroy(cntrlr);
+	}
+}
+
+
+static void
+nvmr_cntrlr_ref(nvmr_cntrlr_t cntrlr)
+{
+	int retval;
+
+	retval = atomic_fetchadd_int(&cntrlr->nvmrctr_refcount, 1);
+	KASSERT(retval > 0, ("%s@%d refcount:%d cntrlr:%p\n", __func__,
+	    __LINE__, retval, cntrlr));
+}
+
+
+static void
+nvmr_cm_addr_resolved(nvmr_queue_t q)
+{
+	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	q->nvmrq_state = NVMRQ_POST_ADDR_RESOLV_SUCCESS;
+	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	wakeup(q->nvmrq_cntrlr);
+
+	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
+
+	return;
+}
+
+static void
+nvmr_cm_addr_error(nvmr_queue_t q)
+{
+	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	q->nvmrq_state = NVMRQ_POST_ADDR_RESOLV_FAILED;
+	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	wakeup(q->nvmrq_cntrlr);
+
+	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
+
+	return;
+}
+
 static int
 nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 {
-	nvmr_cntrlr_t cntrlr;
+	nvmr_queue_t q;
 
 	DBGSPEW("Event \"%s\" returned status \"%d\" for cmid:%p\n",
 	    rdma_event_msg(event->event), event->status, cmid);
 
 	/* Every cmid is associated with a controller or a queue? */
-	cntrlr = cmid->context;
+	q = cmid->context;
+	q->nvmrq_last_cm_status = - event->status;
+
+	switch(event->event) {
+	case RDMA_CM_EVENT_ADDR_RESOLVED:
+		nvmr_cm_addr_resolved(q);
+		break;
+
+	case RDMA_CM_EVENT_ADDR_ERROR:
+		nvmr_cm_addr_error(q);
+		break;
+
+	/*
+	case RDMA_CM_EVENT_ROUTE_RESOLVED:
+		nvmr_route_resolved(cm_id);
+		break;
+
+	case RDMA_CM_EVENT_ESTABLISHED:
+		nvmr_event_established(cm_id);
+		break;
+
+	case RDMA_CM_EVENT_DISCONNECTED:
+		break;
+	 */
+
+	default:
+		dump_stack();
+		break;
+	}
 
 	return 0;
 }
@@ -682,50 +855,6 @@ typedef struct {
 
 #define NVMRTO 3000
 
-static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
-
-static void
-nvmr_destroy_queue(nvmr_queue_t q)
-{
-	nvmr_ncmplcon_t *cmplp, *tcmplp;
-	nvmr_ncommcon_t *commp, *tcommp;
-	int count;
-
-	if (q == NULL) {
-		goto out;
-	}
-
-	if (q->nvmrq_cmid != NULL) {
-		DBGSPEW("rdma_destroy_id(%p)...\n", q->nvmrq_cmid);
-		rdma_destroy_id(q->nvmrq_cmid);
-		q->nvmrq_cmid = NULL;
-	}
-
-	count = 0;
-	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmsnd_next, tcommp) {
-		free(commp, M_NVMR);
-		count++;
-	}
-	KASSERT(count == q->nvmrq_numsndqe, ("%s@%d count:%d numsndqe:%d",
-	    __func__, __LINE__, count, q->nvmrq_numsndqe));
-	DBGSPEW("Freed %d command containers\n", q->nvmrq_numsndqe);
-
-	count = 0;
-	STAILQ_FOREACH_SAFE(cmplp, &q->nvmrq_cmpls, nvmrsp_next, tcmplp) {
-		free(cmplp, M_NVMR);
-		count++;
-	}
-	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
-	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
-	DBGSPEW("Freed %d completion containers\n", q->nvmrq_numrcvqe);
-
-	DBGSPEW("free(%p)ing Q\n", q);
-	free(q, M_NVMR);
-
-out:
-	return;
-}
-
 static int
 nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 {
@@ -736,6 +865,10 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	nvmr_ncmplcon_t *cmplp;
 	nvmr_ncommcon_t *commp;
 	nvmr_queue_t q;
+	/*
+	u64 dmaddr;
+	struct ib_device *ibd;
+	 */
 
 	error = EDOOFUS;
 	sin4 = (struct sockaddr_in *)&saddr;
@@ -749,8 +882,26 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 	DBGSPEW("NVMr Q allocation of size \"%zu\"\n", sizeof *q);
 	q->nvmrq_cntrlr = cntrlr;
+	q->nvmrq_state = NVMRQ_PRE_INIT;
 	STAILQ_INIT(&q->nvmrq_comms);
 	STAILQ_INIT(&q->nvmrq_cmpls);
+
+	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_connmgmt_handler,
+	    q, RDMA_PS_TCP, IB_QPT_RC);
+	if (IS_ERR(cmid)) {
+		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cmid));
+		error = EINVAL;
+		goto out;
+	}
+	q->nvmrq_cmid = cmid;
+	DBGSPEW("rdma_create_id() succeeded:%p\n", q->nvmrq_cmid);
+	/*
+	ibd = cmid->device;
+	if (ibd == NULL) {
+		DBGSPEW("ibd is NULL\n");
+		goto out;
+	}
+	 */
 
 	for (count = 0; count < prof->nvmrpq_numsndqe; count++) {
 		commp = malloc(sizeof(*commp),  M_NVMR, M_WAITOK|M_ZERO);
@@ -775,22 +926,26 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 			error = ENOMEM;
 			/* For now bail.  This needs to be more robust */
 			goto out;
-		} else {
-			STAILQ_INSERT_HEAD(&q->nvmrq_cmpls, cmplp, nvmrsp_next);
-			q->nvmrq_numrcvqe++;
 		}
+
+		/*
+		dmaddr =  ib_dma_map_single(ibd, &cmplp->nvmrsp_nvmecmpl,
+		    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
+		if (ib_dma_mapping_error(ibd, dmaddr) != 0) {
+			ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
+			error = ENOMEM;
+			goto out;
+		}
+		cmplp->nvmrsp_dmaddr = dmaddr;
+		ib_dma_sync_single_for_cpu(ibd, dmaddr,
+		    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
+		 */
+
+		STAILQ_INSERT_HEAD(&q->nvmrq_cmpls, cmplp, nvmrsp_next);
+		q->nvmrq_numrcvqe++;
 	}
 	DBGSPEW("Allocated %d completion Q containers\n", q->nvmrq_numrcvqe);
 
-	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_connmgmt_handler,
-	    cntrlr, RDMA_PS_TCP, IB_QPT_RC);
-	if (IS_ERR(cmid)) {
-		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cmid));
-		error = EINVAL;
-		goto out;
-	}
-	q->nvmrq_cmid = cmid;
-	DBGSPEW("rdma_create_id() succeeded:%p\n", q->nvmrq_cmid);
 
 	memset(&saddr, 0, sizeof(saddr));
 	sin4->sin_len = sizeof(*sin4);
@@ -800,9 +955,17 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	sin4->sin_port = cntrlr->nvmrctr_port;
 
 	/*
-	 * NB Once the following is called nvmr_connmgmt_handler() can be
+	 * NB Once rdma_resolve_addr() is called nvmr_connmgmt_handler() can be
 	 * invoked.  Keep cntrlr consistent as it can be reached via cmid
+	 * asynchronously.  Bump up the reference count for the activity in
+	 * the nvmr_connmgmt_handler() contexts.  Assign the allocated q
+	 * structure into the qarr so that cleaning up the controller structure
+	 * will clean up the q as well.  nvmr_queue_destroy() can no longer be
+	 * called except by nvmr_cntrlr_destroy()
 	 */
+	nvmr_cntrlr_ref(cntrlr);
+	*qp = q;
+	q->nvmrq_state = NVMRQ_PRE_ADDR_RESOLV;
 	retval = rdma_resolve_addr(cmid, NULL, (struct sockaddr *)sin4, NVMRTO);
 	if (retval != 0) {
 		ERRSPEW("Failed, rdma_resolve_addr()> %d\n", retval);
@@ -810,47 +973,46 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 		goto out;
 	}
 	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
-
-	error = 0;
-	*qp = q;
-
-out:
-	if (error == 0) {
-		goto outret;
+	mtx_lock(&cntrlr->nvmrctr_lock);
+	if (q->nvmrq_state == NVMRQ_PRE_ADDR_RESOLV) {
+		DBGSPEW("Sleeping with message \"%s\"\n",
+		    __stringify(__LINE__));
+		retval = mtx_sleep(cntrlr, &cntrlr->nvmrctr_lock, 0,
+		    __stringify(__LINE__), NVMRTO+1000);
+		mtx_unlock(&cntrlr->nvmrctr_lock);
+		switch (retval) {
+		case 0:
+			break;
+		case EWOULDBLOCK:
+			ERRSPEW("No response after %d ms\n",  NVMRTO+1000);
+		default:
+			error = retval;
+			goto out;
+		}
+	} else {
+		mtx_unlock(&cntrlr->nvmrctr_lock);
 	}
 
-	nvmr_destroy_queue(q);
-
-outret:
-	return error;
-}
-
-static void
-nvmr_destroy_cntrlr(nvmr_cntrlr_t cntrlr)
-{
-	int count;
-
-	if (cntrlr == NULL) {
+	if (q->nvmrq_state < NVMRQ_POST_ADDR_RESOLV_SUCCESS) {
+		/* The rdma_resolve_addr() failed */
+		error = q->nvmrq_last_cm_status;
 		goto out;
 	}
 
-	if (cntrlr->nvmrctr_qarr != NULL) {
-		for (count = 0; count < cntrlr->nvmrctr_numqs; count++) {
-			nvmr_destroy_queue(cntrlr->nvmrctr_qarr[count]);
-			cntrlr->nvmrctr_qarr[count] = NULL;
-		}
-		DBGSPEW("free(%p)ing Q array\n", cntrlr->nvmrctr_qarr);
-		free(cntrlr->nvmrctr_qarr, M_NVMR);
+	error = 0;
+
+out:
+	if ((error != 0) && (q->nvmrq_state < NVMRQ_PRE_ADDR_RESOLV)) {
+		/* Cleanup the Q because nvmr_cntrlr_destroy() won't see it */
+		nvmr_queue_destroy(q);
 	}
 
-	DBGSPEW("free(%p)ing NVMr controller\n", cntrlr);
-	free(cntrlr, M_NVMR);
-out:
-	return;
+	return error;
 }
 
+
 static int
-nvmr_create_cntrlr(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
+nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp)
 {
 	int error, retval, count, qcount, qarrndx;
@@ -891,6 +1053,8 @@ nvmr_create_cntrlr(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof(cntrlr->nvmrctr_ipv4));
 	cntrlr->nvmrctr_port = port;
 	cntrlr->nvmrctr_prof = prof;
+	mtx_init(&cntrlr->nvmrctr_lock, "NVMr Controller Lock", NULL, MTX_DEF);
+	cntrlr->nvmrctr_refcount = 1;
 
 	qcount = 0;
 	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
@@ -948,12 +1112,13 @@ out:
 
 	ERRSPEW("Returning with error \"%d\"\n", error);
 
-	nvmr_destroy_cntrlr(cntrlr);
+	nvmr_cntrlr_rele(cntrlr);
 	*retcntrlrp = NULL;
 
 outret:
 	return error;
 }
+
 #endif /* VELOLD */
 
 /*
@@ -1051,10 +1216,10 @@ nvmr_init(void)
 
 #else /* VELOLD */
 	
-	retval = nvmr_create_cntrlr(&r640gent07eno1, &nvmr_discoveryprof,
+	retval = nvmr_cntrlr_create(&r640gent07eno1, &nvmr_discoveryprof,
 	    &glbl_discovctrlrp);
 	if (retval != 0) {
-		ERRSPEW("nvmr_create_cntrlr(\"%s\", \"%s\") failed with %d\n",
+		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\") failed with %d\n",
 		    r640gent07eno1.nvmra_ipaddr, r640gent07eno1.nvmra_port,
 		    retval);
 		goto out;
@@ -1145,7 +1310,7 @@ nvmr_uninit(void)
 		goto out;
 	}
 	
-	nvmr_destroy_cntrlr(glbl_discovctrlrp);
+	nvmr_cntrlr_rele(glbl_discovctrlrp);
 	glbl_discovctrlrp = NULL;
 	
 #endif /* VELOLD */
