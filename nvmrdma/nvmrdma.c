@@ -859,102 +859,11 @@ nvmr_cntrlr_ref(nvmr_cntrlr_t cntrlr)
 }
 
 
-static void
-nvmr_cm_addr_resolved(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_ADDR_RESOLV_SUCCEEDED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-static void
-nvmr_cm_addr_error(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_ADDR_RESOLV_FAILED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-static void
-nvmr_cm_route_resolved(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_ROUTE_RESOLV_SUCCEEDED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-static void
-nvmr_cm_route_error(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_ROUTE_RESOLV_FAILED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-static void
-nvmr_cm_established(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_CONNECT_SUCCEEDED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-static void
-nvmr_cm_rejected(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_CONNECT_FAILED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-static void
-nvmr_cm_unreachable(nvmr_queue_t q)
-{
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	q->nvmrq_state = NVMRQ_CONNECT_FAILED;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(q->nvmrq_cntrlr);
-
-	nvmr_cntrlr_rele(q->nvmrq_cntrlr);
-
-	return;
-}
-
-
 static int
 nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 {
 	nvmr_queue_t q;
+	nvmr_queue_state_t qstate;
 	const nvmr_rdma_cm_reject_t *ps;
 
 	DBGSPEW("Event \"%s\" returned status \"%d\" for cmid:%p\n",
@@ -966,36 +875,55 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 
 	switch(event->event) {
 	case RDMA_CM_EVENT_ADDR_RESOLVED:
-		nvmr_cm_addr_resolved(q);
-		break;
-
 	case RDMA_CM_EVENT_ADDR_ERROR:
-		nvmr_cm_addr_error(q);
-		break;
-
 	case RDMA_CM_EVENT_ROUTE_RESOLVED:
-		nvmr_cm_route_resolved(q);
-		break;
-
 	case RDMA_CM_EVENT_ROUTE_ERROR:
-		nvmr_cm_route_error(q);
-		break;
-
 	case RDMA_CM_EVENT_ESTABLISHED:
-		nvmr_cm_established(q);
-		break;
-
 	case RDMA_CM_EVENT_UNREACHABLE:
-		nvmr_cm_unreachable(q);
-		break;
-
 	case RDMA_CM_EVENT_REJECTED:
-		ps = (const nvmr_rdma_cm_reject_t *)event->param.conn.private_data;
-		DBGSPEW("recfmt:%hu sts:%hu\n", ps->nvmrcrj_recfmt,
-		    ps->nvmrcrj_sts);
-		nvmr_cm_rejected(q);
-		break;
+		switch(event->event) {
+		case RDMA_CM_EVENT_ADDR_RESOLVED:
+			qstate = NVMRQ_ADDR_RESOLV_SUCCEEDED;
+			break;
 
+		case RDMA_CM_EVENT_ADDR_ERROR:
+			qstate = NVMRQ_ADDR_RESOLV_FAILED;
+			break;
+
+		case RDMA_CM_EVENT_ROUTE_RESOLVED:
+			qstate = NVMRQ_ROUTE_RESOLV_SUCCEEDED;
+			break;
+
+		case RDMA_CM_EVENT_ROUTE_ERROR:
+			qstate = NVMRQ_ROUTE_RESOLV_FAILED;
+			break;
+
+		case RDMA_CM_EVENT_ESTABLISHED:
+			qstate = NVMRQ_CONNECT_SUCCEEDED;
+			break;
+
+		case RDMA_CM_EVENT_UNREACHABLE:
+			qstate = NVMRQ_CONNECT_FAILED;
+			break;
+
+		case RDMA_CM_EVENT_REJECTED:
+			ps = (const nvmr_rdma_cm_reject_t *)
+			    event->param.conn.private_data;
+			DBGSPEW("Reject reason recfmt:%hu sts:%hu\n",
+			    ps->nvmrcrj_recfmt, ps->nvmrcrj_sts);
+			qstate = NVMRQ_CONNECT_FAILED;
+			break;
+		default:
+			panic("%s@%d: Unhandled Conn Manager event Q:%p e:%d\n",
+			    __func__, __LINE__, q, event->event);
+		}
+		mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
+		q->nvmrq_state = qstate;
+		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+		wakeup(&q->nvmrq_cmid);
+		nvmr_cntrlr_rele(q->nvmrq_cntrlr);
+		/* No touching q beyond this point */
+		break;
 	case RDMA_CM_EVENT_DISCONNECTED:
 		break;
 
@@ -1004,6 +932,7 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 		break;
 	}
 
+	/* No touching q beyond this point */
 	if (event->status != 0) {
 		dump_stack();
 	}
@@ -1033,8 +962,8 @@ typedef struct {
 	if (q->nvmrq_state == (pre_state)) {                               \
 		DBGSPEW("Sleeping with message \"%s\"\n",                  \
 		    __stringify(__LINE__));                                \
-		retval = mtx_sleep(cntrlr, &cntrlr->nvmrctr_lock, 0,       \
-		    __stringify(__LINE__), NVMRTO+1000);                   \
+		retval = mtx_sleep(&q->nvmrq_cmid, &cntrlr->nvmrctr_lock,  \
+		    0, __stringify(__LINE__), NVMRTO+1000);                \
 		mtx_unlock(&cntrlr->nvmrctr_lock);                         \
 		switch (retval) {                                          \
 		case 0:                                                    \
@@ -1258,7 +1187,6 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	privdata.nvmrcr_qid = 0;
 	privdata.nvmrcr_hrqsize = htole16(prof->nvmrqp_pdnumrcvqsz);
 	privdata.nvmrcr_hsqsize = htole16(prof->nvmrqp_pdnumsndqsz);
-	privdata.nvmrcr_hsqsize = 2000;
 	conn_param.responder_resources = ibd->attrs.max_qp_rd_atom;
 	conn_param.qp_num = q->nvmrq_ibqp->qp_num;
 	conn_param.flow_control = 1;
