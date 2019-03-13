@@ -1,5 +1,3 @@
-#undef VELOLD
-
 #include <sys/cdefs.h>
 #include <sys/types.h>
 #include <sys/param.h>
@@ -40,9 +38,11 @@ typedef struct nvmr_ncmplcont nvmr_ncmplcon_t;
 
 struct nvmr_ncommcont {
 	struct ib_cqe		     nvmsnd_cqe;
+	struct ib_cqe		     nvmsnd_regcqe;
 	STAILQ_ENTRY(nvmr_ncommcont) nvmsnd_next;
 	struct nvme_command         *nvmsnd_nvmecomm;
 	u64			     nvmsnd_dmaddr;
+	struct ib_mr                *nvmsnd_mr;
 };
 typedef struct nvmr_ncommcont nvmr_ncommcon_t;
 
@@ -68,138 +68,8 @@ nvmr_qphndlr(struct ib_event *ev, void *ctx)
 }
 
 
-#ifdef VELOLD
-struct nvmr_ncmplcont ncmplcntarr[MAX_ADMIN_WORK_REQUESTS];
-struct nvme_completion ncmplsarr[MAX_ADMIN_WORK_REQUESTS];
-
-struct nvmr_ncommcont ncommcntarr[MAX_ADMIN_WORK_REQUESTS];
-struct nvme_command ncommsarr[MAX_ADMIN_WORK_REQUESTS];
-
-struct ib_mr *nsndmrarr[MAX_ADMIN_WORK_REQUESTS];
-
-static struct rdma_cm_id *glbl_cmid = NULL;
-static struct ib_device  *glbl_ibdev = NULL;
-static struct ib_pd      *glbl_ibpd  = NULL;
-static struct ib_cq      *glbl_ibcq  = NULL;
-static struct ib_qp      *glbl_ibqp  = NULL;
-/*
- * Invoked on event RDMA_CM_EVENT_ADDR_RESOLVED.  Invokes rdma_resolve_route()
- */
-static void
-nvmr_addr_resolved(struct rdma_cm_id *cm_id)
-{
-	int retval;
-	struct ib_pd *ibpd;
-
-	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
-
-	if (!(cm_id->device->attrs.device_cap_flags &
-	    IB_DEVICE_MEM_MGT_EXTENSIONS)) {
-		ERRSPEW("Memory management extensions not supported. 0x%lX\n",
-		    cm_id->device->attrs.device_cap_flags);
-		goto out;
-	}
-
-	ibpd  = ib_alloc_pd(cm_id->device, 0);
-	if (IS_ERR(ibpd)) {
-		ERRSPEW("ib_alloc_pd() failed: 0x%lx\n", PTR_ERR(ibpd));
-		goto out;
-	}
-	glbl_ibpd  = ibpd;
-	glbl_ibdev = cm_id->device;
-
-	retval = rdma_resolve_route(cm_id, 2000);
-	if (retval != 0) {
-		ERRSPEW("rdma_resolve_route() failed w/%d\n", retval);
-	} else {
-		DBGSPEW("Successfully invoked rdma_resolve_route()\n");
-	}
-out:
-	return;
-}
-
-/*
- * Invoked on event RDMA_CM_EVENT_ROUTE_RESOLVED.
- * A Queue-Pair to the RDMA sub-system is created along with a Completion-Queue
- * for its use internally.  An RDMA connection is established which generates
- * the first packets on the wite.  The NVMeoF RDMA spec requires that the
- * initiator pass along a parameters block in the private data section.
- */
-static void
-nvmr_route_resolved(struct rdma_cm_id *cm_id)
-{
-	int retval;
-	struct ib_cq *ib_cq;
-	struct ib_qp_init_attr init_attr;
-	struct rdma_conn_param conn_param;
-	nvmr_rdma_cm_request_t privdata;
-
-	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
-
-	ib_cq = ib_alloc_cq(glbl_ibdev, NULL /* priv */,
-	    (MAX_ADMIN_WORK_REQUESTS* 4) + 1, 0 /* completion vector */,
-	    IB_POLL_WORKQUEUE);
-
-	if (IS_ERR(ib_cq)) {
-		ERRSPEW("ib_alloc_cq() failed with 0x%lX\n", PTR_ERR(ib_cq));
-		goto out;
-	} else {
-		DBGSPEW("ib_alloc_cq() returned %p\n", ib_cq);
-		glbl_ibcq = ib_cq;
-	}
-
-	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL) &&
-	    (glbl_ibdev != NULL), ("Global(s) NULL"));
-
-	memset(&init_attr, 0, sizeof(init_attr));
-	init_attr.cap.max_send_wr = (MAX_ADMIN_WORK_REQUESTS * 3) + 1;
-	init_attr.cap.max_recv_wr = MAX_ADMIN_WORK_REQUESTS + 1;
-	init_attr.cap.max_recv_sge = 1;
-	init_attr.cap.max_send_sge = 1 + 1;
-	init_attr.qp_type = IB_QPT_RC;
-	init_attr.send_cq = glbl_ibcq;
-	init_attr.recv_cq = glbl_ibcq;
-	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-
-	init_attr.event_handler = nvmr_qphndlr;
-
-	retval = rdma_create_qp(glbl_cmid, glbl_ibpd, &init_attr);
-	if (retval != 0) {
-		ERRSPEW("rdma_create_qp() failed with %d\n", retval);
-	} else {
-		DBGSPEW("Successfully created QP!\n");
-		glbl_ibqp = glbl_cmid->qp;
-	}
-
-	/*
-	 * NB: The conn_param has to pass in an NVMeoF RDMA Private Data
-	 * structure for the NVMeoF RDMA target to setup its Q sizes et al.
-	 */
-	memset(&conn_param, 0, sizeof(conn_param));
-	memset(&privdata, 0, sizeof(privdata));
-	privdata.nvmrcr_recfmt = 0;
-	privdata.nvmrcr_qid = 0;
-	privdata.nvmrcr_hrqsize = htole16(MAX_ADMIN_WORK_REQUESTS);
-	privdata.nvmrcr_hsqsize = htole16(MAX_ADMIN_WORK_REQUESTS - 1);
-	conn_param.responder_resources = glbl_ibdev->attrs.max_qp_rd_atom;
-	conn_param.qp_num = glbl_ibqp->qp_num;
-	conn_param.flow_control = 1;
-	conn_param.retry_count = 3;
-	conn_param.rnr_retry_count = 3;
-	conn_param.private_data = &privdata;
-	conn_param.private_data_len = sizeof(privdata);
-
-	retval = rdma_connect(glbl_cmid, &conn_param);
-	if (retval != 0) {
-		ERRSPEW("rdma_connect() failed with %d\n", retval);
-	} else {
-		DBGSPEW("Wait for \"established\" after rdma_connected()...\n");
-	}
-
-out:
-	return;
-}
-
+char nvrdma_host_uuid_string[80];
+struct uuid nvrdma_host_uuid;
 
 #define MAX_SGS	2
 #define CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(data_structure) \
@@ -216,81 +86,12 @@ struct nvmrdma_connect_data {
 CTASSERT(sizeof(struct nvmrdma_connect_data) == 1024);
 CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
 
-struct nvmrdma_connect_data glbl_ncdata;
-
-static void
-nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
-{
-	struct nvmr_ncmplcont *rcve;
-	struct nvme_completion *c;
-
-	rcve = container_of(wc->wr_cqe, struct nvmr_ncmplcont, nvmrsp_cqe);
-
-	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
-	    ib_wc_status_msg(wc->status));
-
-	ib_dma_sync_single_for_cpu(glbl_ibdev, rcve->nvmrsp_dmaddr,
-	    sizeof(*(rcve->nvmrsp_nvmecompl)), DMA_FROM_DEVICE);
-
-	if (wc->status == IB_WC_SUCCESS) {
-		c = rcve->nvmrsp_nvmecompl;
-		DBGSPEW("c:0x%08X r:0x%08X hd:0x%04hX id:0x%04hX cid:0x%04hX "
-		    "status:0x%04hX\n", c->cdw0, c->rsvd1, c->sqhd, c->sqid,
-		    c->cid, c->status);
-		if (c->status == 0) {
-			DBGSPEW("NVMe Command succeeded for Host \"%s\"\n",
-			    glbl_ncdata.nvmrcd_hostnqn);
-		}
-	}
-}
-
-
 #define NVMR_FOURK (4096)
 #define NVMR_DYNANYCNTLID 0xFFFF
 
 #define HOSTNQN_TEMPLATE "nqn.2014-08.org.nvmexpress:uuid:%s"
 #define DISCOVERY_SUBNQN "nqn.2014-08.org.nvmexpress.discovery"
 
-char nvrdma_host_uuid_string[80];
-struct uuid nvrdma_host_uuid;
-
-struct ib_cqe regcqe, sndcqe;
-
-static void
-nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
-{
-	struct ib_cqe *rcve;
-
-	rcve = wc->wr_cqe;
-
-	DBGSPEW("regcqe:%p, rcve:%p, wc_status:\"%s\"\n", &regcqe, rcve,
-	    ib_wc_status_msg(wc->status));
-}
-
-
-typedef struct {
-	uint8_t  nvmrcon_opcode;
-	uint8_t  nvmrcon_sgl_fuse;
-	uint16_t nvmrcon_cid;
-	uint8_t  nvmrcon_fctype;
-	uint8_t  nvmrcon_resv1[19];
-	struct {
-		uint64_t nvmrconk_address;
-		uint8_t  nvmrconk_length[3];
-		uint32_t nvmrconk_key;
-		uint8_t  nvmrconk_sgl_identifier;
-	} __packed;
-	uint16_t nvmrcon_recfmt;
-	uint16_t nvmrcon_qid;
-	uint16_t nvmrcon_sqsize;
-	uint8_t  nvmrcon_cattr;
-	uint8_t  nvmrcon_resv2;
-	uint32_t nvmrcon_kato;
-	uint8_t  nvmrcon_resv3[12];
-} __packed nvmr_connect_t;
-CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
-
-nvmr_connect_t glbl_connect;
 #define NVMR_DEFAULT_KATO 0x1D4C0
 #define NVMR_DISCOVERY_KATO 0x0 /* DISCOVERY KATO has to be 0 */
 #define NVMF_FCTYPE_CONNECT 0x1
@@ -300,6 +101,16 @@ nvmr_connect_t glbl_connect;
 #define NVMF_KEYED_SGL_NO_INVALIDATE 0x40
 #define NVMF_KEYED_SGL_INVALIDATE    0x4F
 
+static void
+nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
+{
+	struct ib_cqe *rcve;
+
+	rcve = wc->wr_cqe;
+
+	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
+	    ib_wc_status_msg(wc->status));
+}
 
 static void
 nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
@@ -308,298 +119,12 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
-	DBGSPEW("ncommcntarr:%p, rcve:%p, wc_status:\"%s\"\n", &ncommcntarr,
-	    rcve, ib_wc_status_msg(wc->status));
+	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
+	    ib_wc_status_msg(wc->status));
 }
 
 
-/*
- * Invoked on event RDMA_CM_EVENT_ESTABLISHED after the rdma_connect() and
- * associated data are accepted by the NVMeoF target.
- * Now we setup the Queue-Pair for Admin use:
- * 1) The Receive Queue will only receive nvme_completion messages
- * 2) The Send Queue will take nvme_command messages, with optional data
- *    represented in an SGL.  The latter means that Memory Registrations will
- *    be needed to describe the location of the data which will be sent over
- *    to the target. The target will RDMA this data over to itself.
- * 3) Posting Recv buffers (nvme_completion) and Send buffers (nvme_command) is
- *    collectively called posting Work Requests (WRs).  When posting WRs it
- *    is necessary to post a Completion Queue Entry structure to the RDMA
- *    stack which will be used internally in its CQ, unless we don't care
- *    to be notified of the WR having completed and the completion status.
- * 4) Memory Region (MR) Registrations are made by posting MR registration WRs
- *    to the Send Queue
- */
-static void
-nvmr_event_established(struct rdma_cm_id *cm_id)
-{
-	int retval, count, offset, n, nn, nnn;
-	struct scatterlist scl[MAX_SGS], *s;
-	struct ib_recv_wr rcvwr, *badrcvwrp;
-	struct ib_send_wr sndwr, *badsndwrp;
-	struct nvme_completion *cmplp;
-	struct nvmr_ncmplcont *rcve;
-	struct nvmr_ncommcont *snde;
-	nvmr_connect_t *connectp;
-	struct ib_reg_wr regwr;
-	size_t len, translen;
-	struct ib_sge sgl;
-	struct ib_mr *mr;
-	void *cbuf;
-	u64 dmaddr;
 
-	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
-	KASSERT((glbl_ibcq != NULL) && (glbl_ibpd != NULL) &&
-	    (glbl_ibdev != NULL), ("Global(s) NULL"));
-
-	/*
-	 * The first loop maps the NVMe completion buffers, the next posts
-	 * them to the IB RCV Q
-	 */
-	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-		dmaddr =  ib_dma_map_single(glbl_ibdev, ncmplsarr + count,
-		    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
-		if (ib_dma_mapping_error(glbl_ibdev, dmaddr) != 0) {
-			ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
-			goto out;
-		} else {
-			(ncmplcntarr+count)->nvmrsp_dmaddr = dmaddr;
-		}
-		ib_dma_sync_single_for_device(glbl_ibdev, dmaddr,
-		    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
-	}
-	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-		rcve = ncmplcntarr + count;
-		cmplp = ncmplsarr + count;
-
-		memset(cmplp, 0, sizeof(*cmplp));
-		memset(&rcvwr, 0, sizeof(rcvwr));
-		memset(&sgl, 0, sizeof(sgl));
-		rcve->nvmrsp_nvmecompl = cmplp;
-
-		sgl.addr   = rcve->nvmrsp_dmaddr;
-		sgl.length = sizeof(*(rcve->nvmrsp_nvmecompl));
-		sgl.lkey   = glbl_ibpd->local_dma_lkey;
-
-		rcve->nvmrsp_cqe.done = nvmr_recv_cmplhndlr;
-
-		rcvwr.sg_list = &sgl;
-		rcvwr.num_sge = 1;
-		rcvwr.wr_cqe  = &rcve->nvmrsp_cqe;
-		rcvwr.next    = NULL;
-
-		retval = ib_post_recv(glbl_ibqp, &rcvwr, &badrcvwrp);
-		if (retval != 0) {
-			ERRSPEW("ib_post_recv() failed for #%d with %d\n",
-			    count, retval);
-			goto out;
-		}
-	}
-	DBGSPEW("Successfully posted receive buffers for NVMe completions\n");
-
-
-	/*
-	 * Allocate MR structures for use by any data that the NVMe commands
-	 * posted to the IB SND Q need to describe
-	 */
-	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-		mr = ib_alloc_mr(glbl_ibpd, IB_MR_TYPE_MEM_REG,
-		    MAX_NVME_RDMA_SEGMENTS);
-		if (IS_ERR(mr)) {
-			ERRSPEW("ib_alloc_mr() failed with \"%ld\" for "
-			    "count #%d\n", PTR_ERR(mr), count);
-			goto out;
-		}
-		nsndmrarr[count] = mr;
-	}
-	DBGSPEW("Successfully allocated MRs for Admin commands\n");
-
-	/*
-	 * The next loop maps the NVMe command buffers
-	 */
-	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-		dmaddr =  ib_dma_map_single(glbl_ibdev, ncommsarr + count,
-		    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
-		if (ib_dma_mapping_error(glbl_ibdev, dmaddr) != 0) {
-			ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
-			goto out;
-		} else {
-			(ncommcntarr+count)->nvmsnd_dmaddr = dmaddr;
-		}
-		/* Retain ownership with the driver until we actually use it */
-		ib_dma_sync_single_for_cpu(glbl_ibdev, dmaddr,
-		    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
-	}
-
-
-	/*
-	 * Craft a CONNECT command to begin discovery: Steps 1 through 5
-	 */
-
-	/*
-	 * 1) Generate UUID et al for CONNECT Data.  Translate to a scatterlist
-	 *    array of pages a la iser_buf_to_sg()
-	 */
-	kern_uuidgen(&nvrdma_host_uuid, 1);
-	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
-	    &nvrdma_host_uuid);
-	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
-	glbl_ncdata.nvmrcd_hostid = nvrdma_host_uuid;
-	glbl_ncdata.nvmrcd_cntlid = htole16(NVMR_DYNANYCNTLID);
-	snprintf(glbl_ncdata.nvmrcd_subnqn, sizeof(glbl_ncdata.nvmrcd_subnqn),
-	    DISCOVERY_SUBNQN);
-	snprintf(glbl_ncdata.nvmrcd_hostnqn, sizeof(glbl_ncdata.nvmrcd_hostnqn),
-	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string);
-
-	translen = sizeof(glbl_ncdata);
-	cbuf = &glbl_ncdata;
-	for (n = 0; (0 < translen) && (n < MAX_SGS); n++, translen -= len) {
-		s = scl + n;
-		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
-		len = min(PAGE_SIZE - offset, translen);
-		sg_set_buf(s, cbuf, len);
-		cbuf = (void *)(((u64)cbuf) + (u64)len);
-	}
-	if (translen != 0) {
-		ERRSPEW("Could not complete translation of CONNECT Data. n:%d "
-		    "translen:%zu\n", n, translen);
-		goto out;
-	} else {
-		DBGSPEW("&glbl_ncdata is 0x%p\n", &glbl_ncdata);
-		for (count = 0; count < n; count++) {
-			DBGSPEW("scl[%d](hex) p:%16lX o:%8X l:%8X a:%16lX\n",
-			count,
-			scl[count].page_link,
-			scl[count].offset,
-			scl[count].length,
-			scl[count].address);
-		}
-	}
-
-	/* 2) Map the scatterlist array per the restrictions of the IB device */
-	nn = ib_dma_map_sg(glbl_ibdev, scl, n, DMA_TO_DEVICE);
-	if (nn < 1) {
-		ERRSPEW("ib_dma_map_sg() failed with count:%d\n", nn);
-		goto out;
-	} else {
-		DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn);
-	}
-
-	/* 3) Map the scatterlist elements to the MR  */
-	mr = nsndmrarr[0];
-	nnn = ib_map_mr_sg(mr, scl, nn, NULL, NVMR_FOURK);
-	if (nnn < nn) {
-		ERRSPEW("ib_map_mr_sg() failed. nnn:%d < nn:%d\n", nnn, nn);
-		goto out;
-	} else {
-		DBGSPEW("ib_map_mr_sg() returned a count of %d\n", nnn);
-	}
-	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
-
-	/* 4) Craft the memory registration work-request but don't post it */
-	regcqe.done = nvmr_rg_done;
-	memset(&regwr, 0, sizeof(regwr));
-	/* NB the Registration work-request contains a Send work-request */
-	regwr.wr.num_sge = 0; /* No send/recv buffers are being posted */
-	regwr.wr.send_flags = IB_SEND_SIGNALED; /* Invoke .done when done */
-	regwr.wr.opcode = IB_WR_REG_MR;
-	regwr.wr.wr_cqe = &regcqe;
-	regwr.wr.next = NULL;
-
-	regwr.access = IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ |
-	    IB_ACCESS_REMOTE_WRITE;
-	regwr.key = mr->rkey;
-	regwr.mr = mr;
-
-	/* 5) Craft an NVMeoF Connect Command and post it */
-	ncommcntarr[0].nvmsnd_nvmecomm = &ncommsarr[0];
-	snde = &ncommcntarr[0];
-	KASSERT(sizeof(*connectp) == sizeof(*snde->nvmsnd_nvmecomm), ("Hm..."));
-	connectp = (nvmr_connect_t *)snde->nvmsnd_nvmecomm;
-	memset(connectp, 0, sizeof(*connectp));
-
-	connectp->nvmrcon_opcode = NVME_OPC_FABRIC_COMMAND;
-	connectp->nvmrcon_sgl_fuse = NVMF_SINGLE_BUF_SGL;
-	connectp->nvmrcon_fctype = NVMF_FCTYPE_CONNECT;
-
-	connectp->nvmrconk_address = htole64(mr->iova);
-	connectp->nvmrconk_length[0] = htole32(mr->length) & 0xFF;
-	connectp->nvmrconk_length[1] = (htole32(mr->length)>>8) & 0xFF;
-	connectp->nvmrconk_length[2] = (htole32(mr->length)>>16) & 0xFF;
-	connectp->nvmrconk_key = htole32(mr->rkey);
-	connectp->nvmrconk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
-
-	connectp->nvmrcon_recfmt = 0;
-	connectp->nvmrcon_qid = 0;
-	connectp->nvmrcon_sqsize = MAX_ADMIN_WORK_REQUESTS - 1; /* 0 based */
-	connectp->nvmrcon_cattr = 0;
-	connectp->nvmrcon_kato = NVMR_DISCOVERY_KATO;
-
-	memset(&sndwr, 0, sizeof(sndwr));
-	memset(&sgl, 0, sizeof(sgl));
-
-	sgl.addr   = snde->nvmsnd_dmaddr;
-	sgl.length = sizeof(*(snde->nvmsnd_nvmecomm));
-	sgl.lkey   = glbl_ibpd->local_dma_lkey;
-
-	snde->nvmsnd_cqe.done = nvmr_snd_done;
-
-	sndwr.next  = &regwr.wr; /* Chain the MR registration WR into send WR */
-	sndwr.wr_cqe = &snde->nvmsnd_cqe;
-	sndwr.sg_list = &sgl;
-	sndwr.num_sge = 1;
-	sndwr.opcode = IB_WR_SEND;
-	sndwr.send_flags = IB_SEND_SIGNALED;
-	ib_dma_sync_single_for_device(glbl_ibdev, snde->nvmsnd_dmaddr,
-	    sizeof(*(snde->nvmsnd_nvmecomm)), DMA_TO_DEVICE);
-
-	badsndwrp = NULL;
-	retval = ib_post_send(glbl_ibqp, &sndwr, &badsndwrp);
-	if (retval != 0) {
-		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
-		    &sndwr, retval, badsndwrp);
-		goto out;
-	} else {
-		DBGSPEW("ib_post_send(&sndwr) returned without incident\n");
-	}
-
-out:
-	return;
-}
-
-static int
-nvmr_cm_handler(struct rdma_cm_id *cm_id, struct rdma_cm_event *event)
-{
-	DBGSPEW("Event \"%s\" returned status \"%d\" for cm_id:%p\n",
-	    rdma_event_msg(event->event), event->status, cm_id);
-
-	KASSERT(glbl_cmid == cm_id, ("Global CM id not the passed in CM id"));
-
-	switch(event->event) {
-	case RDMA_CM_EVENT_ADDR_RESOLVED:
-		nvmr_addr_resolved(cm_id);
-		break;
-
-	case RDMA_CM_EVENT_ROUTE_RESOLVED:
-		nvmr_route_resolved(cm_id);
-		break;
-
-	case RDMA_CM_EVENT_ESTABLISHED:
-		nvmr_event_established(cm_id);
-		break;
-
-	case RDMA_CM_EVENT_DISCONNECTED:
-		break;
-
-	default:
-		dump_stack();
-		break;
-	}
-
-	return 0;
-}
-
-#else /* VELOLD */
 
 #define NUMIPV4OCTETS 4
 typedef uint8_t nvmripv4_t[NUMIPV4OCTETS];
@@ -613,6 +138,7 @@ typedef struct {
 	int      nvmrqp_numrcvqe;
 	int      nvmrqp_numsndsge;
 	int      nvmrqp_numrcvsge;
+	uint32_t nvmrqp_kato;
 	uint16_t nvmrqp_pdnumsndqsz;
 	uint16_t nvmrqp_pdnumrcvqsz;
 } nvmr_qprof_t;
@@ -695,11 +221,37 @@ nvmr_cntrlrprof_t nvmr_discoveryprof = {
 		.nvmrqp_numrcvqe = MAX_ADMIN_WORK_REQUESTS + 1,
 		.nvmrqp_numrcvsge = 1, /* NVMe Completion */
 		.nvmrqp_pdnumrcvqsz = MAX_ADMIN_WORK_REQUESTS,
+
+		.nvmrqp_kato = NVMR_DISCOVERY_KATO,
 	},
 	.nvmrp_cbfunc   = nvmr_discov_cntrlr,
 };
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
+
+typedef struct {
+	uint64_t nvmrk_address;
+	uint8_t  nvmrk_length[3];
+	uint32_t nvmrk_key;
+	uint8_t  nvmrk_sgl_identifier;
+} __packed nvmr_ksgl_t;
+
+typedef struct {
+	uint8_t     nvmrcon_opcode;
+	uint8_t     nvmrcon_sgl_fuse;
+	uint16_t    nvmrcon_cid;
+	uint8_t     nvmrcon_fctype;
+	uint8_t     nvmrcon_resv1[19];
+	nvmr_ksgl_t nvmrcon_ksgl;
+	uint16_t    nvmrcon_recfmt;
+	uint16_t    nvmrcon_qid;
+	uint16_t    nvmrcon_sqsize;
+	uint8_t     nvmrcon_cattr;
+	uint8_t     nvmrcon_resv2;
+	uint32_t    nvmrcon_kato;
+	uint8_t     nvmrcon_resv3[12];
+} __packed nvmr_connect_t;
+CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
 
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
@@ -782,6 +334,13 @@ nvmr_queue_destroy(nvmr_queue_t q)
 
 	count = 0;
 	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmsnd_next, tcommp) {
+		ib_dereg_mr(commp->nvmsnd_mr);
+		if (commp->nvmsnd_dmaddr != 0) {
+			ib_dma_sync_single_for_cpu(ibd, commp->nvmsnd_dmaddr,
+			    sizeof(*commp->nvmsnd_nvmecomm), DMA_FROM_DEVICE);
+			ib_dma_unmap_single(ibd, commp->nvmsnd_dmaddr,
+			    sizeof(*commp->nvmsnd_nvmecomm), DMA_FROM_DEVICE);
+		}
 		free(commp, M_NVMR);
 		count++;
 	}
@@ -945,6 +504,184 @@ typedef struct {
 	char *nvmra_port;
 } nvmr_addr_t;
 
+typedef enum {
+	NVMR_QCMD_RO = 0,
+	NVMR_QCMD_WO,
+	NVMR_QCMD_RW,
+}  nvmr_ksgl_perm_t;
+
+static int
+nvmr_queue_command(nvmr_queue_t q, struct nvme_command *c, nvmr_ksgl_t *k,
+    void *d, int l, nvmr_ksgl_perm_t p)
+{
+	int offset, count, n, nn, nnn, error, retval;
+	struct scatterlist scl[MAX_SGS], *s;
+	char *cstart, *cend, *kstart, *kend;
+	size_t len, translen;
+	struct ib_reg_wr regwr;
+	nvmr_ncommcon_t *commp;
+	struct ib_mr *mr;
+	void *cbuf;
+	u64 dmaddr;
+	struct ib_sge sgl;
+	struct ib_send_wr sndwr, *badsndwrp;
+	struct ib_device *ibd;
+
+	if ((c == NULL) || (q == NULL)) {
+		DBGSPEW("c:%p and/or q:%p NULL\n", c, q);
+		return 0;
+	}
+	
+	ibd = q->nvmrq_cmid->device;
+
+	commp = STAILQ_FIRST(&q->nvmrq_comms);
+	memset(&sndwr, 0, sizeof(sndwr));
+	sndwr.next  = NULL;
+
+	if (k == NULL) {
+		goto skip_ksgl;
+	}
+
+	cstart = (char *)c;
+	cend = cstart + sizeof(*c);
+	kstart = (char *)k;
+	kend = kstart + sizeof(*k);
+	KASSERT((cstart <= kstart) && (kend <= cend), ("%s@%d: Key-SGL "
+	    "location not contained within NVMe command c:%p k:%p\n",
+	    __func__, __LINE__, c, k));
+
+	/*
+	 * 1) Translate the optional command data into a scatterlist array
+	 *    for ib_dma_map_sg() to use a la iser_buf_to_sg()
+	 */
+	translen = l;
+	cbuf = d;
+	for (n = 0; (0 < translen) && (n < MAX_SGS); n++, translen -= len) {
+		s = scl + n;
+		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
+		len = min(PAGE_SIZE - offset, translen);
+		sg_set_buf(s, cbuf, len);
+		cbuf = (void *)(((u64)cbuf) + (u64)len);
+	}
+	if (translen != 0) {
+		ERRSPEW("Could not complete translation of CONNECT Data. n:%d "
+		    "translen:%zu\n", n, translen);
+		error = E2BIG;
+		goto out;
+	} else {
+		DBGSPEW("data is 0x%p\n", d);
+		for (count = 0; count < n; count++) {
+			DBGSPEW("scl[%d](hex) p:%16lX o:%8X l:%8X a:%16lX\n",
+			count,
+			scl[count].page_link,
+			scl[count].offset,
+			scl[count].length,
+			scl[count].address);
+		}
+	}
+
+	/* 2) Map the scatterlist array per the restrictions of the IB device */
+	nn = ib_dma_map_sg(ibd, scl, n, DMA_TO_DEVICE);
+	if (nn < 1) {
+		ERRSPEW("ib_dma_map_sg() failed with count:%d\n", nn);
+		error = E2BIG;
+		goto out;
+	}
+	DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn);
+
+	/* 3) Map the scatterlist elements to the MR  */
+	mr = commp->nvmsnd_mr;
+	nnn = ib_map_mr_sg(mr, scl, nn, NULL, NVMR_FOURK);
+	if (nnn < nn) {
+		ERRSPEW("ib_map_mr_sg() failed. nnn:%d < nn:%d\n", nnn, nn);
+		error = E2BIG;
+		goto out;
+	}
+	DBGSPEW("ib_map_mr_sg() returned a count of %d\n", nnn);
+	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
+
+	/* 4) Craft the memory registration work-request but don't post it */
+	commp->nvmsnd_regcqe.done = nvmr_rg_done;
+	memset(&regwr, 0, sizeof(regwr));
+	/* NB the Registration work-request contains a Send work-request */
+	regwr.wr.num_sge = 0; /* No send/recv buffers are being posted */
+	regwr.wr.send_flags = IB_SEND_SIGNALED; /* Invoke .done when done */
+	regwr.wr.opcode = IB_WR_REG_MR;
+	regwr.wr.wr_cqe = &commp->nvmsnd_regcqe;
+	regwr.wr.next = NULL;
+
+	switch(p) {
+	case NVMR_QCMD_RO:
+		regwr.access = IB_ACCESS_REMOTE_READ;
+		break;
+	case NVMR_QCMD_WO:
+		regwr.access = IB_ACCESS_REMOTE_WRITE;
+		break;
+	case NVMR_QCMD_RW:
+		regwr.access = IB_ACCESS_REMOTE_READ|IB_ACCESS_REMOTE_WRITE;
+		break;
+	default:
+		panic("%s@%d Unimplemented permission %d\n", __func__, __LINE__,
+		    p);
+	}
+	regwr.access |= IB_ACCESS_LOCAL_WRITE;
+	regwr.key = mr->rkey;
+	regwr.mr = mr;
+
+	k->nvmrk_address = htole64(mr->iova);
+	k->nvmrk_length[0] = htole32(mr->length) & 0xFF;
+	k->nvmrk_length[1] = (htole32(mr->length)>>8) & 0xFF;
+	k->nvmrk_length[2] = (htole32(mr->length)>>16) & 0xFF;
+	k->nvmrk_key = htole32(mr->rkey);
+	k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
+
+	sndwr.next  = &regwr.wr; /* Chain the MR registration WR into send WR */
+
+skip_ksgl:
+
+	dmaddr =  ib_dma_map_single(ibd, c, sizeof(*c), DMA_TO_DEVICE);
+	if (ib_dma_mapping_error(ibd, dmaddr) != 0) {
+		ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
+		error = ENOENT;
+		goto out;
+	}
+	commp->nvmsnd_nvmecomm = c;
+	commp->nvmsnd_dmaddr = dmaddr;
+	/* Transfer ownership of command structure device */
+	ib_dma_sync_single_for_device(ibd, dmaddr, sizeof(*c), DMA_TO_DEVICE);
+
+	memset(&sgl, 0, sizeof(sgl));
+
+	sgl.addr   = dmaddr;
+	sgl.length = sizeof(*(commp->nvmsnd_nvmecomm));
+	sgl.lkey   = q->nvmrq_ibpd->local_dma_lkey;
+
+	commp->nvmsnd_cqe.done = nvmr_snd_done;
+
+	sndwr.wr_cqe = &commp->nvmsnd_cqe;
+	sndwr.sg_list = &sgl;
+	sndwr.num_sge = 1;
+	sndwr.opcode = IB_WR_SEND;
+	sndwr.send_flags = IB_SEND_SIGNALED;
+
+	badsndwrp = NULL;
+	retval = ib_post_send(q->nvmrq_ibqp, &sndwr, &badsndwrp);
+	if (retval != 0) {
+		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
+		    &sndwr, retval, badsndwrp);
+		error = retval;
+		goto out;
+	} else {
+		DBGSPEW("ib_post_send(&sndwr) returned without incident\n");
+	}
+
+	error = 0;
+
+out:	
+	return error;
+}
+
+
 #define NVMRTO 3000
 
 #define PRE_ASYNC_CM_INVOCATION(pre_state) \
@@ -984,9 +721,10 @@ typedef struct {
 
 	
 static int
-nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
+nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 {
 	u64 dmaddr;
+	struct ib_mr *mr;
 	struct ib_recv_wr rcvwr, *badrcvwrp;
 	struct ib_sge sgl;
 	struct nvme_completion *ncmp;
@@ -1003,6 +741,8 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	struct rdma_conn_param conn_param;
 	nvmr_rdma_cm_request_t privdata;
 	struct ib_cq *ibcq;
+	struct nvmrdma_connect_data ncdata;
+	nvmr_connect_t conn;
 
 	sin4 = (struct sockaddr_in *)&saddr;
 
@@ -1029,14 +769,11 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 	q->nvmrq_cmid = cmid;
 	DBGSPEW("rdma_create_id() succeeded:%p\n", q->nvmrq_cmid);
-	/*
-	ibd = cmid->device;
-	if (ibd == NULL) {
-		DBGSPEW("ibd is NULL\n");
-		goto out;
-	}
-	 */
 
+	/*
+	 * Allocate containers for the Send Q elements which are always
+	 * struct nvme_command (or fabric equivalent)
+	 */
 	for (count = 0; count < prof->nvmrqp_numsndqe; count++) {
 		commp = malloc(sizeof(*commp),  M_NVMR, M_WAITOK|M_ZERO);
 		if (commp == NULL) {
@@ -1052,6 +789,10 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 	DBGSPEW("Alloced %d command Q containers\n", q->nvmrq_numsndqe);
 
+	/*
+	 * Allocate containers for the Recv Q elements which are always
+	 * struct nvme_completion
+	 */
 	for (count = 0; count < prof->nvmrqp_numrcvqe; count++) {
 		cmplp = malloc(sizeof(*cmplp),  M_NVMR, M_WAITOK|M_ZERO);
 		if (cmplp == NULL) {
@@ -1090,6 +831,10 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	POST_ASYNC_CM_INVOCATION(__stringify(rdma_resolve_addr),
 	    NVMRQ_PRE_ADDR_RESOLV, NVMRQ_ADDR_RESOLV_SUCCEEDED);
 
+	/*
+	 * Once address resoltion is complete the cmid will have the IB device
+	 * that our RDMA connection will be using
+	 */
 	ibd = q->nvmrq_cmid->device;
 	if (ibd == NULL) {
 		error = EDOOFUS;
@@ -1110,6 +855,27 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 		goto out;
 	}
 	q->nvmrq_ibpd = ibpd;
+
+	/*
+	 * Allocate MR structures for use by any data that the NVMe commands
+	 * posted to the IB SND Q need to describe
+	 */
+	count = 0;
+	STAILQ_FOREACH(commp, &q->nvmrq_comms, nvmsnd_next) {
+		mr = ib_alloc_mr(ibpd, IB_MR_TYPE_MEM_REG,
+		    MAX_NVME_RDMA_SEGMENTS);
+		if (IS_ERR(mr)) {
+			ERRSPEW("ib_alloc_mr() failed with \"%ld\" for "
+			    "count #%d\n", PTR_ERR(mr), count);
+			error = ENOENT;
+			goto out;
+		}
+		commp->nvmsnd_mr = mr;
+		count++;
+	}
+	KASSERT(count == q->nvmrq_numsndqe, ("%s@%d count:%d numsndqe:%d",
+	    __func__, __LINE__, count, q->nvmrq_numsndqe));
+	DBGSPEW("Successfully allocated MRs for Admin commands\n");
 
 	/*
 	 * Loop through the list of completion container structures mapping
@@ -1145,6 +911,11 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	POST_ASYNC_CM_INVOCATION(__stringify(rdma_resolve_route),
 	    NVMRQ_PRE_ROUTE_RESOLV, NVMRQ_ROUTE_RESOLV_SUCCEEDED);
 
+	/*
+	 * Allocate an RDMA completion Q for receiving the status of Work
+	 * Requests (Send/Recv) on the Q pair.  It should be deep enough to
+	 * handle completion Q elements from both Qs in the pair.
+	 */
 	ibcq = ib_alloc_cq(ibd, q,
 	    q->nvmrq_numrcvqe + q->nvmrq_numsndqe, 0 /* completion vector */,
 	    IB_POLL_WORKQUEUE);
@@ -1156,6 +927,10 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	DBGSPEW("ib_alloc_cq() returned %p\n", ibcq);
 	q->nvmrq_ibcq = ibcq;
 
+	/*
+	 * Now create the RDMA queue pair that we can post the NVMe command
+	 * (Send Q) and NVMe completion (Recv Q) buffers to.
+	 */
 	memset(&init_attr, 0, sizeof(init_attr));
 	init_attr.cap.max_send_wr = q->nvmrq_numsndqe;
 	init_attr.cap.max_recv_wr = q->nvmrq_numrcvqe;
@@ -1178,23 +953,9 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	q->nvmrq_ibqp = cmid->qp;
 
 	/*
-	 * NB: The conn_param has to pass in an NVMeoF RDMA Private Data
-	 * structure for the NVMeoF RDMA target to setup its Q sizes et al.
+	 * Map NVMe completion buffers to the RDMA Recv Q, registering their
+	 * associated Completion Q elements as well.
 	 */
-	memset(&conn_param, 0, sizeof(conn_param));
-	memset(&privdata, 0, sizeof(privdata));
-	privdata.nvmrcr_recfmt = 0;
-	privdata.nvmrcr_qid = 0;
-	privdata.nvmrcr_hrqsize = htole16(prof->nvmrqp_pdnumrcvqsz);
-	privdata.nvmrcr_hsqsize = htole16(prof->nvmrqp_pdnumsndqsz);
-	conn_param.responder_resources = ibd->attrs.max_qp_rd_atom;
-	conn_param.qp_num = q->nvmrq_ibqp->qp_num;
-	conn_param.flow_control = 1;
-	conn_param.retry_count = 3;
-	conn_param.rnr_retry_count = 3;
-	conn_param.private_data = &privdata;
-	conn_param.private_data_len = sizeof(privdata);
-
 	STAILQ_FOREACH(cmplp, &q->nvmrq_cmpls, nvmrsp_next) {
 		ncmp = &cmplp->nvmrsp_nvmecmpl;
 		memset(ncmp, 0, sizeof(*ncmp));
@@ -1227,11 +988,58 @@ nvmr_create_queue(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
 	DBGSPEW("Associated %d completion containers\n", q->nvmrq_numrcvqe);
 
+	/*
+	 * NB: The conn_param has to pass in an NVMeoF RDMA Private Data
+	 * structure for the NVMeoF RDMA target to setup its Q sizes et al.
+	 */
+	memset(&conn_param, 0, sizeof(conn_param));
+	memset(&privdata, 0, sizeof(privdata));
+	privdata.nvmrcr_recfmt = 0;
+	privdata.nvmrcr_qid = 0;
+	privdata.nvmrcr_hrqsize = htole16(prof->nvmrqp_pdnumrcvqsz);
+	privdata.nvmrcr_hsqsize = htole16(prof->nvmrqp_pdnumsndqsz);
+	conn_param.responder_resources = ibd->attrs.max_qp_rd_atom;
+	conn_param.qp_num = q->nvmrq_ibqp->qp_num;
+	conn_param.flow_control = 1;
+	conn_param.retry_count = 3;
+	conn_param.rnr_retry_count = 3;
+	conn_param.private_data = &privdata;
+	conn_param.private_data_len = sizeof(privdata);
+
 	PRE_ASYNC_CM_INVOCATION(NVMRQ_PRE_CONNECT);
 	retval = rdma_connect(cmid, &conn_param);
 	POST_ASYNC_CM_INVOCATION(__stringify(rdma_connect),
 	    NVMRQ_PRE_CONNECT, NVMRQ_CONNECT_SUCCEEDED);
 
+	/*
+	 * Now that a connection has been established send out a CONNECT
+	 * NVMeoF command identifying our system and the NVMe subsystem
+	 * we're trying to reach via the nvmrcd_subnqn field
+	 */
+	memset(&ncdata, 0, sizeof(ncdata));
+	ncdata.nvmrcd_hostid = nvrdma_host_uuid;
+	ncdata.nvmrcd_cntlid = htole16(NVMR_DYNANYCNTLID);
+	snprintf(ncdata.nvmrcd_subnqn, sizeof(ncdata.nvmrcd_subnqn),
+	    DISCOVERY_SUBNQN);
+	snprintf(ncdata.nvmrcd_hostnqn, sizeof(ncdata.nvmrcd_hostnqn),
+	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string);
+
+	memset(&conn, 0, sizeof(conn));
+	conn.nvmrcon_opcode = NVME_OPC_FABRIC_COMMAND;
+	conn.nvmrcon_sgl_fuse = NVMF_SINGLE_BUF_SGL;
+	conn.nvmrcon_fctype = NVMF_FCTYPE_CONNECT;
+	conn.nvmrcon_recfmt = 0;
+	conn.nvmrcon_qid = 0;
+	conn.nvmrcon_sqsize = htole16(prof->nvmrqp_pdnumsndqsz);
+	conn.nvmrcon_cattr = 0;
+	conn.nvmrcon_kato = htole32(NVMR_DISCOVERY_KATO);
+
+	/*
+	 * Now queue the CONNECT command along with the CONNECT data
+	 * and wait for the NVMe response
+	 */
+	retval = nvmr_queue_command(q, (struct nvme_command *)&conn,
+	    &conn.nvmrcon_ksgl, &ncdata, sizeof(ncdata), NVMR_QCMD_RO);
 	error = 0;
 
 out:
@@ -1315,7 +1123,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		for (count = 0;
 		    count < prof->nvmrp_qprofs[qtndx].nvmrqp_numqueues;
 		    count++) {
-			retval = nvmr_create_queue(&prof->nvmrp_qprofs[qtndx],
+			retval = nvmr_queue_create(&prof->nvmrp_qprofs[qtndx],
 			    cntrlr, &qarr[qarrndx]);
 			if (retval != 0) {
 				ERRSPEW("%s#%d creation failed with %d\n",
@@ -1350,7 +1158,11 @@ outret:
 	return error;
 }
 
-#endif /* VELOLD */
+static int
+nvmr_discover(nvmr_cntrlr_t cntrlr)
+{
+	return 0;
+}
 
 /*
  * Invoked whenever the routine is registered with ib_register_client()
@@ -1391,22 +1203,14 @@ nvmr_addr_t r640gent07enp94s0f1 = {
 	"11.10.10.200", "4420"
 };
 
+#define VELADDR r640gent07enp94s0f1
+
 static nvmr_cntrlr_t glbl_discovctrlrp;
 
 static void
 nvmr_init(void)
 {
 	int retval;
-#ifdef VELOLD
-	struct rdma_cm_id *cmid;
-	struct sockaddr_storage saddr;
-	struct sockaddr_in *sin4;
-	uint32_t ipaddr;
-	uint16_t rdmaport;
-
-	cmid = NULL;
-#else /* VELOLD */
-#endif /* VELOLD */
 
 	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
@@ -1415,61 +1219,32 @@ nvmr_init(void)
 		goto out;
 	}
 
-#ifdef VELOLD
-	sin4 = (struct sockaddr_in *)&saddr;
-	/* rdmaport = 0x4411; */
-	/* rdmaport = 0x0E28; */
-	rdmaport = 0x4411;
-	/* ipaddr = 0x0A0A0A0AU; */
-	/* ipaddr = 0xC80A0A0BU; 11.10.10.200 */
-	/* ipaddr = 0xC257010AU; 10.1.87.194 */
-	ipaddr = 0xC257010AU;
-
-	cmid = rdma_create_id(TD_TO_VNET(curthread), nvmr_cm_handler,
-	    nvmr_init, RDMA_PS_TCP, IB_QPT_RC);
-	if (IS_ERR(cmid)) {
-		ERRSPEW("rdma_create_id() failed:%ld\n", PTR_ERR(cmid));
-		cmid = NULL;
-		goto out;
-	} else {
-		DBGSPEW("rdma_create_id() succeeded:%p\n", cmid);
-	}
-
-	memset(&saddr, 0, sizeof(saddr));
-	sin4->sin_len = sizeof(*sin4);
-	sin4->sin_family = AF_INET;
-	memcpy((void *)&sin4->sin_addr.s_addr, &ipaddr, sizeof(ipaddr));
-	sin4->sin_port = rdmaport;
-	retval = rdma_resolve_addr(cmid, NULL, (struct sockaddr *)sin4, 2000);
-	if (retval != 0) {
-		ERRSPEW("Failed, rdma_resolve_addr()> %d\n", retval);
-		goto out;
-	}
-	DBGSPEW("Successfully invoked rdma_resolve_addr()\n");
-	glbl_cmid = cmid;
-	cmid = NULL;
-
-#else /* VELOLD */
 	
-	retval = nvmr_cntrlr_create(&r640gent07enp94s0f1, &nvmr_discoveryprof,
+	kern_uuidgen(&nvrdma_host_uuid, 1);
+	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
+	    &nvrdma_host_uuid);
+	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
+
+	retval = nvmr_cntrlr_create(&VELADDR, &nvmr_discoveryprof,
 	    &glbl_discovctrlrp);
 	if (retval != 0) {
 		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\") failed with %d\n",
-		    r640gent07eno1.nvmra_ipaddr, r640gent07eno1.nvmra_port,
+		    VELADDR.nvmra_ipaddr, VELADDR.nvmra_port,
 		    retval);
 		goto out;
 	}
 
-#endif /* VELOLD */
+	retval = nvmr_discover(glbl_discovctrlrp);
+	if (retval != 0) {
+		ERRSPEW("nvmr_cntrlr_connect(\"%s\", \"%s\") failed with %d\n",
+		    VELADDR.nvmra_ipaddr, VELADDR.nvmra_port, retval);
+		goto out;
+	}
+
+
 
 out:
 
-#ifdef VELOLD
-	if (cmid != NULL) {
-		rdma_destroy_id(cmid);
-	}
-#else /* VELOLD */
-#endif /* VELOLD */
 
 	return;
 }
@@ -1480,67 +1255,6 @@ nvmr_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
 
-#ifdef VELOLD
-	int count;
-
-	DBGSPEW("Invoking ib_dereg_mr() on non-NULL MR elements...\n");
-	for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-		if (nsndmrarr[count] == NULL) {
-			continue;
-		}
-		ib_dereg_mr(nsndmrarr[count]);
-		nsndmrarr[count] = NULL;
-	}
-
-	if ((glbl_ibcq != NULL) && (glbl_ibpd != NULL) && (glbl_cmid != NULL)) {
-		DBGSPEW("Invoking ib_drain_qp(%p)...\n", glbl_ibqp);
-		ib_drain_qp(glbl_ibqp);
-
-		DBGSPEW("Invoking ib_dma_unmap_single()s on NVMe "
-		    "completions...\n");
-		for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-			ib_dma_unmap_single(glbl_ibdev,
-			    (ncmplcntarr+count)->nvmrsp_dmaddr,
-			    sizeof(*(ncmplsarr + count)), DMA_FROM_DEVICE);
-		}
-
-		DBGSPEW("Invoking ib_dma_unmap_single()s on NVMe "
-		    "commands...\n");
-		for (count = 0; count < MAX_ADMIN_WORK_REQUESTS; count++) {
-			ib_dma_unmap_single(glbl_ibdev,
-			    (ncommcntarr+count)->nvmsnd_dmaddr,
-			    sizeof(*(ncommsarr + count)), DMA_TO_DEVICE);
-		}
-
-		DBGSPEW("Invoking rdma_disconnect(%p)...\n", glbl_cmid);
-		rdma_disconnect(glbl_cmid);
-	}
-
-	if (glbl_ibqp != NULL) {
-		DBGSPEW("Invoking rdma_destroy_qp(%p)...\n", glbl_cmid);
-		rdma_destroy_qp(glbl_cmid);
-		glbl_ibqp = NULL;
-	}
-
-	if (glbl_ibcq != NULL) {
-		DBGSPEW("Invoking ib_free_cq(%p)...\n", glbl_ibcq);
-		ib_free_cq(glbl_ibcq);
-		glbl_ibcq = NULL;
-	}
-
-	if (glbl_ibpd != NULL) {
-		DBGSPEW("Invoking ib_dealloc_pd(%p)...\n", glbl_ibpd);
-		ib_dealloc_pd(glbl_ibpd);
-		glbl_ibpd = NULL;
-	}
-
-	if (glbl_cmid != NULL) {
-		DBGSPEW("Invoking rdma_destroy_id(%p)...\n", glbl_cmid);
-		rdma_destroy_id(glbl_cmid);
-		glbl_cmid = NULL;
-	}
-
-#else /* VELOLD */
 	if (glbl_discovctrlrp == NULL) {
 		goto out;
 	}
@@ -1548,7 +1262,6 @@ nvmr_uninit(void)
 	nvmr_cntrlr_rele(glbl_discovctrlrp);
 	glbl_discovctrlrp = NULL;
 	
-#endif /* VELOLD */
 out:
 	ib_unregister_client(&nvmr_ib_client);
 }
