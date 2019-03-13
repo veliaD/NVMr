@@ -52,6 +52,7 @@ struct nvmr_ncommcont {
 	struct ib_mr                *nvmrsnd_mr;
 	u64			     nvmrsnd_dmaddr;
 	uint16_t                     nvmrsnd_cid;
+	bool                         nvmrsnd_rspndd;
 };
 typedef struct nvmr_ncommcont nvmr_ncommcon_t;
 
@@ -118,8 +119,10 @@ nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
+	/*
 	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
 	    ib_wc_status_msg(wc->status));
+	 */
 }
 
 static void
@@ -129,8 +132,10 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
+	/*
 	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
 	    ib_wc_status_msg(wc->status));
+	 */
 }
 
 
@@ -276,8 +281,15 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	q = cq->cq_context;
 	cmplp = container_of(wc->wr_cqe, struct nvmr_ncmplcont, nvmrsp_cqe);
 
-	DBGSPEW("cmplp:%p, wc_status:\"%s\". Repost me!\n", cmplp,
-	    ib_wc_status_msg(wc->status));
+	switch(wc->status) {
+	case IB_WC_SUCCESS:
+	case IB_WC_WR_FLUSH_ERR:
+		break;
+	default:
+		ERRSPEW("cmplp:%p, wc_status:\"%s\". Repost me!\n", cmplp,
+		    ib_wc_status_msg(wc->status));
+		break;
+	}
 
 	ib_dma_sync_single_for_cpu(q->nvmrq_cmid->device, cmplp->nvmrsp_dmaddr,
 	    sizeof(*(cmplp->nvmrsp_nvmecompl)), DMA_FROM_DEVICE);
@@ -287,14 +299,6 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	}
 
 	c = cmplp->nvmrsp_nvmecompl;
-	DBGSPEW("c:0x%08X r:0x%08X hd:0x%04hX id:0x%04hX cid:0x%04hX "
-	    "status:0x%04hX\n", c->cdw0, c->rsvd1, c->sqhd, c->sqid,
-	    c->cid, c->status);
-	if (c->status == 0) {
-		DBGSPEW("NVMe Command succeeded\n");
-	} else {
-		DBGSPEW("NVMe Command FAILed!!\n");
-	}
 
 	if ((c->cid == 0) || (c->cid > q->nvmrq_numsndqe)) {
 		ERRSPEW("Returned CID in NVMe completion is not valid "
@@ -303,15 +307,25 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	}
 
 	commp = q->nvmrq_commcid[c->cid];
-	if (commp->nvmrsnd_nvmecomplp == NULL) {
+	if (unlikely(commp->nvmrsnd_nvmecomplp == NULL)) {
 		ERRSPEW("Uninitialized nvmrsnd_nvmecomplp field in commp:%p "
 		    "q:%p cid:%hu!\n", commp, q, c->cid);
 		goto out;
+	} else {
+		/* Copy the NVMe completion structure contents */
+		*commp->nvmrsnd_nvmecomplp = *c;
 	}
 
-	/* Copy the NVMe completion structure contents */
 
-	*commp->nvmrsnd_nvmecomplp = *c;
+	if (unlikely(commp->nvmrsnd_rspndd == true)) {
+		panic("%s@%d nvmrsnd_rspndd already true! q:%p commp:%p\n",
+		    __func__, __LINE__, q, commp);
+	}
+
+	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	commp->nvmrsnd_rspndd = true;
+	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	wakeup(commp);
 
 out:
 	return;
@@ -551,6 +565,8 @@ typedef enum {
 	NVMR_QCMD_RW,
 }  nvmr_ksgl_perm_t;
 
+#define NVMRTO 3000
+
 static int
 nvmr_command_sync(nvmr_queue_t q, struct nvme_command *c, nvmr_ksgl_t *k,
     void *d, int l, nvmr_ksgl_perm_t p, struct nvme_completion *r)
@@ -688,8 +704,10 @@ skip_ksgl:
 		goto out;
 	}
 	commp->nvmrsnd_nvmecomm = c;
+	commp->nvmrsnd_nvmecomplp = r;
 	commp->nvmrsnd_dmaddr = dmaddr;
-	/* Transfer ownership of command structure device */
+	commp->nvmrsnd_rspndd = false;
+	/* Transfer ownership of command structure to device */
 	ib_dma_sync_single_for_device(ibd, dmaddr, sizeof(*c), DMA_TO_DEVICE);
 
 	memset(&sgl, 0, sizeof(sgl));
@@ -717,14 +735,32 @@ skip_ksgl:
 		DBGSPEW("ib_post_send(&sndwr) returned without incident\n");
 	}
 
+	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	if (commp->nvmrsnd_rspndd == false) {
+		DBGSPEW("Sleeping with message \"%s\"\n",
+		    __stringify(__LINE__));
+		retval = mtx_sleep(commp, &q->nvmrq_cntrlr->nvmrctr_lock,
+		    0, __stringify(__LINE__), NVMRTO+1000);
+		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+		switch (retval) {
+		case 0:
+			break;
+		case EWOULDBLOCK:
+			ERRSPEW("No response after %d ms\n",  NVMRTO+1000);
+		default:
+			error = retval;
+			goto out;
+		}
+	} else {
+		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	}
+
 	error = 0;
 
 out:
 	return error;
 }
 
-
-#define NVMRTO 3000
 
 #define PRE_ASYNC_CM_INVOCATION(pre_state) \
 	nvmr_cntrlr_ref(cntrlr); \
@@ -785,6 +821,7 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	struct ib_cq *ibcq;
 	struct nvmrdma_connect_data ncdata;
 	nvmr_connect_t conn;
+	struct nvme_completion compl;
 
 	sin4 = (struct sockaddr_in *)&saddr;
 
@@ -810,7 +847,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 		goto out;
 	}
 	q->nvmrq_cmid = cmid;
-	DBGSPEW("rdma_create_id() succeeded:%p\n", q->nvmrq_cmid);
 
 	/*
 	 * Allocate containers for the Send Q elements which are always
@@ -874,7 +910,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 		STAILQ_INSERT_HEAD(&q->nvmrq_cmpls, cmplp, nvmrsp_next);
 		q->nvmrq_numrcvqe++;
 	}
-	DBGSPEW("Allocated %d completion Q containers\n", q->nvmrq_numrcvqe);
 
 
 	memset(&saddr, 0, sizeof(saddr));
@@ -943,7 +978,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 	KASSERT(count == q->nvmrq_numsndqe, ("%s@%d count:%d numsndqe:%d",
 	    __func__, __LINE__, count, q->nvmrq_numsndqe));
-	DBGSPEW("Successfully allocated MRs for Admin commands\n");
 
 	/*
 	 * Loop through the list of completion container structures mapping
@@ -965,7 +999,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
 	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
-	DBGSPEW("Associated %d completion containers\n", q->nvmrq_numrcvqe);
 
 
 	/*
@@ -992,7 +1025,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 		error = ESPIPE;
 		goto out;
 	}
-	DBGSPEW("ib_alloc_cq() returned %p\n", ibcq);
 	q->nvmrq_ibcq = ibcq;
 
 	/*
@@ -1017,7 +1049,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 		error = retval;
 		goto out;
 	}
-	DBGSPEW("Successfully created QP!\n");
 	q->nvmrq_ibqp = cmid->qp;
 
 	/*
@@ -1054,7 +1085,6 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
 	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
-	DBGSPEW("Associated %d completion containers\n", q->nvmrq_numrcvqe);
 
 	/*
 	 * NB: The conn_param has to pass in an NVMeoF RDMA Private Data
@@ -1107,7 +1137,27 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	 * and wait for the NVMe response
 	 */
 	retval = nvmr_command_sync(q, (struct nvme_command *)&conn,
-	    &conn.nvmrcon_ksgl, &ncdata, sizeof(ncdata), NVMR_QCMD_RO, NULL);
+	    &conn.nvmrcon_ksgl, &ncdata, sizeof(ncdata), NVMR_QCMD_RO, &compl);
+	if (retval != 0) {
+		ERRSPEW("CONNECT NVMeoF command to subNQN \"%s\" failed!\n",
+		   cntrlr->nvmrctr_subnqn);
+		error = retval;
+		goto out;
+	}
+
+	if (compl.status != 0) {
+		ERRSPEW("Error completion for CONNECT command to subNQN:\n\t"
+		   "\"%s\":\n\t"
+		   "0x%08X r:0x%08X hd:0x%04hX id:0x%04hX\n\t"
+		   "cid:0x%04hX status:0x%04hX\n", cntrlr->nvmrctr_subnqn,
+		   compl.cdw0, compl.rsvd1, compl.sqhd, compl.sqid, compl.cid,
+		   compl.status);
+		error = EPROTO;
+		goto out;
+	} else {
+		DBGSPEW("CONNECT command succeeded to subNQN \"%s\"\n",
+		    cntrlr->nvmrctr_subnqn);
+	}
 	error = 0;
 
 out:
@@ -1181,7 +1231,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 			qcount++;
 		}
 	}
-	DBGSPEW("Q count is %d\n", qcount);
 	cntrlr->nvmrctr_numqs = qcount;
 
 	qarr = malloc(qcount * sizeof(nvmr_queue_t), M_NVMR, M_WAITOK|M_ZERO);
