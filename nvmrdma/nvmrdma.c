@@ -34,6 +34,58 @@
 #define MAX_ADMIN_WORK_REQUESTS 32
 #define MAX_NVME_RDMA_SEGMENTS 256
 
+typedef struct {
+	uint64_t nvmrk_address;
+	uint8_t  nvmrk_length[3];
+	uint32_t nvmrk_key;
+	uint8_t  nvmrk_sgl_identifier;
+} __packed nvmr_ksgl_t;
+
+
+typedef struct {
+	uint8_t     nvmf_opcode;
+	uint8_t     nvmf_sgl_fuse;
+	uint16_t    nvmf_cid;
+	uint8_t     nvmf_fctype;
+	uint8_t     nvmf_resv1[19];
+	nvmr_ksgl_t nvmf_ksgl;
+} __packed nvmf_prfx_t;
+
+typedef struct {
+	nvmf_prfx_t nvmrsb_nvmf;
+	uint8_t     nvmrsb_resv3[24];
+} __packed nvmr_stub_t;
+CTASSERT(sizeof(nvmr_stub_t) == sizeof(struct nvme_command));
+
+typedef struct {
+	nvmf_prfx_t nvmrcn_nvmf;
+	uint16_t    nvmrcn_recfmt;
+	uint16_t    nvmrcn_qid;
+	uint16_t    nvmrcn_sqsize;
+	uint8_t     nvmrcn_cattr;
+	uint8_t     nvmrcn_resv2;
+	uint32_t    nvmrcn_kato;
+	uint8_t     nvmrcn_resv3[12];
+} __packed nvmr_connect_t;
+CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
+
+typedef struct {
+	nvmf_prfx_t nvmrpg_nvmf;
+	uint8_t     nvmrpg_attrib;
+	uint8_t     nvmrpg_resv3[3];
+	uint32_t    nvmrpg_ofst;
+	uint8_t     nvmrpg_resv4[16];
+} __packed nvmr_propget_t;
+CTASSERT(sizeof(nvmr_propget_t) == sizeof(struct nvme_command));
+
+typedef union {
+	struct nvme_command nvmrcu_nvme;
+	nvmr_connect_t      nvmrcu_conn;
+	nvmr_propget_t      nvmrcu_prgt;
+	nvmr_stub_t         nvmrcu_stub;
+} nvmr_communion_t;
+CTASSERT(sizeof(nvmr_communion_t) == sizeof(struct nvme_command));
+
 struct nvmr_ncmplcont {
 	struct ib_cqe			nvmrsp_cqe;
 	STAILQ_ENTRY(nvmr_ncmplcont)	nvmrsp_next;
@@ -47,7 +99,7 @@ struct nvmr_ncommcont {
 	struct ib_cqe		     nvmrsnd_cqe;
 	struct ib_cqe		     nvmrsnd_regcqe;
 	STAILQ_ENTRY(nvmr_ncommcont) nvmrsnd_next;
-	struct nvme_command         *nvmrsnd_nvmecomm;
+	nvmr_stub_t                 *nvmrsnd_nvmecomm;
 	struct nvme_completion      *nvmrsnd_nvmecomplp;
 	struct ib_mr                *nvmrsnd_mr;
 	u64			     nvmrsnd_dmaddr;
@@ -106,6 +158,7 @@ CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
 #define NVMR_DEFAULT_KATO 0x1D4C0
 #define NVMR_DISCOVERY_KATO 0x0 /* DISCOVERY KATO has to be 0 */
 #define NVMF_FCTYPE_CONNECT 0x1
+#define NVMF_FCTYPE_PROPGET 0x4
 #define NVMR_PSDT_SHIFT 6
 #define NVMF_SINGLE_BUF_SGL (0x1 << NVMR_PSDT_SHIFT)
 #define NVMF_MULT_SEG_SGL   (0x2 << NVMR_PSDT_SHIFT)
@@ -245,30 +298,6 @@ nvmr_cntrlrprof_t nvmr_discoveryprof = {
 };
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
-
-typedef struct {
-	uint64_t nvmrk_address;
-	uint8_t  nvmrk_length[3];
-	uint32_t nvmrk_key;
-	uint8_t  nvmrk_sgl_identifier;
-} __packed nvmr_ksgl_t;
-
-typedef struct {
-	uint8_t     nvmrcon_opcode;
-	uint8_t     nvmrcon_sgl_fuse;
-	uint16_t    nvmrcon_cid;
-	uint8_t     nvmrcon_fctype;
-	uint8_t     nvmrcon_resv1[19];
-	nvmr_ksgl_t nvmrcon_ksgl;
-	uint16_t    nvmrcon_recfmt;
-	uint16_t    nvmrcon_qid;
-	uint16_t    nvmrcon_sqsize;
-	uint8_t     nvmrcon_cattr;
-	uint8_t     nvmrcon_resv2;
-	uint32_t    nvmrcon_kato;
-	uint8_t     nvmrcon_resv3[12];
-} __packed nvmr_connect_t;
-CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
 
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
@@ -560,20 +589,26 @@ typedef struct {
 } nvmr_addr_t;
 
 typedef enum {
-	NVMR_QCMD_RO = 0,
+	NVMR_QCMD_INVALID = 0,
+	NVMR_QCMD_RO,
 	NVMR_QCMD_WO,
 	NVMR_QCMD_RW,
 }  nvmr_ksgl_perm_t;
 
 #define NVMRTO 3000
 
+/*
+ * Issue an NVMe command on the NVMe Q and wait for a response from the target.
+ * Return the NVMe completion sent by the target after it executes the NVMe
+ * command
+ */
 static int
-nvmr_command_sync(nvmr_queue_t q, struct nvme_command *c, nvmr_ksgl_t *k,
-    void *d, int l, nvmr_ksgl_perm_t p, struct nvme_completion *r)
+nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
+    nvmr_ksgl_perm_t p, struct nvme_completion *r)
 {
 	int offset, count, n, nn, nnn, error, retval;
 	struct scatterlist scl[MAX_SGS], *s;
-	char *cstart, *cend, *kstart, *kend;
+	nvmr_ksgl_t *k;
 	size_t len, translen;
 	struct ib_reg_wr regwr;
 	nvmr_ncommcon_t *commp;
@@ -585,27 +620,25 @@ nvmr_command_sync(nvmr_queue_t q, struct nvme_command *c, nvmr_ksgl_t *k,
 	struct ib_device *ibd;
 
 	if ((c == NULL) || (q == NULL)) {
-		DBGSPEW("c:%p and/or q:%p NULL\n", c, q);
-		return 0;
+		DBGSPEW("One or more of c:%p q:%p NULL\n", c, q);
+		error = EINVAL;
+		goto out;
 	}
 
 	ibd = q->nvmrq_cmid->device;
+	k = &c->nvmrsb_nvmf.nvmf_ksgl;
 
+	c->nvmrsb_nvmf.nvmf_sgl_fuse = NVMF_SINGLE_BUF_SGL;
 	commp = STAILQ_LAST(&q->nvmrq_comms, nvmr_ncommcont, nvmrsnd_next);
 	memset(&sndwr, 0, sizeof(sndwr));
 	sndwr.next  = NULL;
 
-	if (k == NULL) {
+	if (d == NULL) {
+		memset(k, 0, sizeof(*k));
+		k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
+
 		goto skip_ksgl;
 	}
-
-	cstart = (char *)c;
-	cend = cstart + sizeof(*c);
-	kstart = (char *)k;
-	kend = kstart + sizeof(*k);
-	KASSERT((cstart <= kstart) && (kend <= cend), ("%s@%d: Key-SGL "
-	    "location not contained within NVMe command c:%p k:%p\n",
-	    __func__, __LINE__, c, k));
 
 	/*
 	 * 1) Translate the optional command data into a scatterlist array
@@ -696,7 +729,7 @@ nvmr_command_sync(nvmr_queue_t q, struct nvme_command *c, nvmr_ksgl_t *k,
 
 skip_ksgl:
 
-	c->cid = commp->nvmrsnd_cid;
+	c->nvmrsb_nvmf.nvmf_cid = commp->nvmrsnd_cid;
 	dmaddr = ib_dma_map_single(ibd, c, sizeof(*c), DMA_TO_DEVICE);
 	if (ib_dma_mapping_error(ibd, dmaddr) != 0) {
 		ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
@@ -731,14 +764,10 @@ skip_ksgl:
 		    &sndwr, retval, badsndwrp);
 		error = retval;
 		goto out;
-	} else {
-		DBGSPEW("ib_post_send(&sndwr) returned without incident\n");
 	}
 
 	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
 	if (commp->nvmrsnd_rspndd == false) {
-		DBGSPEW("Sleeping with message \"%s\"\n",
-		    __stringify(__LINE__));
 		retval = mtx_sleep(commp, &q->nvmrq_cntrlr->nvmrctr_lock,
 		    0, __stringify(__LINE__), NVMRTO+1000);
 		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
@@ -753,6 +782,22 @@ skip_ksgl:
 		}
 	} else {
 		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+	}
+
+	/* Single point of error status response decomposition */
+	if (r->status != 0) {
+		ERRSPEW("Bad resp(%p) for command to subNQN:\n\t"
+		   "\"%s\":\n\t"
+		   "0x%08X r:0x%08X hd:0x%04hX id:0x%04hX\n\t"
+		   "cid:0x%04hX status:0x%04hX\n\t"
+		   "DNR:%u M:%u SCT:0x%x SC:0x%x\n",
+		   r, q->nvmrq_cntrlr->nvmrctr_subnqn,
+		   r->cdw0, r->rsvd1, r->sqhd, r->sqid, r->cid, r->status,
+		   (r->status >> 15) & 0x01,
+		   (r->status >> 14) & 0x01,
+		   (r->status >>  9) & 0x03,
+		   (r->status >>  1) & 0xFF
+		   );
 	}
 
 	error = 0;
@@ -820,7 +865,7 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	nvmr_rdma_cm_request_t privdata;
 	struct ib_cq *ibcq;
 	struct nvmrdma_connect_data ncdata;
-	nvmr_connect_t conn;
+	nvmr_communion_t comm;
 	struct nvme_completion compl;
 
 	sin4 = (struct sockaddr_in *)&saddr;
@@ -1122,22 +1167,22 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	snprintf(ncdata.nvmrcd_hostnqn, sizeof(ncdata.nvmrcd_hostnqn),
 	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string);
 
-	memset(&conn, 0, sizeof(conn));
-	conn.nvmrcon_opcode = NVME_OPC_FABRIC_COMMAND;
-	conn.nvmrcon_sgl_fuse = NVMF_SINGLE_BUF_SGL;
-	conn.nvmrcon_fctype = NVMF_FCTYPE_CONNECT;
-	conn.nvmrcon_recfmt = 0;
-	conn.nvmrcon_qid = 0;
-	conn.nvmrcon_sqsize = htole16(prof->nvmrqp_pdnumsndqsz);
-	conn.nvmrcon_cattr = 0;
-	conn.nvmrcon_kato = htole32(prof->nvmrqp_kato);
+	memset(&comm, 0, sizeof(comm));
+	comm.nvmrcu_conn.nvmrcn_nvmf.nvmf_opcode = NVME_OPC_FABRIC_COMMAND;
+	comm.nvmrcu_conn.nvmrcn_nvmf.nvmf_fctype = NVMF_FCTYPE_CONNECT;
+	comm.nvmrcu_conn.nvmrcn_recfmt = 0;
+	comm.nvmrcu_conn.nvmrcn_qid = 0;
+	comm.nvmrcu_conn.nvmrcn_sqsize =
+	    htole16(prof->nvmrqp_pdnumsndqsz);
+	comm.nvmrcu_conn.nvmrcn_cattr = 0;
+	comm.nvmrcu_conn.nvmrcn_kato = htole32(prof->nvmrqp_kato);
 
 	/*
 	 * Now queue the CONNECT command along with the CONNECT data
 	 * and wait for the NVMe response
 	 */
-	retval = nvmr_command_sync(q, (struct nvme_command *)&conn,
-	    &conn.nvmrcon_ksgl, &ncdata, sizeof(ncdata), NVMR_QCMD_RO, &compl);
+	retval = nvmr_command_sync(q, &comm.nvmrcu_stub, &ncdata,
+	    sizeof(ncdata), NVMR_QCMD_RO, &compl);
 	if (retval != 0) {
 		ERRSPEW("CONNECT NVMeoF command to subNQN \"%s\" failed!\n",
 		   cntrlr->nvmrctr_subnqn);
@@ -1146,18 +1191,18 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	}
 
 	if (compl.status != 0) {
-		ERRSPEW("Error completion for CONNECT command to subNQN:\n\t"
-		   "\"%s\":\n\t"
-		   "0x%08X r:0x%08X hd:0x%04hX id:0x%04hX\n\t"
-		   "cid:0x%04hX status:0x%04hX\n", cntrlr->nvmrctr_subnqn,
-		   compl.cdw0, compl.rsvd1, compl.sqhd, compl.sqid, compl.cid,
-		   compl.status);
+		ERRSPEW("Bad resp(%p) for CONNECT to subNQN:\n\t"
+		   "\"%s\"\n", &compl, cntrlr->nvmrctr_subnqn);
 		error = EPROTO;
 		goto out;
 	} else {
 		DBGSPEW("CONNECT command succeeded to subNQN \"%s\"\n",
 		    cntrlr->nvmrctr_subnqn);
 	}
+
+	/**********
+	 Need to cleanup!!!!!!
+	 **********/
 	error = 0;
 
 out:
@@ -1166,6 +1211,63 @@ out:
 		nvmr_queue_destroy(q);
 	}
 
+	return error;
+}
+
+typedef enum {
+	NVMR_PROPLEN_4BYTES = 0,
+	NVMR_PROPLEN_8BYTES = 1,
+	NVMR_PROPLEN_MAX
+} nvmr_proplent_t;
+
+#define MAX_NVMR_PROP_GET 0x12FFU
+
+static int
+nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
+    nvmr_proplent_t len)
+{
+	int error, retval;
+	nvmr_communion_t prpgt;
+	struct nvme_completion compl;
+	nvmr_queue_t q;
+
+	if ((cntrlr == NULL) || (offset > MAX_NVMR_PROP_GET) ||
+	    (len >= NVMR_PROPLEN_MAX) || (valuep == NULL)) {
+		ERRSPEW("cntrlr:%p offset:0x%X len:%d valuep:%p\n", cntrlr,
+		    offset, len, valuep);
+		error = ENOENT;
+		goto out;
+	}
+
+	q = cntrlr->nvmrctr_qarr[0];
+	memset(&prpgt, 0, sizeof(prpgt));
+	prpgt.nvmrcu_prgt.nvmrpg_nvmf.nvmf_opcode = NVME_OPC_FABRIC_COMMAND;
+	prpgt.nvmrcu_prgt.nvmrpg_nvmf.nvmf_fctype = NVMF_FCTYPE_PROPGET;
+	prpgt.nvmrcu_prgt.nvmrpg_attrib = len;
+	prpgt.nvmrcu_prgt.nvmrpg_ofst = offset;
+
+	/*
+	 * Now queue the PROPGET command and wait for the NVMe response
+	 */
+	retval = nvmr_command_sync(q, &prpgt.nvmrcu_stub, NULL, 0,
+	    NVMR_QCMD_INVALID, &compl);
+	if (retval != 0) {
+		ERRSPEW("PROPGET NVMeoF command to subNQN \"%s\" failed!\n",
+		   cntrlr->nvmrctr_subnqn);
+		error = retval;
+		goto out;
+	}
+
+	if (compl.status != 0) {
+		ERRSPEW("Bad resp(%p) for PROPGET to subNQN:\n\t"
+		   "\"%s\"\n", &compl, cntrlr->nvmrctr_subnqn);
+		error = EPROTO;
+		goto out;
+	}
+
+	*valuep = (((uint64_t)compl.rsvd1) << 32) | compl.cdw0;
+	error = 0;
+out:
 	return error;
 }
 
@@ -1179,6 +1281,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	nvmr_queue_t *qarr;
 	nvmr_qndx_t qtndx;
 	unsigned long tmp;
+	uint64_t propval;
 	nvmripv4_t ipv4;
 	uint16_t port;
 	char *retp;
@@ -1267,6 +1370,17 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	}
 	KASSERT(qarrndx == cntrlr->nvmrctr_numqs,("qarrndx:%d numqs:%d",
 	    qarrndx, cntrlr->nvmrctr_numqs));
+
+	retval = nvmr_admin_propget(cntrlr, 0, &propval, NVMR_PROPLEN_8BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
+		    NVMR_PROPLEN_8BYTES, retval);
+		goto out;
+	}
+
+	DBGSPEW("PROPGET<o:0x%X l:%d>:0x%016lX\n", 0, NVMR_PROPLEN_8BYTES,
+	    propval);
 
 	error = 0;
 	*retcntrlrp = cntrlr;
