@@ -1271,6 +1271,23 @@ out:
 	return error;
 }
 
+typedef struct {
+	uint64_t nvmrcc_mqes  :16;
+	uint64_t nvmrcc_cqr   : 1;
+	uint64_t nvmrcc_ams   : 2;
+	uint64_t nvmrcc_resv1 : 5;
+	uint64_t nvmrcc_to    : 8;
+	uint64_t nvmrcc_dstrd : 4;
+	uint64_t nvmrcc_nssrs : 1;
+	uint64_t nvmrcc_css   : 8;
+	uint64_t nvmrcc_bps   : 1;
+	uint64_t nvmrcc_resv2 : 2;
+	uint64_t nvmrcc_mpsmin: 4;
+	uint64_t nvmrcc_mpsmax: 4;
+	uint64_t nvmrcc_resv3 : 8;
+} nvmr_cntrlcap_t;
+CTASSERT(sizeof(nvmr_cntrlcap_t) == sizeof(uint64_t));
+
 
 static int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
@@ -1281,7 +1298,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	nvmr_queue_t *qarr;
 	nvmr_qndx_t qtndx;
 	unsigned long tmp;
-	uint64_t propval;
+	nvmr_cntrlcap_t cntrlrcap;
+	uint64_t cntrlrconf;
 	nvmripv4_t ipv4;
 	uint16_t port;
 	char *retp;
@@ -1371,7 +1389,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	KASSERT(qarrndx == cntrlr->nvmrctr_numqs,("qarrndx:%d numqs:%d",
 	    qarrndx, cntrlr->nvmrctr_numqs));
 
-	retval = nvmr_admin_propget(cntrlr, 0, &propval, NVMR_PROPLEN_8BYTES);
+	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
+	    NVMR_PROPLEN_8BYTES);
 	if (retval != 0) {
 		error = retval;
 		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
@@ -1379,8 +1398,68 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
-	DBGSPEW("PROPGET<o:0x%X l:%d>:0x%016lX\n", 0, NVMR_PROPLEN_8BYTES,
-	    propval);
+	DBGSPEW("PROPGET CAP:\n\t"
+	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
+	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
+	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
+	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
+	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
+	    cntrlrcap.nvmrcc_mpsmax);
+
+	cntrlrconf = 0;
+	retval = nvmr_admin_propget(cntrlr, 20, &cntrlrconf,
+	    NVMR_PROPLEN_4BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 20,
+		    NVMR_PROPLEN_4BYTES, retval);
+		goto out;
+	} else {
+		DBGSPEW("cntrlrconf is 0x%08lX\n", cntrlrconf);
+	}
+
+	cntrlrconf = 0;
+	retval = nvmr_admin_propget(cntrlr, 28, &cntrlrconf,
+	    NVMR_PROPLEN_4BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 28,
+		    NVMR_PROPLEN_4BYTES, retval);
+		goto out;
+	} else {
+		DBGSPEW("reg 28 is 0x%08lX\n", cntrlrconf);
+	}
+
+	cntrlrconf = 0;
+	retval = nvmr_admin_propget(cntrlr, 8, &cntrlrconf,
+	    NVMR_PROPLEN_4BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 8,
+		    NVMR_PROPLEN_4BYTES, retval);
+		goto out;
+	} else {
+		DBGSPEW("Reg 8 is 0x%08lX\n", cntrlrconf);
+	}
+
+	cntrlrconf = 0;
+	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
+	    NVMR_PROPLEN_8BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
+		    NVMR_PROPLEN_8BYTES, retval);
+		goto out;
+	}
+
+	DBGSPEW("PROPGET CAP:\n\t"
+	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
+	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
+	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
+	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
+	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
+	    cntrlrcap.nvmrcc_mpsmax);
+
 
 	error = 0;
 	*retcntrlrp = cntrlr;
