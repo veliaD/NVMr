@@ -102,17 +102,17 @@ nvme_sysctl_dump_debug(SYSCTL_HANDLER_ARGS)
 static int
 nvme_sysctl_int_coal_time(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_controller *ctrlr = arg1;
-	uint32_t oldval = ctrlr->int_coal_time;
-	int error = sysctl_handle_int(oidp, &ctrlr->int_coal_time, 0,
+	struct nvme_pci_controller *pctrlr = arg1;
+	uint32_t oldval = pctrlr->int_coal_time;
+	int error = sysctl_handle_int(oidp, &pctrlr->int_coal_time, 0,
 	    req);
 
 	if (error)
 		return (error);
 
-	if (oldval != ctrlr->int_coal_time)
-		nvme_ctrlr_cmd_set_interrupt_coalescing(ctrlr,
-		    ctrlr->int_coal_time, ctrlr->int_coal_threshold, NULL,
+	if (oldval != pctrlr->int_coal_time)
+		nvme_ctrlr_cmd_set_interrupt_coalescing(pctrlr,
+		    pctrlr->int_coal_time, pctrlr->int_coal_threshold, NULL,
 		    NULL);
 
 	return (0);
@@ -121,17 +121,17 @@ nvme_sysctl_int_coal_time(SYSCTL_HANDLER_ARGS)
 static int
 nvme_sysctl_int_coal_threshold(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_controller *ctrlr = arg1;
-	uint32_t oldval = ctrlr->int_coal_threshold;
-	int error = sysctl_handle_int(oidp, &ctrlr->int_coal_threshold, 0,
+	struct nvme_pci_controller *pctrlr = arg1;
+	uint32_t oldval = pctrlr->int_coal_threshold;
+	int error = sysctl_handle_int(oidp, &pctrlr->int_coal_threshold, 0,
 	    req);
 
 	if (error)
 		return (error);
 
-	if (oldval != ctrlr->int_coal_threshold)
-		nvme_ctrlr_cmd_set_interrupt_coalescing(ctrlr,
-		    ctrlr->int_coal_time, ctrlr->int_coal_threshold, NULL,
+	if (oldval != pctrlr->int_coal_threshold)
+		nvme_ctrlr_cmd_set_interrupt_coalescing(pctrlr,
+		    pctrlr->int_coal_time, pctrlr->int_coal_threshold, NULL,
 		    NULL);
 
 	return (0);
@@ -140,16 +140,16 @@ nvme_sysctl_int_coal_threshold(SYSCTL_HANDLER_ARGS)
 static int
 nvme_sysctl_timeout_period(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_controller *ctrlr = arg1;
-	uint32_t oldval = ctrlr->timeout_period;
-	int error = sysctl_handle_int(oidp, &ctrlr->timeout_period, 0, req);
+	struct nvme_pci_controller *pctrlr = arg1;
+	uint32_t oldval = pctrlr->timeout_period;
+	int error = sysctl_handle_int(oidp, &pctrlr->timeout_period, 0, req);
 
 	if (error)
 		return (error);
 
-	if (ctrlr->timeout_period > NVME_MAX_TIMEOUT_PERIOD ||
-	    ctrlr->timeout_period < NVME_MIN_TIMEOUT_PERIOD) {
-		ctrlr->timeout_period = oldval;
+	if (pctrlr->timeout_period > NVME_MAX_TIMEOUT_PERIOD ||
+	    pctrlr->timeout_period < NVME_MIN_TIMEOUT_PERIOD) {
+		pctrlr->timeout_period = oldval;
 		return (EINVAL);
 	}
 
@@ -167,14 +167,14 @@ nvme_qpair_reset_stats(struct nvme_qpair *qpair)
 static int
 nvme_sysctl_num_cmds(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_controller 	*ctrlr = arg1;
+	struct nvme_pci_controller 	*pctrlr = arg1;
 	int64_t			num_cmds = 0;
 	int			i;
 
-	num_cmds = ctrlr->adminq.num_cmds;
+	num_cmds = pctrlr->adminq.num_cmds;
 
-	for (i = 0; i < ctrlr->num_io_queues; i++)
-		num_cmds += ctrlr->ioq[i].num_cmds;
+	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
+		num_cmds += pctrlr->ioq[i].num_cmds;
 
 	return (sysctl_handle_64(oidp, &num_cmds, 0, req));
 }
@@ -182,14 +182,14 @@ nvme_sysctl_num_cmds(SYSCTL_HANDLER_ARGS)
 static int
 nvme_sysctl_num_intr_handler_calls(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_controller 	*ctrlr = arg1;
+	struct nvme_pci_controller 	*pctrlr = arg1;
 	int64_t			num_intr_handler_calls = 0;
 	int			i;
 
-	num_intr_handler_calls = ctrlr->adminq.num_intr_handler_calls;
+	num_intr_handler_calls = pctrlr->adminq.num_intr_handler_calls;
 
-	for (i = 0; i < ctrlr->num_io_queues; i++)
-		num_intr_handler_calls += ctrlr->ioq[i].num_intr_handler_calls;
+	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
+		num_intr_handler_calls += pctrlr->ioq[i].num_intr_handler_calls;
 
 	return (sysctl_handle_64(oidp, &num_intr_handler_calls, 0, req));
 }
@@ -197,7 +197,7 @@ nvme_sysctl_num_intr_handler_calls(SYSCTL_HANDLER_ARGS)
 static int
 nvme_sysctl_reset_stats(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_controller 	*ctrlr = arg1;
+	struct nvme_pci_controller 	*pctrlr = arg1;
 	uint32_t		i, val = 0;
 
 	int error = sysctl_handle_int(oidp, &val, 0, req);
@@ -206,10 +206,10 @@ nvme_sysctl_reset_stats(SYSCTL_HANDLER_ARGS)
 		return (error);
 
 	if (val != 0) {
-		nvme_qpair_reset_stats(&ctrlr->adminq);
+		nvme_qpair_reset_stats(&pctrlr->adminq);
 
-		for (i = 0; i < ctrlr->num_io_queues; i++)
-			nvme_qpair_reset_stats(&ctrlr->ioq[i]);
+		for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
+			nvme_qpair_reset_stats(&pctrlr->ioq[i]);
 	}
 
 	return (0);
@@ -252,7 +252,7 @@ nvme_sysctl_initialize_queue(struct nvme_qpair *qpair,
 }
 
 void
-nvme_sysctl_initialize_ctrlr(struct nvme_controller *ctrlr)
+nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *pctrlr)
 {
 	struct sysctl_ctx_list	*ctrlr_ctx;
 	struct sysctl_oid	*ctrlr_tree, *que_tree;
@@ -261,55 +261,55 @@ nvme_sysctl_initialize_ctrlr(struct nvme_controller *ctrlr)
 	char			queue_name[QUEUE_NAME_LENGTH];
 	int			i;
 
-	ctrlr_ctx = device_get_sysctl_ctx(ctrlr->dev);
-	ctrlr_tree = device_get_sysctl_tree(ctrlr->dev);
+	ctrlr_ctx = device_get_sysctl_ctx(pctrlr->dev);
+	ctrlr_tree = device_get_sysctl_tree(pctrlr->dev);
 	ctrlr_list = SYSCTL_CHILDREN(ctrlr_tree);
 
 	SYSCTL_ADD_UINT(ctrlr_ctx, ctrlr_list, OID_AUTO, "num_cpus_per_ioq",
-	    CTLFLAG_RD, &ctrlr->num_cpus_per_ioq, 0,
+	    CTLFLAG_RD, &pctrlr->ctrlr.num_cpus_per_ioq, 0,
 	    "Number of CPUs assigned per I/O queue pair");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
-	    "int_coal_time", CTLTYPE_UINT | CTLFLAG_RW, ctrlr, 0,
+	    "int_coal_time", CTLTYPE_UINT | CTLFLAG_RW, pctrlr, 0,
 	    nvme_sysctl_int_coal_time, "IU",
 	    "Interrupt coalescing timeout (in microseconds)");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
-	    "int_coal_threshold", CTLTYPE_UINT | CTLFLAG_RW, ctrlr, 0,
+	    "int_coal_threshold", CTLTYPE_UINT | CTLFLAG_RW, pctrlr, 0,
 	    nvme_sysctl_int_coal_threshold, "IU",
 	    "Interrupt coalescing threshold");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
-	    "timeout_period", CTLTYPE_UINT | CTLFLAG_RW, ctrlr, 0,
+	    "timeout_period", CTLTYPE_UINT | CTLFLAG_RW, pctrlr, 0,
 	    nvme_sysctl_timeout_period, "IU",
 	    "Timeout period (in seconds)");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
 	    "num_cmds", CTLTYPE_S64 | CTLFLAG_RD,
-	    ctrlr, 0, nvme_sysctl_num_cmds, "IU",
+	    pctrlr, 0, nvme_sysctl_num_cmds, "IU",
 	    "Number of commands submitted");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
 	    "num_intr_handler_calls", CTLTYPE_S64 | CTLFLAG_RD,
-	    ctrlr, 0, nvme_sysctl_num_intr_handler_calls, "IU",
+	    pctrlr, 0, nvme_sysctl_num_intr_handler_calls, "IU",
 	    "Number of times interrupt handler was invoked (will "
 	    "typically be less than number of actual interrupts "
 	    "generated due to coalescing)");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
-	    "reset_stats", CTLTYPE_UINT | CTLFLAG_RW, ctrlr, 0,
+	    "reset_stats", CTLTYPE_UINT | CTLFLAG_RW, pctrlr, 0,
 	    nvme_sysctl_reset_stats, "IU", "Reset statistics to zero");
 
 	que_tree = SYSCTL_ADD_NODE(ctrlr_ctx, ctrlr_list, OID_AUTO, "adminq",
 	    CTLFLAG_RD, NULL, "Admin Queue");
 
-	nvme_sysctl_initialize_queue(&ctrlr->adminq, ctrlr_ctx, que_tree);
+	nvme_sysctl_initialize_queue(&pctrlr->adminq, ctrlr_ctx, que_tree);
 
-	for (i = 0; i < ctrlr->num_io_queues; i++) {
+	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++) {
 		snprintf(queue_name, QUEUE_NAME_LENGTH, "ioq%d", i);
 		que_tree = SYSCTL_ADD_NODE(ctrlr_ctx, ctrlr_list, OID_AUTO,
 		    queue_name, CTLFLAG_RD, NULL, "IO Queue");
-		nvme_sysctl_initialize_queue(&ctrlr->ioq[i], ctrlr_ctx,
+		nvme_sysctl_initialize_queue(&pctrlr->ioq[i], ctrlr_ctx,
 		    que_tree);
 	}
 }

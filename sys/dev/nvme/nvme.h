@@ -1108,13 +1108,13 @@ void	nvme_strvis(uint8_t *dst, const uint8_t *src, int dstlen, int srclen);
 struct bio;
 
 struct nvme_namespace;
-struct nvme_controller;
+struct nvme_pci_controller;
 struct nvme_consumer;
 
 typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
 
 typedef void *(*nvme_cons_ns_fn_t)(struct nvme_namespace *, void *);
-typedef void *(*nvme_cons_ctrlr_fn_t)(struct nvme_controller *);
+typedef void *(*nvme_cons_ctrlr_fn_t)(struct nvme_pci_controller *);
 typedef void (*nvme_cons_async_fn_t)(void *, const struct nvme_completion *,
 				     uint32_t, void *, uint32_t);
 typedef void (*nvme_cons_fail_fn_t)(void *);
@@ -1124,21 +1124,21 @@ enum nvme_namespace_flags {
 	NVME_NS_FLUSH_SUPPORTED		= 0x2,
 };
 
-int	nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
+int	nvme_ctrlr_passthrough_cmd(struct nvme_pci_controller *pctrlr,
 				   struct nvme_pt_command *pt,
 				   uint32_t nsid, int is_user_buffer,
 				   int is_admin_cmd);
 
 /* Admin functions */
-void	nvme_ctrlr_cmd_set_feature(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *pctrlr,
 				   uint8_t feature, uint32_t cdw11,
 				   void *payload, uint32_t payload_size,
 				   nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_get_feature(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *pctrlr,
 				   uint8_t feature, uint32_t cdw11,
 				   void *payload, uint32_t payload_size,
 				   nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_get_log_page(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr,
 				    uint8_t log_page, uint32_t nsid,
 				    void *payload, uint32_t payload_size,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
@@ -1170,9 +1170,9 @@ struct nvme_consumer *	nvme_register_consumer(nvme_cons_ns_fn_t    ns_fn,
 void		nvme_unregister_consumer(struct nvme_consumer *consumer);
 
 /* Controller helper functions */
-device_t	nvme_ctrlr_get_device(struct nvme_controller *ctrlr);
+device_t	nvme_ctrlr_get_device(struct nvme_pci_controller *pctrlr);
 const struct nvme_controller_data *
-		nvme_ctrlr_get_data(struct nvme_controller *ctrlr);
+		nvme_ctrlr_get_data(struct nvme_pci_controller *pctrlr);
 
 /* Namespace helper functions */
 uint32_t	nvme_ns_get_max_io_xfer_size(struct nvme_namespace *ns);

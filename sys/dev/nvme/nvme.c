@@ -77,7 +77,7 @@ static device_method_t nvme_pci_methods[] = {
 static driver_t nvme_pci_driver = {
 	"nvme",
 	nvme_pci_methods,
-	sizeof(struct nvme_controller),
+	sizeof(struct nvme_pci_controller),
 };
 
 DRIVER_MODULE(nvme, pci, nvme_pci_driver, nvme_devclass, nvme_modevent, 0);
@@ -193,10 +193,10 @@ nvme_unload(void)
 static int
 nvme_shutdown(device_t dev)
 {
-	struct nvme_controller	*ctrlr;
+	struct nvme_pci_controller	*pctrlr;
 
-	ctrlr = DEVICE2SOFTC(dev);
-	nvme_ctrlr_shutdown(ctrlr);
+	pctrlr = DEVICE2SOFTC(dev);
+	nvme_ctrlr_shutdown(pctrlr);
 
 	return (0);
 }
@@ -255,7 +255,7 @@ nvme_dump_completion(struct nvme_completion *cpl)
 static int
 nvme_attach(device_t dev)
 {
-	struct nvme_controller	*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
 	int			status;
 	struct _pcsid		*ep;
 	uint32_t		devid;
@@ -269,12 +269,12 @@ nvme_attach(device_t dev)
 			break;
 		++ep;
 	}
-	ctrlr->quirks = ep->quirks;
+	pctrlr->ctrlr.cquirks = ep->quirks;
 
-	status = nvme_ctrlr_construct(ctrlr, dev);
+	status = nvme_ctrlr_construct(pctrlr, dev);
 
 	if (status != 0) {
-		nvme_ctrlr_destruct(ctrlr, dev);
+		nvme_ctrlr_destruct(pctrlr, dev);
 		return (status);
 	}
 
@@ -289,22 +289,22 @@ nvme_attach(device_t dev)
 	 *  to cc.en==0.  This is because we don't really know what status
 	 *  the controller was left in when boot handed off to OS.
 	 */
-	status = nvme_ctrlr_hw_reset(ctrlr);
+	status = nvme_ctrlr_hw_reset(pctrlr);
 	if (status != 0) {
-		nvme_ctrlr_destruct(ctrlr, dev);
+		nvme_ctrlr_destruct(pctrlr, dev);
 		return (status);
 	}
 
-	status = nvme_ctrlr_hw_reset(ctrlr);
+	status = nvme_ctrlr_hw_reset(pctrlr);
 	if (status != 0) {
-		nvme_ctrlr_destruct(ctrlr, dev);
+		nvme_ctrlr_destruct(pctrlr, dev);
 		return (status);
 	}
 
-	ctrlr->config_hook.ich_func = nvme_ctrlr_start_config_hook;
-	ctrlr->config_hook.ich_arg = ctrlr;
+	pctrlr->ctrlr.config_hook.ich_func = nvme_ctrlr_start_config_hook;
+	pctrlr->ctrlr.config_hook.ich_arg = pctrlr;
 
-	config_intrhook_establish(&ctrlr->config_hook);
+	config_intrhook_establish(&pctrlr->ctrlr.config_hook);
 
 	return (0);
 }
@@ -312,16 +312,16 @@ nvme_attach(device_t dev)
 static int
 nvme_detach (device_t dev)
 {
-	struct nvme_controller	*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
 
-	nvme_ctrlr_destruct(ctrlr, dev);
+	nvme_ctrlr_destruct(pctrlr, dev);
 	pci_disable_busmaster(dev);
 	return (0);
 }
 
 static void
 nvme_notify(struct nvme_consumer *cons,
-	    struct nvme_controller *ctrlr)
+	    struct nvme_pci_controller *pctrlr)
 {
 	struct nvme_namespace	*ns;
 	void			*ctrlr_cookie;
@@ -334,20 +334,20 @@ nvme_notify(struct nvme_consumer *cons,
 	 *  return here, and when initialization completes, the
 	 *  controller will make sure the consumer gets notified.
 	 */
-	if (!ctrlr->is_initialized)
+	if (!pctrlr->ctrlr.is_initialized)
 		return;
 
-	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
+	cmpset = atomic_cmpset_32(&pctrlr->ctrlr.notification_sent, 0, 1);
 
 	if (cmpset == 0)
 		return;
 
 	if (cons->ctrlr_fn != NULL)
-		ctrlr_cookie = (*cons->ctrlr_fn)(ctrlr);
+		ctrlr_cookie = (*cons->ctrlr_fn)(pctrlr);
 	else
 		ctrlr_cookie = NULL;
-	ctrlr->cons_cookie[cons->id] = ctrlr_cookie;
-	if (ctrlr->is_failed) {
+	pctrlr->ctrlr.ccons_cookie[cons->id] = ctrlr_cookie;
+	if (pctrlr->ctrlr.is_failed) {
 		if (cons->fail_fn != NULL)
 			(*cons->fail_fn)(ctrlr_cookie);
 		/*
@@ -356,8 +356,8 @@ nvme_notify(struct nvme_consumer *cons,
 		 */
 		return;
 	}
-	for (ns_idx = 0; ns_idx < min(ctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
-		ns = &ctrlr->ns[ns_idx];
+	for (ns_idx = 0; ns_idx < min(pctrlr->ctrlr.cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
+		ns = &pctrlr->ctrlr.cns[ns_idx];
 		if (ns->data.nsze == 0)
 			continue;
 		if (cons->ns_fn != NULL)
@@ -367,13 +367,13 @@ nvme_notify(struct nvme_consumer *cons,
 }
 
 void
-nvme_notify_new_controller(struct nvme_controller *ctrlr)
+nvme_notify_new_controller(struct nvme_pci_controller *pctrlr)
 {
 	int i;
 
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		if (nvme_consumer[i].id != INVALID_CONSUMER_ID) {
-			nvme_notify(&nvme_consumer[i], ctrlr);
+			nvme_notify(&nvme_consumer[i], pctrlr);
 		}
 	}
 }
@@ -382,22 +382,22 @@ static void
 nvme_notify_new_consumer(struct nvme_consumer *cons)
 {
 	device_t		*devlist;
-	struct nvme_controller	*ctrlr;
+	struct nvme_pci_controller	*pctrlr;
 	int			dev_idx, devcount;
 
 	if (devclass_get_devices(nvme_devclass, &devlist, &devcount))
 		return;
 
 	for (dev_idx = 0; dev_idx < devcount; dev_idx++) {
-		ctrlr = DEVICE2SOFTC(devlist[dev_idx]);
-		nvme_notify(cons, ctrlr);
+		pctrlr = DEVICE2SOFTC(devlist[dev_idx]);
+		nvme_notify(cons, pctrlr);
 	}
 
 	free(devlist, M_TEMP);
 }
 
 void
-nvme_notify_async_consumers(struct nvme_controller *ctrlr,
+nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 			    const struct nvme_completion *async_cpl,
 			    uint32_t log_page_id, void *log_page_buffer,
 			    uint32_t log_page_size)
@@ -408,13 +408,13 @@ nvme_notify_async_consumers(struct nvme_controller *ctrlr,
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->async_fn != NULL)
-			(*cons->async_fn)(ctrlr->cons_cookie[i], async_cpl,
+			(*cons->async_fn)(pctrlr->ctrlr.ccons_cookie[i], async_cpl,
 			    log_page_id, log_page_buffer, log_page_size);
 	}
 }
 
 void
-nvme_notify_fail_consumers(struct nvme_controller *ctrlr)
+nvme_notify_fail_consumers(struct nvme_pci_controller *pctrlr)
 {
 	struct nvme_consumer	*cons;
 	uint32_t		i;
@@ -425,31 +425,31 @@ nvme_notify_fail_consumers(struct nvme_controller *ctrlr)
 	 *  consumers of the failure here, since the consumer does not
 	 *  even know about the controller yet.
 	 */
-	if (!ctrlr->is_initialized)
+	if (!pctrlr->ctrlr.is_initialized)
 		return;
 
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->fail_fn != NULL)
-			cons->fail_fn(ctrlr->cons_cookie[i]);
+			cons->fail_fn(pctrlr->ctrlr.ccons_cookie[i]);
 	}
 }
 
 void
-nvme_notify_ns(struct nvme_controller *ctrlr, int nsid)
+nvme_notify_ns(struct nvme_pci_controller *pctrlr, int nsid)
 {
 	struct nvme_consumer	*cons;
-	struct nvme_namespace	*ns = &ctrlr->ns[nsid - 1];
+	struct nvme_namespace	*ns = &pctrlr->ctrlr.cns[nsid - 1];
 	uint32_t		i;
 
-	if (!ctrlr->is_initialized)
+	if (!pctrlr->ctrlr.is_initialized)
 		return;
 
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->ns_fn != NULL)
 			ns->cons_cookie[cons->id] =
-			    (*cons->ns_fn)(ns, ctrlr->cons_cookie[cons->id]);
+			    (*cons->ns_fn)(ns, pctrlr->ctrlr.ccons_cookie[cons->id]);
 	}
 }
 

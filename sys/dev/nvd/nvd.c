@@ -56,7 +56,7 @@ static void nvd_done(void *arg, const struct nvme_completion *cpl);
 static void *nvd_new_disk(struct nvme_namespace *ns, void *ctrlr);
 static void destroy_geom_disk(struct nvd_disk *ndisk);
 
-static void *nvd_new_controller(struct nvme_controller *ctrlr);
+static void *nvd_new_controller(struct nvme_pci_controller *pctrlr);
 static void nvd_controller_fail(void *ctrlr);
 
 static int nvd_load(void);
@@ -296,7 +296,7 @@ nvd_bioq_process(void *arg, int pending)
 }
 
 static void *
-nvd_new_controller(struct nvme_controller *ctrlr)
+nvd_new_controller(struct nvme_pci_controller *pctrlr)
 {
 	struct nvd_controller	*nvd_ctrlr;
 

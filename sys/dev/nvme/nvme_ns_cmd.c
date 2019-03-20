@@ -45,7 +45,7 @@ nvme_ns_cmd_read(struct nvme_namespace *ns, void *payload, uint64_t lba,
 
 	nvme_ns_read_cmd(&req->cmd, ns->id, lba, lba_count);
 
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 
 	return (0);
 }
@@ -67,7 +67,7 @@ nvme_ns_cmd_read_bio(struct nvme_namespace *ns, struct bio *bp,
 	lba_count = bp->bio_bcount / nvme_ns_get_sector_size(ns);
 	nvme_ns_read_cmd(&req->cmd, ns->id, lba, lba_count);
 
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 
 	return (0);
 }
@@ -86,7 +86,7 @@ nvme_ns_cmd_write(struct nvme_namespace *ns, void *payload, uint64_t lba,
 
 	nvme_ns_write_cmd(&req->cmd, ns->id, lba, lba_count);
 
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 
 	return (0);
 }
@@ -107,7 +107,7 @@ nvme_ns_cmd_write_bio(struct nvme_namespace *ns, struct bio *bp,
 	lba_count = bp->bio_bcount / nvme_ns_get_sector_size(ns);
 	nvme_ns_write_cmd(&req->cmd, ns->id, lba, lba_count);
 
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 
 	return (0);
 }
@@ -133,7 +133,7 @@ nvme_ns_cmd_deallocate(struct nvme_namespace *ns, void *payload,
 	cmd->cdw10 = htole32(num_ranges - 1);
 	cmd->cdw11 = htole32(NVME_DSM_ATTR_DEALLOCATE);
 
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 
 	return (0);
 }
@@ -149,7 +149,7 @@ nvme_ns_cmd_flush(struct nvme_namespace *ns, nvme_cb_fn_t cb_fn, void *cb_arg)
 		return (ENOMEM);
 
 	nvme_ns_flush_cmd(&req->cmd, ns->id);
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 
 	return (0);
 }
@@ -181,7 +181,7 @@ nvme_ns_dump(struct nvme_namespace *ns, void *virt, off_t offset, size_t len)
 	} else
 		nvme_ns_flush_cmd(cmd, ns->id);
 
-	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
+	nvme_ctrlr_submit_io_request(ns->pctrlr, req);
 	if (req->qpair == NULL)
 		return (ENXIO);
 
