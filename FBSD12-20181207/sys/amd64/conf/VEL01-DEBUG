@@ -113,8 +113,8 @@ device		ses			# Enclosure Services (SES and SAF-TE)
 device		mrsas			# LSI/Avago MegaRAID SAS/SATA, 6Gb/s and 12Gb/s
 
 # NVM Express (NVMe) support
-device		nvme			# base NVMe driver
-device		nvd			# expose NVMe namespaces as disks, depends on nvme
+# device		nvme		# base NVMe driver
+# device		nvd			# expose NVMe namespaces as disks, depends on nvme
 
 # atkbdc0 controls both the keyboard and the PS/2 mouse
 device		atkbdc			# AT keyboard controller
