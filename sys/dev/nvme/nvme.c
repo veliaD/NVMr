@@ -203,6 +203,21 @@ nvme_load(void)
 static void
 nvme_unload(void)
 {
+	struct nvme_controller *ctrlr, *tctrlr;
+
+	/*
+	 * Notify any NVMe transport drivers that we're being unloaded
+	 * This shouldn't be necessary if the transport driver is marked
+	 * as dependent on this one.
+	 */
+	sx_slock(&nclst_lock);
+	STAILQ_FOREACH_SAFE(ctrlr, &nclst_hd, nvmec_lst, tctrlr) {
+		DBGSPEW("Invoking .nvmec_delist:%p for ctrlr:%p\n",
+		    ctrlr->nvmec_delist, ctrlr);
+		ctrlr->nvmec_delist(ctrlr);
+		/* ctrlr invalid after this point */
+	}
+	sx_sunlock(&nclst_lock);
 }
 
 static int
@@ -271,6 +286,7 @@ nvme_dump_completion(struct nvme_completion *cpl)
 void
 nvme_register_controller(struct nvme_controller *ctrlrp)
 {
+	DBGSPEW("ctrlr:%p\n", ctrlrp);
 	sx_xlock(&nclst_lock);
 	STAILQ_INSERT_TAIL(&nclst_hd, ctrlrp, nvmec_lst);
 	sx_xunlock(&nclst_lock);
@@ -279,9 +295,17 @@ nvme_register_controller(struct nvme_controller *ctrlrp)
 void
 nvme_unregister_controller(struct nvme_controller *ctrlrp)
 {
+	DBGSPEW("ctrlr:%p\n", ctrlrp);
 	sx_xlock(&nclst_lock);
 	STAILQ_REMOVE(&nclst_hd, ctrlrp, nvme_controller, nvmec_lst);
 	sx_xunlock(&nclst_lock);
+}
+
+static void
+nvmp_delist_cb(struct nvme_controller *ctrlrp)
+{
+	DBGSPEW("nvmp_delist_cb() invoked for ctrlr:%p\n", ctrlrp);
+	return;
 }
 
 static int
@@ -294,6 +318,7 @@ nvme_attach(device_t dev)
 	uint16_t		subdevice;
 
 	pctrlr->ctrlr.nvmec_tsp = pctrlr;
+	pctrlr->ctrlr.nvmec_delist = &nvmp_delist_cb;
 
 	devid = pci_get_devid(dev);
 	subdevice = pci_get_subdevice(dev);
@@ -340,9 +365,7 @@ nvme_attach(device_t dev)
 
 	config_intrhook_establish(&pctrlr->config_hook);
 
-	sx_xlock(&nclst_lock);
-	STAILQ_INSERT_TAIL(&nclst_hd, &pctrlr->ctrlr, nvmec_lst);
-	sx_xunlock(&nclst_lock);
+	nvme_register_controller(&pctrlr->ctrlr);
 
 	return (0);
 }
@@ -352,9 +375,7 @@ nvme_detach (device_t dev)
 {
 	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
 
-	sx_xlock(&nclst_lock);
-	STAILQ_REMOVE(&nclst_hd, &pctrlr->ctrlr, nvme_controller, nvmec_lst);
-	sx_xunlock(&nclst_lock);
+	nvme_unregister_controller(&pctrlr->ctrlr);
 
 	nvme_ctrlr_destruct(pctrlr, dev);
 	pci_disable_busmaster(dev);
@@ -363,12 +384,14 @@ nvme_detach (device_t dev)
 
 static void
 nvme_notify(struct nvme_consumer *cons,
-	    struct nvme_pci_controller *pctrlr)
+	    struct nvme_controller *ctrlr)
 {
 	struct nvme_namespace	*ns;
 	void			*ctrlr_cookie;
 	int			cmpset, ns_idx;
+	struct nvme_pci_controller *pctrlr;
 
+	DBGSPEW("Notifying consumer for ctrlr:%p\n", ctrlr);
 	/*
 	 * The consumer may register itself after the nvme devices
 	 *  have registered with the kernel, but before the
@@ -376,10 +399,11 @@ nvme_notify(struct nvme_consumer *cons,
 	 *  return here, and when initialization completes, the
 	 *  controller will make sure the consumer gets notified.
 	 */
-	if (!pctrlr->ctrlr.is_initialized)
+	if (!ctrlr->is_initialized)
 		return;
 
-	cmpset = atomic_cmpset_32(&pctrlr->ctrlr.notification_sent, 0, 1);
+	pctrlr = ctrlr->nvmec_tsp;
+	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
 
 	if (cmpset == 0)
 		return;
@@ -388,8 +412,8 @@ nvme_notify(struct nvme_consumer *cons,
 		ctrlr_cookie = (*cons->ctrlr_fn)(pctrlr);
 	else
 		ctrlr_cookie = NULL;
-	pctrlr->ctrlr.ccons_cookie[cons->id] = ctrlr_cookie;
-	if (pctrlr->ctrlr.is_failed) {
+	ctrlr->ccons_cookie[cons->id] = ctrlr_cookie;
+	if (ctrlr->is_failed) {
 		if (cons->fail_fn != NULL)
 			(*cons->fail_fn)(ctrlr_cookie);
 		/*
@@ -399,7 +423,7 @@ nvme_notify(struct nvme_consumer *cons,
 		return;
 	}
 	for (ns_idx = 0; ns_idx < min(pctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
-		ns = &pctrlr->ctrlr.cns[ns_idx];
+		ns = &ctrlr->cns[ns_idx];
 		if (ns->nvmes_nsd.nsze == 0)
 			continue;
 		if (cons->ns_fn != NULL)
@@ -415,7 +439,7 @@ nvme_notify_new_controller(struct nvme_pci_controller *pctrlr)
 
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		if (nvme_consumer[i].id != INVALID_CONSUMER_ID) {
-			nvme_notify(&nvme_consumer[i], pctrlr);
+			nvme_notify(&nvme_consumer[i], &pctrlr->ctrlr);
 		}
 	}
 }
@@ -423,14 +447,12 @@ nvme_notify_new_controller(struct nvme_pci_controller *pctrlr)
 static void
 nvme_notify_new_consumer(struct nvme_consumer *cons)
 {
-	struct nvme_pci_controller *pctrlr;
 	struct nvme_controller     *ctrlr;
 
 	printf("NVMe: Notifying consumer\n");
 	sx_slock(&nclst_lock);
 	STAILQ_FOREACH(ctrlr, &nclst_hd, nvmec_lst) {
-		pctrlr = ctrlr->nvmec_tsp;
-		nvme_notify(cons, pctrlr);
+		nvme_notify(cons, ctrlr);
 	}
 	sx_sunlock(&nclst_lock);
 }

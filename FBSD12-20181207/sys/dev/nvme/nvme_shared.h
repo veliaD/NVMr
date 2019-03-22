@@ -39,6 +39,12 @@
 #include <sys/mutex.h>
 #include <sys/taskqueue.h>
 
+#define SPEWCMN(prefix, format, ...) printf(prefix "%s@%d> " format, \
+    __func__, __LINE__, ## __VA_ARGS__)
+#define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
+#define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
+#define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
+
 struct nvme_completion {
 
 	/* dword 0 */
@@ -292,6 +298,7 @@ struct nvme_controller {
 	STAILQ_ENTRY(nvme_controller)	nvmec_lst;
 
 	struct nvme_pci_controller	*nvmec_tsp;
+	void 				(*nvmec_delist)(struct nvme_controller *);
 };
 
 

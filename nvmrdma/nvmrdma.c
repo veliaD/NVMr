@@ -25,12 +25,6 @@
 
 #include <dev/nvme/nvme_shared.h>
 
-#define SPEWCMN(prefix, format, ...) printf(prefix "%s@%d> " format, \
-    __func__, __LINE__, ## __VA_ARGS__)
-#define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
-#define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
-#define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
-
 #define MAX_ADMIN_WORK_REQUESTS 32
 #define MAX_NVME_RDMA_SEGMENTS 256
 
@@ -272,6 +266,7 @@ typedef struct nvmr_cntrlr_tag {
 	int                nvmrctr_numqs; /* Q count not always fixed in prof */
 	volatile int       nvmrctr_refcount;
 	uint16_t           nvmrctr_port;
+	struct nvme_controller nvmrctr_nvmec;
 } *nvmr_cntrlr_t;
 
 static void
@@ -1556,6 +1551,9 @@ nvmr_init(void)
 		goto out;
 	}
 
+
+	nvmr_cntrlr_ref(glbl_cntrlr); /* For the nvme registration below */
+	nvme_register_controller(&glbl_cntrlr->nvmrctr_nvmec);
 out:
 
 
@@ -1572,6 +1570,9 @@ nvmr_uninit(void)
 		goto out;
 	}
 
+	nvme_unregister_controller(&glbl_cntrlr->nvmrctr_nvmec);
+	nvmr_cntrlr_rele(glbl_cntrlr);
+
 	nvmr_cntrlr_rele(glbl_cntrlr);
 	glbl_cntrlr = NULL;
 
@@ -1584,4 +1585,5 @@ SYSINIT(nvmr, SI_SUB_DRIVERS, SI_ORDER_ANY, nvmr_init, NULL);
 SYSUNINIT(nvmr, SI_SUB_DRIVERS, SI_ORDER_ANY, nvmr_uninit, NULL);
 MODULE_DEPEND(nvmr, linuxkpi, 1, 1, 1);
 MODULE_DEPEND(nvmr, ibcore, 1, 1, 1);
+MODULE_DEPEND(nvmr, nvme, 1, 1, 1);
 MODULE_VERSION(nvmr, 1);
