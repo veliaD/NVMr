@@ -31,16 +31,9 @@
 #ifndef __NVME_PRIVATE_H__
 #define __NVME_PRIVATE_H__
 
-#include <sys/param.h>
-#include <sys/bio.h>
-#include <sys/bus.h>
-#include <sys/kernel.h>
-#include <sys/lock.h>
 #include <sys/malloc.h>
-#include <sys/mutex.h>
 #include <sys/rman.h>
 #include <sys/systm.h>
-#include <sys/taskqueue.h>
 
 #include <vm/uma.h>
 
@@ -90,10 +83,6 @@ MALLOC_DECLARE(M_NVME);
 
 #define NVME_INT_COAL_TIME	(0)	/* disabled */
 #define NVME_INT_COAL_THRESHOLD (0)	/* 0-based */
-
-#define NVME_MAX_NAMESPACES	(16)
-#define NVME_MAX_CONSUMERS	(2)
-#define NVME_MAX_ASYNC_EVENTS	(8)
 
 #define NVME_DEFAULT_TIMEOUT_PERIOD	(30)    /* in seconds */
 #define NVME_MIN_TIMEOUT_PERIOD		(5)
@@ -156,16 +145,6 @@ struct nvme_request {
 	STAILQ_ENTRY(nvme_request)	stailq;
 };
 
-struct nvme_async_event_request {
-
-	struct nvme_pci_controller		*pctrlr;
-	struct nvme_request		*req;
-	struct nvme_completion		cpl;
-	uint32_t			log_page_id;
-	uint32_t			log_page_size;
-	uint8_t				log_page_buffer[NVME_MAX_AER_LOG_SIZE];
-};
-
 struct nvme_tracker {
 
 	TAILQ_ENTRY(nvme_tracker)	tailq;
@@ -224,67 +203,6 @@ struct nvme_qpair {
 
 } __aligned(CACHE_LINE_SIZE);
 
-struct nvme_namespace {
-
-	struct nvme_pci_controller	*pctrlr;
-	struct nvme_namespace_data	data;
-	uint32_t			id;
-	uint32_t			flags;
-	struct cdev			*cdev;
-	void				*cons_cookie[NVME_MAX_CONSUMERS];
-	uint32_t			stripesize;
-	struct mtx			lock;
-};
-
-/*
- * One of these per allocated PCI device.
- */
-struct nvme_controller {
-	struct mtx		lockc;
-
-	uint32_t		ready_timeout_in_ms;
-	uint32_t		cquirks;
-#define QUIRK_DELAY_B4_CHK_RDY 1		/* Can't touch MMIO on disable */
-	uint32_t		num_io_queues;
-	uint32_t		num_cpus_per_ioq;
-	uint32_t		max_hw_pend_io;
-
-	/* Fields for tracking progress during controller initialization. */
-	struct intr_config_hook	config_hook;
-	uint32_t		ns_identified;
-	uint32_t		queues_created;
-
-	struct task		reset_task;
-	struct task		fail_req_task;
-	struct taskqueue	*taskqueue;
-
-	/** maximum i/o size in bytes */
-	uint32_t		max_xfer_size;
-
-	/** minimum page size supported by this controller in bytes */
-	uint32_t		min_page_size;
-	struct nvme_controller_data	cdata;
-	struct nvme_namespace		cns[NVME_MAX_NAMESPACES];
-
-	struct cdev			*ccdev;
-
-	/** bit mask of event types currently enabled for async events */
-	uint32_t			async_event_config;
-
-	uint32_t			num_aers;
-	struct nvme_async_event_request	aer[NVME_MAX_ASYNC_EVENTS];
-
-	void				*ccons_cookie[NVME_MAX_CONSUMERS];
-
-	uint32_t			is_resetting;
-	uint32_t			is_initialized;
-	uint32_t			notification_sent;
-
-	boolean_t			is_failed;
-	STAILQ_HEAD(, nvme_request)	fail_req;
-};
-
-
 /*
  * One of these per allocated PCI device.
  */
@@ -328,7 +246,11 @@ struct nvme_pci_controller {
 	struct nvme_qpair	adminq;
 	struct nvme_qpair	*ioq;
 
+	struct nvme_controller_data	cdata;
 	struct nvme_registers	*regs;
+
+	/* Fields for tracking progress during controller initialization. */
+	struct intr_config_hook	config_hook;
 
 	struct nvme_controller	ctrlr;
 };
@@ -418,9 +340,9 @@ int	nvme_ctrlr_hw_reset(struct nvme_pci_controller *pctrlr);
 void	nvme_ctrlr_reset(struct nvme_pci_controller *pctrlr);
 /* pctrlr defined as void * to allow use with config_intrhook. */
 void	nvme_ctrlr_start_config_hook(void *ctrlr_arg);
-void	nvme_ctrlr_submit_admin_request(struct nvme_pci_controller *pctrlr,
+void	nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
 					struct nvme_request *req);
-void	nvme_ctrlr_submit_io_request(struct nvme_pci_controller *pctrlr,
+void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 				     struct nvme_request *req);
 void	nvme_ctrlr_post_failed_request(struct nvme_pci_controller *pctrlr,
 				       struct nvme_request *req);

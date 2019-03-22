@@ -116,9 +116,9 @@ nvme_sim_nvmeio(struct cam_sim *sim, union ccb *ccb)
 	memcpy(&req->cmd, &ccb->nvmeio.cmd, sizeof(ccb->nvmeio.cmd));
 
 	if (ccb->ccb_h.func_code == XPT_NVME_IO)
-		nvme_ctrlr_submit_io_request(pctrlr, req);
+		nvme_ctrlr_submit_io_request(&pctrlr->ctrlr, req);
 	else
-		nvme_ctrlr_submit_admin_request(pctrlr, req);
+		nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 static uint32_t
@@ -186,7 +186,7 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		cpi->hba_misc =  PIM_UNMAPPED | PIM_NOSCAN;
 		cpi->hba_eng_cnt = 0;
 		cpi->max_target = 0;
-		cpi->max_lun = pctrlr->ctrlr.cdata.nn;
+		cpi->max_lun = pctrlr->cdata.nn;
 		cpi->maxio = pctrlr->ctrlr.max_xfer_size;
 		cpi->initiator_id = 0;
 		cpi->bus_id = cam_sim_bus(sim);

@@ -422,7 +422,7 @@ nvme_ctrlr_identify(struct nvme_pci_controller *pctrlr)
 	struct nvme_completion_poll_status	status;
 
 	status.done = 0;
-	nvme_ctrlr_cmd_identify_controller(pctrlr, &pctrlr->ctrlr.cdata,
+	nvme_ctrlr_cmd_identify_controller(pctrlr, &pctrlr->cdata,
 	    nvme_completion_poll_cb, &status);
 	while (!atomic_load_acq_int(&status.done))
 		pause("nvme", 1);
@@ -432,15 +432,15 @@ nvme_ctrlr_identify(struct nvme_pci_controller *pctrlr)
 	}
 
 	/* Convert data to host endian */
-	nvme_controller_data_swapbytes(&pctrlr->ctrlr.cdata);
+	nvme_controller_data_swapbytes(&pctrlr->cdata);
 
 	/*
 	 * Use MDTS to ensure our default max_xfer_size doesn't exceed what the
 	 *  controller supports.
 	 */
-	if (pctrlr->ctrlr.cdata.mdts > 0)
+	if (pctrlr->cdata.mdts > 0)
 		pctrlr->ctrlr.max_xfer_size = min(pctrlr->ctrlr.max_xfer_size,
-		    pctrlr->ctrlr.min_page_size * (1 << (pctrlr->ctrlr.cdata.mdts)));
+		    pctrlr->ctrlr.min_page_size * (1 << (pctrlr->cdata.mdts)));
 
 	return (0);
 }
@@ -548,7 +548,7 @@ nvme_ctrlr_construct_namespaces(struct nvme_pci_controller *pctrlr)
 	struct nvme_namespace	*ns;
 	uint32_t 		i;
 
-	for (i = 0; i < min(pctrlr->ctrlr.cdata.nn, NVME_MAX_NAMESPACES); i++) {
+	for (i = 0; i < min(pctrlr->cdata.nn, NVME_MAX_NAMESPACES); i++) {
 		ns = &pctrlr->ctrlr.cns[i];
 		nvme_ns_construct(ns, i+1, pctrlr);
 	}
@@ -580,7 +580,7 @@ nvme_ctrlr_get_log_page_size(struct nvme_pci_controller *pctrlr, uint8_t page_id
 	case NVME_LOG_ERROR:
 		log_page_size = min(
 		    sizeof(struct nvme_error_information_entry) *
-		    (pctrlr->ctrlr.cdata.elpe + 1), NVME_MAX_AER_LOG_SIZE);
+		    (pctrlr->cdata.elpe + 1), NVME_MAX_AER_LOG_SIZE);
 		break;
 	case NVME_LOG_HEALTH_INFORMATION:
 		log_page_size = sizeof(struct nvme_health_information_page);
@@ -639,14 +639,14 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 	 *  should never happen.
 	 */
 	if (nvme_completion_is_error(cpl))
-		nvme_notify_async_consumers(aer->pctrlr, &aer->cpl,
+		nvme_notify_async_consumers(aer->nvmea_ctrlrp->nvmec_tsp, &aer->cpl,
 		    aer->log_page_id, NULL, 0);
 	else {
 		/* Convert data to host endian */
 		switch (aer->log_page_id) {
 		case NVME_LOG_ERROR:
 			err = (struct nvme_error_information_entry *)aer->log_page_buffer;
-			for (i = 0; i < (aer->pctrlr->ctrlr.cdata.elpe + 1); i++)
+			for (i = 0; i < (aer->nvmea_ctrlrp->nvmec_tsp->cdata.elpe + 1); i++)
 				nvme_error_information_entry_swapbytes(err++);
 			break;
 		case NVME_LOG_HEALTH_INFORMATION:
@@ -672,7 +672,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 		if (aer->log_page_id == NVME_LOG_HEALTH_INFORMATION) {
 			health_info = (struct nvme_health_information_page *)
 			    aer->log_page_buffer;
-			nvme_ctrlr_log_critical_warnings(aer->pctrlr,
+			nvme_ctrlr_log_critical_warnings(aer->nvmea_ctrlrp->nvmec_tsp,
 			    health_info->critical_warning);
 			/*
 			 * Critical warnings reported through the
@@ -681,17 +681,17 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 			 *  config so that we do not receive repeated
 			 *  notifications for the same event.
 			 */
-			aer->pctrlr->ctrlr.async_event_config &=
+			aer->nvmea_ctrlrp->async_event_config &=
 			    ~health_info->critical_warning;
-			nvme_ctrlr_cmd_set_async_event_config(aer->pctrlr,
-			    aer->pctrlr->ctrlr.async_event_config, NULL, NULL);
+			nvme_ctrlr_cmd_set_async_event_config(aer->nvmea_ctrlrp->nvmec_tsp,
+			    aer->nvmea_ctrlrp->async_event_config, NULL, NULL);
 		} else if (aer->log_page_id == NVME_LOG_CHANGED_NAMESPACE &&
 		    !nvme_use_nvd) {
 			nsl = (struct nvme_ns_list *)aer->log_page_buffer;
 			for (i = 0; i < nitems(nsl->ns) && nsl->ns[i] != 0; i++) {
 				if (nsl->ns[i] > NVME_MAX_NAMESPACES)
 					break;
-				nvme_notify_ns(aer->pctrlr, nsl->ns[i]);
+				nvme_notify_ns(aer->nvmea_ctrlrp->nvmec_tsp, nsl->ns[i]);
 			}
 		}
 
@@ -700,7 +700,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 		 * Pass the cpl data from the original async event completion,
 		 *  not the log page fetch.
 		 */
-		nvme_notify_async_consumers(aer->pctrlr, &aer->cpl,
+		nvme_notify_async_consumers(aer->nvmea_ctrlrp->nvmec_tsp, &aer->cpl,
 		    aer->log_page_id, aer->log_page_buffer, aer->log_page_size);
 	}
 
@@ -708,7 +708,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 	 * Repost another asynchronous event request to replace the one
 	 *  that just completed.
 	 */
-	nvme_ctrlr_construct_and_submit_aer(aer->pctrlr, aer);
+	nvme_ctrlr_construct_and_submit_aer(aer->nvmea_ctrlrp->nvmec_tsp, aer);
 }
 
 static void
@@ -729,28 +729,28 @@ nvme_ctrlr_async_event_cb(void *arg, const struct nvme_completion *cpl)
 	/* Associated log page is in bits 23:16 of completion entry dw0. */
 	aer->log_page_id = (cpl->cdw0 & 0xFF0000) >> 16;
 
-	nvme_printf(aer->pctrlr, "async event occurred (type 0x%x, info 0x%02x,"
+	nvme_printf(aer->nvmea_ctrlrp->nvmec_tsp, "async event occurred (type 0x%x, info 0x%02x,"
 	    " page 0x%02x)\n", (cpl->cdw0 & 0x03), (cpl->cdw0 & 0xFF00) >> 8,
 	    aer->log_page_id);
 
 	if (is_log_page_id_valid(aer->log_page_id)) {
-		aer->log_page_size = nvme_ctrlr_get_log_page_size(aer->pctrlr,
+		aer->log_page_size = nvme_ctrlr_get_log_page_size(aer->nvmea_ctrlrp->nvmec_tsp,
 		    aer->log_page_id);
 		memcpy(&aer->cpl, cpl, sizeof(*cpl));
-		nvme_ctrlr_cmd_get_log_page(aer->pctrlr, aer->log_page_id,
+		nvme_ctrlr_cmd_get_log_page(aer->nvmea_ctrlrp->nvmec_tsp, aer->log_page_id,
 		    NVME_GLOBAL_NAMESPACE_TAG, aer->log_page_buffer,
 		    aer->log_page_size, nvme_ctrlr_async_event_log_page_cb,
 		    aer);
 		/* Wait to notify consumers until after log page is fetched. */
 	} else {
-		nvme_notify_async_consumers(aer->pctrlr, cpl, aer->log_page_id,
+		nvme_notify_async_consumers(aer->nvmea_ctrlrp->nvmec_tsp, cpl, aer->log_page_id,
 		    NULL, 0);
 
 		/*
 		 * Repost another asynchronous event request to replace the one
 		 *  that just completed.
 		 */
-		nvme_ctrlr_construct_and_submit_aer(aer->pctrlr, aer);
+		nvme_ctrlr_construct_and_submit_aer(aer->nvmea_ctrlrp->nvmec_tsp, aer);
 	}
 }
 
@@ -760,7 +760,7 @@ nvme_ctrlr_construct_and_submit_aer(struct nvme_pci_controller *pctrlr,
 {
 	struct nvme_request *req;
 
-	aer->pctrlr = pctrlr;
+	aer->nvmea_ctrlrp = &pctrlr->ctrlr;
 	req = nvme_allocate_request_null(nvme_ctrlr_async_event_cb, aer);
 	aer->req = req;
 
@@ -770,7 +770,7 @@ nvme_ctrlr_construct_and_submit_aer(struct nvme_pci_controller *pctrlr,
 	 */
 	req->timeout = FALSE;
 	req->cmd.opc = NVME_OPC_ASYNC_EVENT_REQUEST;
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(aer->nvmea_ctrlrp, req);
 }
 
 static void
@@ -784,7 +784,7 @@ nvme_ctrlr_configure_aer(struct nvme_pci_controller *pctrlr)
 	    NVME_CRIT_WARN_ST_DEVICE_RELIABILITY |
 	    NVME_CRIT_WARN_ST_READ_ONLY |
 	    NVME_CRIT_WARN_ST_VOLATILE_MEMORY_BACKUP;
-	if (pctrlr->ctrlr.cdata.ver >= NVME_REV(1, 2))
+	if (pctrlr->cdata.ver >= NVME_REV(1, 2))
 		pctrlr->ctrlr.async_event_config |= 0x300;
 
 	status.done = 0;
@@ -803,7 +803,7 @@ nvme_ctrlr_configure_aer(struct nvme_pci_controller *pctrlr)
 	    pctrlr->ctrlr.async_event_config, NULL, NULL);
 
 	/* aerl is a zero-based value, so we need to add 1 here. */
-	pctrlr->ctrlr.num_aers = min(NVME_MAX_ASYNC_EVENTS, (pctrlr->ctrlr.cdata.aerl+1));
+	pctrlr->ctrlr.num_aers = min(NVME_MAX_ASYNC_EVENTS, (pctrlr->cdata.aerl+1));
 
 	for (i = 0; i < pctrlr->ctrlr.num_aers; i++) {
 		aer = &pctrlr->ctrlr.aer[i];
@@ -908,7 +908,7 @@ nvme_ctrlr_start_config_hook(void *arg)
 		nvme_ctrlr_fail(pctrlr);
 
 	nvme_sysctl_initialize_ctrlr(pctrlr);
-	config_intrhook_disestablish(&pctrlr->ctrlr.config_hook);
+	config_intrhook_disestablish(&pctrlr->config_hook);
 
 	pctrlr->ctrlr.is_initialized = 1;
 	nvme_notify_new_controller(pctrlr);
@@ -1018,7 +1018,7 @@ nvme_pt_done(void *arg, const struct nvme_completion *cpl)
 }
 
 int
-nvme_ctrlr_passthrough_cmd(struct nvme_pci_controller *pctrlr,
+nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
     struct nvme_pt_command *pt, uint32_t nsid, int is_user_buffer,
     int is_admin_cmd)
 {
@@ -1027,6 +1027,10 @@ nvme_ctrlr_passthrough_cmd(struct nvme_pci_controller *pctrlr,
 	struct buf		*buf = NULL;
 	int			ret = 0;
 	vm_offset_t		addr, end;
+
+	struct nvme_pci_controller *pctrlr;
+
+	pctrlr = ctrlr->nvmec_tsp;
 
 	if (pt->len > 0) {
 		/*
@@ -1040,10 +1044,10 @@ nvme_ctrlr_passthrough_cmd(struct nvme_pci_controller *pctrlr,
 		if (end - addr > MAXPHYS)
 			return EIO;
 
-		if (pt->len > pctrlr->ctrlr.max_xfer_size) {
+		if (pt->len > ctrlr->max_xfer_size) {
 			nvme_printf(pctrlr, "pt->len (%d) "
 			    "exceeds max_xfer_size (%d)\n", pt->len,
-			    pctrlr->ctrlr.max_xfer_size);
+			    ctrlr->max_xfer_size);
 			return EIO;
 		}
 		if (is_user_buffer) {
@@ -1088,9 +1092,9 @@ nvme_ctrlr_passthrough_cmd(struct nvme_pci_controller *pctrlr,
 	pt->driver_lock = mtx;
 
 	if (is_admin_cmd)
-		nvme_ctrlr_submit_admin_request(pctrlr, req);
+		nvme_ctrlr_submit_admin_request(ctrlr, req);
 	else
-		nvme_ctrlr_submit_io_request(pctrlr, req);
+		nvme_ctrlr_submit_io_request(ctrlr, req);
 
 	mtx_lock(mtx);
 	while (pt->driver_lock != NULL)
@@ -1121,7 +1125,7 @@ nvme_ctrlr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
 		break;
 	case NVME_PASSTHROUGH_CMD:
 		pt = (struct nvme_pt_command *)arg;
-		return (nvme_ctrlr_passthrough_cmd(pctrlr, pt, le32toh(pt->cmd.nsid),
+		return (nvme_ctrlr_passthrough_cmd(&pctrlr->ctrlr, pt, le32toh(pt->cmd.nsid),
 		    1 /* is_user_buffer */, 1 /* is_admin_cmd */));
 	default:
 		return (ENOTTY);
@@ -1383,19 +1387,23 @@ nvme_ctrlr_shutdown(struct nvme_pci_controller *pctrlr)
 }
 
 void
-nvme_ctrlr_submit_admin_request(struct nvme_pci_controller *pctrlr,
+nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
     struct nvme_request *req)
 {
+	struct nvme_pci_controller *pctrlr;
 
+	pctrlr = ctrlr->nvmec_tsp;
 	nvme_qpair_submit_request(&pctrlr->adminq, req);
 }
 
 void
-nvme_ctrlr_submit_io_request(struct nvme_pci_controller *pctrlr,
+nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
     struct nvme_request *req)
 {
 	struct nvme_qpair       *qpair;
+	struct nvme_pci_controller *pctrlr;
 
+	pctrlr = ctrlr->nvmec_tsp;
 	qpair = &pctrlr->ioq[curcpu / pctrlr->ctrlr.num_cpus_per_ioq];
 	nvme_qpair_submit_request(qpair, req);
 }
@@ -1411,5 +1419,5 @@ const struct nvme_controller_data *
 nvme_ctrlr_get_data(struct nvme_pci_controller *pctrlr)
 {
 
-	return (&pctrlr->ctrlr.cdata);
+	return (&pctrlr->cdata);
 }

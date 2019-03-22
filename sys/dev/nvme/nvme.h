@@ -624,10 +624,6 @@ struct nvme_power_state {
 
 _Static_assert(sizeof(struct nvme_power_state) == 32, "bad size for nvme_power_state");
 
-#define NVME_SERIAL_NUMBER_LENGTH	20
-#define NVME_MODEL_NUMBER_LENGTH	40
-#define NVME_FIRMWARE_REVISION_LENGTH	8
-
 struct nvme_controller_data {
 
 	/* bytes 0-255: controller capabilities and features */
@@ -826,90 +822,6 @@ struct nvme_controller_data {
 } __packed __aligned(4);
 
 _Static_assert(sizeof(struct nvme_controller_data) == 4096, "bad size for nvme_controller_data");
-
-struct nvme_namespace_data {
-
-	/** namespace size */
-	uint64_t		nsze;
-
-	/** namespace capacity */
-	uint64_t		ncap;
-
-	/** namespace utilization */
-	uint64_t		nuse;
-
-	/** namespace features */
-	uint8_t			nsfeat;
-
-	/** number of lba formats */
-	uint8_t			nlbaf;
-
-	/** formatted lba size */
-	uint8_t			flbas;
-
-	/** metadata capabilities */
-	uint8_t			mc;
-
-	/** end-to-end data protection capabilities */
-	uint8_t			dpc;
-
-	/** end-to-end data protection type settings */
-	uint8_t			dps;
-
-	/** Namespace Multi-path I/O and Namespace Sharing Capabilities */
-	uint8_t			nmic;
-
-	/** Reservation Capabilities */
-	uint8_t			rescap;
-
-	/** Format Progress Indicator */
-	uint8_t			fpi;
-
-	/** Deallocate Logical Block Features */
-	uint8_t			dlfeat;
-
-	/** Namespace Atomic Write Unit Normal  */
-	uint16_t		nawun;
-
-	/** Namespace Atomic Write Unit Power Fail */
-	uint16_t		nawupf;
-
-	/** Namespace Atomic Compare & Write Unit */
-	uint16_t		nacwu;
-
-	/** Namespace Atomic Boundary Size Normal */
-	uint16_t		nabsn;
-
-	/** Namespace Atomic Boundary Offset */
-	uint16_t		nabo;
-
-	/** Namespace Atomic Boundary Size Power Fail */
-	uint16_t		nabspf;
-
-	/** Namespace Optimal IO Boundary */
-	uint16_t		noiob;
-
-	/** NVM Capacity */
-	uint8_t			nvmcap[16];
-
-	/* bytes 64-103: Reserved */
-	uint8_t			reserved5[40];
-
-	/** Namespace Globally Unique Identifier */
-	uint8_t			nguid[16];
-
-	/** IEEE Extended Unique Identifier */
-	uint8_t			eui64[8];
-
-	/** lba format support */
-	uint32_t		lbaf[16];
-
-	uint8_t			reserved6[192];
-
-	uint8_t			vendor_specific[3712];
-} __packed __aligned(4);
-
-_Static_assert(sizeof(struct nvme_namespace_data) == 4096, "bad size for nvme_namepsace_data");
 
 enum nvme_log_page {
 
@@ -1124,7 +1036,7 @@ enum nvme_namespace_flags {
 	NVME_NS_FLUSH_SUPPORTED		= 0x2,
 };
 
-int	nvme_ctrlr_passthrough_cmd(struct nvme_pci_controller *pctrlr,
+int	nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 				   struct nvme_pt_command *pt,
 				   uint32_t nsid, int is_user_buffer,
 				   int is_admin_cmd);

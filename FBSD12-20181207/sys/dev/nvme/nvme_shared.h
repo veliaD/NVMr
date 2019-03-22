@@ -31,6 +31,14 @@
 #ifndef __NVME_SHARED_H__
 #define __NVME_SHARED_H__
 
+#include <sys/param.h>
+#include <sys/bio.h>
+#include <sys/bus.h>
+#include <sys/kernel.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
+#include <sys/taskqueue.h>
+
 struct nvme_completion {
 
 	/* dword 0 */
@@ -121,4 +129,172 @@ enum nvme_admin_opcode {
 	NVME_OPC_SANITIZE			= 0x84,
 };
 
+#define NVME_SERIAL_NUMBER_LENGTH	20
+#define NVME_MODEL_NUMBER_LENGTH	40
+#define NVME_FIRMWARE_REVISION_LENGTH	8
+
+#define NVME_MAX_NAMESPACES	(16)
+
+#define NVME_MAX_CONSUMERS	(2)
+#define NVME_MAX_ASYNC_EVENTS	(8)
+
+/* Maximum log page size to fetch for AERs. */
+#define NVME_MAX_AER_LOG_SIZE		(4096)
+
+struct nvme_async_event_request {
+
+	struct nvme_controller		*nvmea_ctrlrp;
+	struct nvme_request		*req;
+	struct nvme_completion		cpl;
+	uint32_t			log_page_id;
+	uint32_t			log_page_size;
+	uint8_t				log_page_buffer[NVME_MAX_AER_LOG_SIZE];
+};
+
+struct nvme_namespace_data {
+
+	/** namespace size */
+	uint64_t		nsze;
+
+	/** namespace capacity */
+	uint64_t		ncap;
+
+	/** namespace utilization */
+	uint64_t		nuse;
+
+	/** namespace features */
+	uint8_t			nsfeat;
+
+	/** number of lba formats */
+	uint8_t			nlbaf;
+
+	/** formatted lba size */
+	uint8_t			flbas;
+
+	/** metadata capabilities */
+	uint8_t			mc;
+
+	/** end-to-end data protection capabilities */
+	uint8_t			dpc;
+
+	/** end-to-end data protection type settings */
+	uint8_t			dps;
+
+	/** Namespace Multi-path I/O and Namespace Sharing Capabilities */
+	uint8_t			nmic;
+
+	/** Reservation Capabilities */
+	uint8_t			rescap;
+
+	/** Format Progress Indicator */
+	uint8_t			fpi;
+
+	/** Deallocate Logical Block Features */
+	uint8_t			dlfeat;
+
+	/** Namespace Atomic Write Unit Normal  */
+	uint16_t		nawun;
+
+	/** Namespace Atomic Write Unit Power Fail */
+	uint16_t		nawupf;
+
+	/** Namespace Atomic Compare & Write Unit */
+	uint16_t		nacwu;
+
+	/** Namespace Atomic Boundary Size Normal */
+	uint16_t		nabsn;
+
+	/** Namespace Atomic Boundary Offset */
+	uint16_t		nabo;
+
+	/** Namespace Atomic Boundary Size Power Fail */
+	uint16_t		nabspf;
+
+	/** Namespace Optimal IO Boundary */
+	uint16_t		noiob;
+
+	/** NVM Capacity */
+	uint8_t			nvmcap[16];
+
+	/* bytes 64-103: Reserved */
+	uint8_t			reserved5[40];
+
+	/** Namespace Globally Unique Identifier */
+	uint8_t			nguid[16];
+
+	/** IEEE Extended Unique Identifier */
+	uint8_t			eui64[8];
+
+	/** lba format support */
+	uint32_t		lbaf[16];
+
+	uint8_t			reserved6[192];
+
+	uint8_t			vendor_specific[3712];
+} __packed __aligned(4);
+
+_Static_assert(sizeof(struct nvme_namespace_data) == 4096, "bad size for nvme_namepsace_data");
+
+struct nvme_namespace {
+	struct nvme_controller		*nvmes_ctrlr;
+	struct nvme_namespace_data	nvmes_nsd;
+	uint32_t			id;
+	uint32_t			flags;
+	struct cdev			*cdev;
+	void				*cons_cookie[NVME_MAX_CONSUMERS];
+	uint32_t			stripesize;
+	struct mtx			lock;
+};
+
+struct nvme_pci_controller;
+
+struct nvme_controller {
+	struct mtx		lockc;
+
+	uint32_t		ready_timeout_in_ms;
+	uint32_t		cquirks;
+#define QUIRK_DELAY_B4_CHK_RDY 1		/* Can't touch MMIO on disable */
+	uint32_t		num_io_queues;
+	uint32_t		num_cpus_per_ioq;
+	uint32_t		max_hw_pend_io;
+
+	uint32_t		ns_identified;
+	uint32_t		queues_created;
+
+	struct task		reset_task;
+	struct task		fail_req_task;
+	struct taskqueue	*taskqueue;
+
+	/** maximum i/o size in bytes */
+	uint32_t		max_xfer_size;
+
+	/** minimum page size supported by this controller in bytes */
+	uint32_t		min_page_size;
+	struct nvme_namespace		cns[NVME_MAX_NAMESPACES];
+
+	struct cdev			*ccdev;
+
+	/** bit mask of event types currently enabled for async events */
+	uint32_t			async_event_config;
+
+	uint32_t			num_aers;
+	struct nvme_async_event_request	aer[NVME_MAX_ASYNC_EVENTS];
+
+	void				*ccons_cookie[NVME_MAX_CONSUMERS];
+
+	uint32_t			is_resetting;
+	uint32_t			is_initialized;
+	uint32_t			notification_sent;
+
+	boolean_t			is_failed;
+	STAILQ_HEAD(, nvme_request)	fail_req;
+
+	STAILQ_ENTRY(nvme_controller)	nvmec_lst;
+
+	struct nvme_pci_controller	*nvmec_tsp;
+};
+
+
+void nvme_register_controller(struct nvme_controller *);
+void nvme_unregister_controller(struct nvme_controller *);
 #endif /* __NVME_SHARED_H__ */

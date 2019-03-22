@@ -33,6 +33,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/module.h>
+#include <sys/lock.h>
+#include <sys/sx.h>
 
 #include <vm/uma.h>
 
@@ -83,6 +85,11 @@ static driver_t nvme_pci_driver = {
 DRIVER_MODULE(nvme, pci, nvme_pci_driver, nvme_devclass, nvme_modevent, 0);
 MODULE_VERSION(nvme, 1);
 MODULE_DEPEND(nvme, cam, 1, 1, 1);
+
+/*
+ * For linux_dump_stack() support
+ */
+MODULE_DEPEND(nvme, linuxkpi, 1, 1, 1);
 
 static struct _pcsid
 {
@@ -180,9 +187,17 @@ nvme_uninit(void)
 
 SYSUNINIT(nvme_unregister, SI_SUB_DRIVERS, SI_ORDER_SECOND, nvme_uninit, NULL);
 
+/*
+ * The list of NVMe controllers registered with the NVMe sub-system
+ */
+static STAILQ_HEAD(, nvme_controller) nclst_hd =
+    STAILQ_HEAD_INITIALIZER(nclst_hd);
+static struct sx nclst_lock;
+
 static void
 nvme_load(void)
 {
+	sx_init(&nclst_lock, "NVMe controllers list lock");
 }
 
 static void
@@ -252,6 +267,23 @@ nvme_dump_completion(struct nvme_completion *cpl)
 	    cpl->cid, p, sc, sct, m, dnr);
 }
 
+
+void
+nvme_register_controller(struct nvme_controller *ctrlrp)
+{
+	sx_xlock(&nclst_lock);
+	STAILQ_INSERT_TAIL(&nclst_hd, ctrlrp, nvmec_lst);
+	sx_xunlock(&nclst_lock);
+}
+
+void
+nvme_unregister_controller(struct nvme_controller *ctrlrp)
+{
+	sx_xlock(&nclst_lock);
+	STAILQ_REMOVE(&nclst_hd, ctrlrp, nvme_controller, nvmec_lst);
+	sx_xunlock(&nclst_lock);
+}
+
 static int
 nvme_attach(device_t dev)
 {
@@ -260,6 +292,8 @@ nvme_attach(device_t dev)
 	struct _pcsid		*ep;
 	uint32_t		devid;
 	uint16_t		subdevice;
+
+	pctrlr->ctrlr.nvmec_tsp = pctrlr;
 
 	devid = pci_get_devid(dev);
 	subdevice = pci_get_subdevice(dev);
@@ -301,10 +335,14 @@ nvme_attach(device_t dev)
 		return (status);
 	}
 
-	pctrlr->ctrlr.config_hook.ich_func = nvme_ctrlr_start_config_hook;
-	pctrlr->ctrlr.config_hook.ich_arg = pctrlr;
+	pctrlr->config_hook.ich_func = nvme_ctrlr_start_config_hook;
+	pctrlr->config_hook.ich_arg = pctrlr;
 
-	config_intrhook_establish(&pctrlr->ctrlr.config_hook);
+	config_intrhook_establish(&pctrlr->config_hook);
+
+	sx_xlock(&nclst_lock);
+	STAILQ_INSERT_TAIL(&nclst_hd, &pctrlr->ctrlr, nvmec_lst);
+	sx_xunlock(&nclst_lock);
 
 	return (0);
 }
@@ -313,6 +351,10 @@ static int
 nvme_detach (device_t dev)
 {
 	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
+
+	sx_xlock(&nclst_lock);
+	STAILQ_REMOVE(&nclst_hd, &pctrlr->ctrlr, nvme_controller, nvmec_lst);
+	sx_xunlock(&nclst_lock);
 
 	nvme_ctrlr_destruct(pctrlr, dev);
 	pci_disable_busmaster(dev);
@@ -356,9 +398,9 @@ nvme_notify(struct nvme_consumer *cons,
 		 */
 		return;
 	}
-	for (ns_idx = 0; ns_idx < min(pctrlr->ctrlr.cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
+	for (ns_idx = 0; ns_idx < min(pctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
 		ns = &pctrlr->ctrlr.cns[ns_idx];
-		if (ns->data.nsze == 0)
+		if (ns->nvmes_nsd.nsze == 0)
 			continue;
 		if (cons->ns_fn != NULL)
 			ns->cons_cookie[cons->id] =
@@ -381,19 +423,16 @@ nvme_notify_new_controller(struct nvme_pci_controller *pctrlr)
 static void
 nvme_notify_new_consumer(struct nvme_consumer *cons)
 {
-	device_t		*devlist;
-	struct nvme_pci_controller	*pctrlr;
-	int			dev_idx, devcount;
+	struct nvme_pci_controller *pctrlr;
+	struct nvme_controller     *ctrlr;
 
-	if (devclass_get_devices(nvme_devclass, &devlist, &devcount))
-		return;
-
-	for (dev_idx = 0; dev_idx < devcount; dev_idx++) {
-		pctrlr = DEVICE2SOFTC(devlist[dev_idx]);
+	printf("NVMe: Notifying consumer\n");
+	sx_slock(&nclst_lock);
+	STAILQ_FOREACH(ctrlr, &nclst_hd, nvmec_lst) {
+		pctrlr = ctrlr->nvmec_tsp;
 		nvme_notify(cons, pctrlr);
 	}
-
-	free(devlist, M_TEMP);
+	sx_sunlock(&nclst_lock);
 }
 
 void

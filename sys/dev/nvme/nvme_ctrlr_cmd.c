@@ -50,7 +50,7 @@ nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *pay
 	 */
 	cmd->cdw10 = htole32(1);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -71,7 +71,7 @@ nvme_ctrlr_cmd_identify_namespace(struct nvme_pci_controller *pctrlr, uint32_t n
 	 */
 	cmd->nsid = htole32(nsid);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -96,7 +96,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
 	cmd->cdw11 = htole32((vector << 16) | 0x3);
 	cmd->prp1 = htole64(io_que->cpl_bus_addr);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -120,7 +120,7 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
 	cmd->cdw11 = htole32((io_que->id << 16) | 0x1);
 	cmd->prp1 = htole64(io_que->cmd_bus_addr);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -141,7 +141,7 @@ nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
 	 */
 	cmd->cdw10 = htole32(io_que->id);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -162,7 +162,7 @@ nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
 	 */
 	cmd->cdw10 = htole32(io_que->id);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -180,7 +180,7 @@ nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	cmd->cdw10 = htole32(feature);
 	cmd->cdw11 = htole32(cdw11);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -198,7 +198,7 @@ nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	cmd->cdw10 = htole32(feature);
 	cmd->cdw11 = htole32(cdw11);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -266,7 +266,7 @@ nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr, uint8_t log_page
 	cmd->cdw10 |= log_page;
 	cmd->cdw10 = htole32(cmd->cdw10);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
@@ -278,12 +278,12 @@ nvme_ctrlr_cmd_get_error_page(struct nvme_pci_controller *pctrlr,
 	KASSERT(num_entries > 0, ("%s called with num_entries==0\n", __func__));
 
 	/* Controller's error log page entries is 0-based. */
-	KASSERT(num_entries <= (pctrlr->ctrlr.cdata.elpe + 1),
+	KASSERT(num_entries <= (pctrlr->cdata.elpe + 1),
 	    ("%s called with num_entries=%d but (elpe+1)=%d\n", __func__,
-	    num_entries, pctrlr->ctrlr.cdata.elpe + 1));
+	    num_entries, pctrlr->cdata.elpe + 1));
 
-	if (num_entries > (pctrlr->ctrlr.cdata.elpe + 1))
-		num_entries = pctrlr->ctrlr.cdata.elpe + 1;
+	if (num_entries > (pctrlr->cdata.elpe + 1))
+		num_entries = pctrlr->cdata.elpe + 1;
 
 	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_ERROR,
 	    NVME_GLOBAL_NAMESPACE_TAG, payload, sizeof(*payload) * num_entries,
@@ -323,5 +323,5 @@ nvme_ctrlr_cmd_abort(struct nvme_pci_controller *pctrlr, uint16_t cid,
 	cmd->opc = NVME_OPC_ABORT;
 	cmd->cdw10 = htole32((cid << 16) | sqid);
 
-	nvme_ctrlr_submit_admin_request(pctrlr, req);
+	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }

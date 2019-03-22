@@ -67,11 +67,9 @@ nvme_ns_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
     struct thread *td)
 {
 	struct nvme_namespace			*ns;
-	struct nvme_pci_controller			*pctrlr;
 	struct nvme_pt_command			*pt;
 
 	ns = cdev->si_drv1;
-	pctrlr = ns->pctrlr;
 
 	switch (cmd) {
 	case NVME_IO_TEST:
@@ -80,7 +78,7 @@ nvme_ns_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
 		break;
 	case NVME_PASSTHROUGH_CMD:
 		pt = (struct nvme_pt_command *)arg;
-		return (nvme_ctrlr_passthrough_cmd(pctrlr, pt, ns->id, 
+		return (nvme_ctrlr_passthrough_cmd(ns->nvmes_ctrlr, pt, ns->id, 
 		    1 /* is_user_buffer */, 0 /* is_admin_cmd */));
 	case DIOCGMEDIASIZE:
 		*(off_t *)arg = (off_t)nvme_ns_get_size(ns);
@@ -166,7 +164,7 @@ static struct cdevsw nvme_ns_cdevsw = {
 uint32_t
 nvme_ns_get_max_io_xfer_size(struct nvme_namespace *ns)
 {
-	return ns->pctrlr->ctrlr.max_xfer_size;
+	return ns->nvmes_ctrlr->max_xfer_size;
 }
 
 uint32_t
@@ -174,9 +172,9 @@ nvme_ns_get_sector_size(struct nvme_namespace *ns)
 {
 	uint8_t flbas_fmt, lbads;
 
-	flbas_fmt = (ns->data.flbas >> NVME_NS_DATA_FLBAS_FORMAT_SHIFT) &
+	flbas_fmt = (ns->nvmes_nsd.flbas >> NVME_NS_DATA_FLBAS_FORMAT_SHIFT) &
 		NVME_NS_DATA_FLBAS_FORMAT_MASK;
-	lbads = (ns->data.lbaf[flbas_fmt] >> NVME_NS_DATA_LBAF_LBADS_SHIFT) &
+	lbads = (ns->nvmes_nsd.lbaf[flbas_fmt] >> NVME_NS_DATA_LBAF_LBADS_SHIFT) &
 		NVME_NS_DATA_LBAF_LBADS_MASK;
 
 	return (1 << lbads);
@@ -185,7 +183,7 @@ nvme_ns_get_sector_size(struct nvme_namespace *ns)
 uint64_t
 nvme_ns_get_num_sectors(struct nvme_namespace *ns)
 {
-	return (ns->data.nsze);
+	return (ns->nvmes_nsd.nsze);
 }
 
 uint64_t
@@ -203,20 +201,26 @@ nvme_ns_get_flags(struct nvme_namespace *ns)
 const char *
 nvme_ns_get_serial_number(struct nvme_namespace *ns)
 {
-	return ((const char *)ns->pctrlr->ctrlr.cdata.sn);
+	struct nvme_pci_controller *pctrlr;
+
+	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
+	return ((const char *)pctrlr->cdata.sn);
 }
 
 const char *
 nvme_ns_get_model_number(struct nvme_namespace *ns)
 {
-	return ((const char *)ns->pctrlr->ctrlr.cdata.mn);
+	struct nvme_pci_controller *pctrlr;
+
+	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
+	return ((const char *)pctrlr->cdata.mn);
 }
 
 const struct nvme_namespace_data *
 nvme_ns_get_data(struct nvme_namespace *ns)
 {
 
-	return (&ns->data);
+	return (&ns->nvmes_nsd);
 }
 
 uint32_t
@@ -503,7 +507,10 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	uint8_t					flbas_fmt;
 	uint8_t					vwc_present;
 
-	ns->pctrlr = pctrlr;
+	struct nvme_controller *ctrlr;
+
+	ctrlr = &pctrlr->ctrlr;
+	ns->nvmes_ctrlr = ctrlr;
 	ns->id = id;
 	ns->stripesize = 0;
 
@@ -516,9 +523,9 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	case 0x09538086:		/* Intel DC PC3500 */
 	case 0x0a538086:		/* Intel DC PC3520 */
 	case 0x0a548086:		/* Intel DC PC4500 */
-		if (pctrlr->ctrlr.cdata.vs[3] != 0)
+		if (pctrlr->cdata.vs[3] != 0)
 			ns->stripesize =
-			    (1 << pctrlr->ctrlr.cdata.vs[3]) * pctrlr->ctrlr.min_page_size;
+			    (1 << pctrlr->cdata.vs[3]) * pctrlr->ctrlr.min_page_size;
 		break;
 	default:
 		break;
@@ -536,7 +543,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		mtx_init(&ns->lock, "nvme ns lock", NULL, MTX_DEF);
 
 	status.done = FALSE;
-	nvme_ctrlr_cmd_identify_namespace(pctrlr, id, &ns->data,
+	nvme_ctrlr_cmd_identify_namespace(pctrlr, id, &ns->nvmes_nsd,
 	    nvme_completion_poll_cb, &status);
 	while (status.done == FALSE)
 		DELAY(5);
@@ -546,7 +553,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	}
 
 	/* Convert data to host endian */
-	nvme_namespace_data_swapbytes(&ns->data);
+	nvme_namespace_data_swapbytes(&ns->nvmes_nsd);
 
 	/*
 	 * If the size of is zero, chances are this isn't a valid
@@ -554,27 +561,27 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	 * standard says the entire id will be zeros, so this is a
 	 * cheap way to test for that.
 	 */
-	if (ns->data.nsze == 0)
+	if (ns->nvmes_nsd.nsze == 0)
 		return (ENXIO);
 
-	flbas_fmt = (ns->data.flbas >> NVME_NS_DATA_FLBAS_FORMAT_SHIFT) &
+	flbas_fmt = (ns->nvmes_nsd.flbas >> NVME_NS_DATA_FLBAS_FORMAT_SHIFT) &
 		NVME_NS_DATA_FLBAS_FORMAT_MASK;
 	/*
 	 * Note: format is a 0-based value, so > is appropriate here,
 	 *  not >=.
 	 */
-	if (flbas_fmt > ns->data.nlbaf) {
+	if (flbas_fmt > ns->nvmes_nsd.nlbaf) {
 		printf("lba format %d exceeds number supported (%d)\n",
-		    flbas_fmt, ns->data.nlbaf + 1);
+		    flbas_fmt, ns->nvmes_nsd.nlbaf + 1);
 		return (ENXIO);
 	}
 
-	oncs = pctrlr->ctrlr.cdata.oncs;
+	oncs = pctrlr->cdata.oncs;
 	dsm = (oncs >> NVME_CTRLR_DATA_ONCS_DSM_SHIFT) & NVME_CTRLR_DATA_ONCS_DSM_MASK;
 	if (dsm)
 		ns->flags |= NVME_NS_DEALLOCATE_SUPPORTED;
 
-	vwc_present = (pctrlr->ctrlr.cdata.vwc >> NVME_CTRLR_DATA_VWC_PRESENT_SHIFT) &
+	vwc_present = (pctrlr->cdata.vwc >> NVME_CTRLR_DATA_VWC_PRESENT_SHIFT) &
 		NVME_CTRLR_DATA_VWC_PRESENT_MASK;
 	if (vwc_present)
 		ns->flags |= NVME_NS_FLUSH_SUPPORTED;
