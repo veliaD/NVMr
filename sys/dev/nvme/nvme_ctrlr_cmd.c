@@ -38,6 +38,7 @@ nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *pay
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_vaddr(payload,
 	    sizeof(struct nvme_controller_data), cb_fn, cb_arg);
 
@@ -60,6 +61,7 @@ nvme_ctrlr_cmd_identify_namespace(struct nvme_pci_controller *pctrlr, uint32_t n
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_vaddr(payload,
 	    sizeof(struct nvme_namespace_data), cb_fn, cb_arg);
 
@@ -82,6 +84,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -106,6 +109,7 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -130,6 +134,7 @@ nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -151,6 +156,7 @@ nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -173,6 +179,7 @@ nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -191,6 +198,7 @@ nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -207,6 +215,7 @@ nvme_ctrlr_cmd_set_num_queues(struct nvme_pci_controller *pctrlr,
 {
 	uint32_t cdw11;
 
+	CONFIRMPCIECONTROLLER;
 	cdw11 = ((num_queues - 1) << 16) | (num_queues - 1);
 	nvme_ctrlr_cmd_set_feature(pctrlr, NVME_FEAT_NUMBER_OF_QUEUES, cdw11,
 	    NULL, 0, cb_fn, cb_arg);
@@ -218,6 +227,7 @@ nvme_ctrlr_cmd_set_async_event_config(struct nvme_pci_controller *pctrlr,
 {
 	uint32_t cdw11;
 
+	CONFIRMPCIECONTROLLER;
 	cdw11 = state;
 	nvme_ctrlr_cmd_set_feature(pctrlr,
 	    NVME_FEAT_ASYNC_EVENT_CONFIGURATION, cdw11, NULL, 0, cb_fn,
@@ -230,6 +240,7 @@ nvme_ctrlr_cmd_set_interrupt_coalescing(struct nvme_pci_controller *pctrlr,
 {
 	uint32_t cdw11;
 
+	CONFIRMPCIECONTROLLER;
 	if ((microseconds/100) >= 0x100) {
 		nvme_printf(pctrlr, "invalid coal time %d, disabling\n",
 		    microseconds);
@@ -257,6 +268,7 @@ nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr, uint8_t log_page
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_vaddr(payload, payload_size, cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -275,6 +287,7 @@ nvme_ctrlr_cmd_get_error_page(struct nvme_pci_controller *pctrlr,
     nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 
+	CONFIRMPCIECONTROLLER;
 	KASSERT(num_entries > 0, ("%s called with num_entries==0\n", __func__));
 
 	/* Controller's error log page entries is 0-based. */
@@ -296,6 +309,7 @@ nvme_ctrlr_cmd_get_health_information_page(struct nvme_pci_controller *pctrlr,
     nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 
+	CONFIRMPCIECONTROLLER;
 	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_HEALTH_INFORMATION,
 	    nsid, payload, sizeof(*payload), cb_fn, cb_arg);
 }
@@ -305,6 +319,7 @@ nvme_ctrlr_cmd_get_firmware_page(struct nvme_pci_controller *pctrlr,
     struct nvme_firmware_page *payload, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 
+	CONFIRMPCIECONTROLLER;
 	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_FIRMWARE_SLOT, 
 	    NVME_GLOBAL_NAMESPACE_TAG, payload, sizeof(*payload), cb_fn,
 	    cb_arg);
@@ -317,6 +332,7 @@ nvme_ctrlr_cmd_abort(struct nvme_pci_controller *pctrlr, uint16_t cid,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
+	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
 	cmd = &req->cmd;

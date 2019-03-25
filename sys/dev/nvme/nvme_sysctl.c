@@ -103,6 +103,7 @@ static int
 nvme_sysctl_int_coal_time(SYSCTL_HANDLER_ARGS)
 {
 	struct nvme_pci_controller *pctrlr = arg1;
+	CONFIRMPCIECONTROLLER;
 	uint32_t oldval = pctrlr->int_coal_time;
 	int error = sysctl_handle_int(oidp, &pctrlr->int_coal_time, 0,
 	    req);
@@ -122,6 +123,7 @@ static int
 nvme_sysctl_int_coal_threshold(SYSCTL_HANDLER_ARGS)
 {
 	struct nvme_pci_controller *pctrlr = arg1;
+	CONFIRMPCIECONTROLLER;
 	uint32_t oldval = pctrlr->int_coal_threshold;
 	int error = sysctl_handle_int(oidp, &pctrlr->int_coal_threshold, 0,
 	    req);
@@ -141,15 +143,16 @@ static int
 nvme_sysctl_timeout_period(SYSCTL_HANDLER_ARGS)
 {
 	struct nvme_pci_controller *pctrlr = arg1;
-	uint32_t oldval = pctrlr->timeout_period;
-	int error = sysctl_handle_int(oidp, &pctrlr->timeout_period, 0, req);
+	CONFIRMPCIECONTROLLER;
+	uint32_t oldval = pctrlr->ctrlr.timeout_period;
+	int error = sysctl_handle_int(oidp, &pctrlr->ctrlr.timeout_period, 0, req);
 
 	if (error)
 		return (error);
 
-	if (pctrlr->timeout_period > NVME_MAX_TIMEOUT_PERIOD ||
-	    pctrlr->timeout_period < NVME_MIN_TIMEOUT_PERIOD) {
-		pctrlr->timeout_period = oldval;
+	if (pctrlr->ctrlr.timeout_period > NVME_MAX_TIMEOUT_PERIOD ||
+	    pctrlr->ctrlr.timeout_period < NVME_MIN_TIMEOUT_PERIOD) {
+		pctrlr->ctrlr.timeout_period = oldval;
 		return (EINVAL);
 	}
 
@@ -171,6 +174,7 @@ nvme_sysctl_num_cmds(SYSCTL_HANDLER_ARGS)
 	int64_t			num_cmds = 0;
 	int			i;
 
+	CONFIRMPCIECONTROLLER;
 	num_cmds = pctrlr->adminq.num_cmds;
 
 	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
@@ -186,6 +190,7 @@ nvme_sysctl_num_intr_handler_calls(SYSCTL_HANDLER_ARGS)
 	int64_t			num_intr_handler_calls = 0;
 	int			i;
 
+	CONFIRMPCIECONTROLLER;
 	num_intr_handler_calls = pctrlr->adminq.num_intr_handler_calls;
 
 	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
@@ -200,6 +205,7 @@ nvme_sysctl_reset_stats(SYSCTL_HANDLER_ARGS)
 	struct nvme_pci_controller 	*pctrlr = arg1;
 	uint32_t		i, val = 0;
 
+	CONFIRMPCIECONTROLLER;
 	int error = sysctl_handle_int(oidp, &val, 0, req);
 
 	if (error)
@@ -261,6 +267,7 @@ nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *pctrlr)
 	char			queue_name[QUEUE_NAME_LENGTH];
 	int			i;
 
+	CONFIRMPCIECONTROLLER;
 	ctrlr_ctx = device_get_sysctl_ctx(pctrlr->dev);
 	ctrlr_tree = device_get_sysctl_tree(pctrlr->dev);
 	ctrlr_list = SYSCTL_CHILDREN(ctrlr_tree);

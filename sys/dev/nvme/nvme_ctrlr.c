@@ -57,6 +57,7 @@ static int
 nvme_ctrlr_allocate_bar(struct nvme_pci_controller *pctrlr)
 {
 
+	CONFIRMPCIECONTROLLER;
 	pctrlr->resource_id = PCIR_BAR(0);
 
 	pctrlr->resource = bus_alloc_resource_any(pctrlr->dev, SYS_RES_MEMORY,
@@ -92,6 +93,7 @@ nvme_ctrlr_construct_admin_qpair(struct nvme_pci_controller *pctrlr)
 	uint32_t		num_entries;
 	int			error;
 
+	CONFIRMPCIECONTROLLER;
 	qpair = &pctrlr->adminq;
 
 	num_entries = NVME_ADMIN_ENTRIES;
@@ -128,6 +130,7 @@ nvme_ctrlr_construct_io_qpairs(struct nvme_pci_controller *pctrlr)
 	uint16_t		mqes;
 	int			i, error, num_entries, num_trackers;
 
+	CONFIRMPCIECONTROLLER;
 	num_entries = NVME_IO_ENTRIES;
 	TUNABLE_INT_FETCH("hw.nvme.io_entries", &num_entries);
 
@@ -206,6 +209,7 @@ nvme_ctrlr_fail(struct nvme_pci_controller *pctrlr)
 {
 	int i;
 
+	CONFIRMPCIECONTROLLER;
 	pctrlr->ctrlr.is_failed = TRUE;
 	nvme_qpair_fail(&pctrlr->adminq);
 	if (pctrlr->ioq != NULL) {
@@ -220,6 +224,7 @@ nvme_ctrlr_post_failed_request(struct nvme_pci_controller *pctrlr,
     struct nvme_request *req)
 {
 
+	CONFIRMPCIECONTROLLER;
 	mtx_lock(&pctrlr->ctrlr.lockc);
 	STAILQ_INSERT_TAIL(&pctrlr->ctrlr.fail_req, req, stailq);
 	mtx_unlock(&pctrlr->ctrlr.lockc);
@@ -232,6 +237,7 @@ nvme_ctrlr_fail_req_task(void *arg, int pending)
 	struct nvme_pci_controller	*pctrlr = arg;
 	struct nvme_request	*req;
 
+	CONFIRMPCIECONTROLLER;
 	mtx_lock(&pctrlr->ctrlr.lockc);
 	while ((req = STAILQ_FIRST(&pctrlr->ctrlr.fail_req)) != NULL) {
 		STAILQ_REMOVE_HEAD(&pctrlr->ctrlr.fail_req, stailq);
@@ -249,6 +255,7 @@ nvme_ctrlr_wait_for_ready(struct nvme_pci_controller *pctrlr, int desired_val)
 	int ms_waited;
 	uint32_t csts;
 
+	CONFIRMPCIECONTROLLER;
 	csts = nvme_mmio_read_4(pctrlr, csts);
 
 	ms_waited = 0;
@@ -273,6 +280,7 @@ nvme_ctrlr_disable(struct nvme_pci_controller *pctrlr)
 	uint8_t  en, rdy;
 	int err;
 
+	CONFIRMPCIECONTROLLER;
 	cc = nvme_mmio_read_4(pctrlr, cc);
 	csts = nvme_mmio_read_4(pctrlr, csts);
 
@@ -322,6 +330,7 @@ nvme_ctrlr_enable(struct nvme_pci_controller *pctrlr)
 	uint8_t		en, rdy;
 	int		err;
 
+	CONFIRMPCIECONTROLLER;
 	cc = nvme_mmio_read_4(pctrlr, cc);
 	csts = nvme_mmio_read_4(pctrlr, csts);
 
@@ -379,6 +388,7 @@ nvme_ctrlr_hw_reset(struct nvme_pci_controller *pctrlr)
 {
 	int i, err;
 
+	CONFIRMPCIECONTROLLER;
 	nvme_admin_qpair_disable(&pctrlr->adminq);
 	/*
 	 * I/O queues are not allocated before the initial HW
@@ -403,6 +413,7 @@ nvme_ctrlr_reset(struct nvme_pci_controller *pctrlr)
 {
 	int cmpset;
 
+	CONFIRMPCIECONTROLLER;
 	cmpset = atomic_cmpset_32(&pctrlr->ctrlr.is_resetting, 0, 1);
 
 	if (cmpset == 0 || pctrlr->ctrlr.is_failed)
@@ -421,6 +432,7 @@ nvme_ctrlr_identify(struct nvme_pci_controller *pctrlr)
 {
 	struct nvme_completion_poll_status	status;
 
+	CONFIRMPCIECONTROLLER;
 	status.done = 0;
 	nvme_ctrlr_cmd_identify_controller(pctrlr, &pctrlr->cdata,
 	    nvme_completion_poll_cb, &status);
@@ -451,6 +463,7 @@ nvme_ctrlr_set_num_qpairs(struct nvme_pci_controller *pctrlr)
 	struct nvme_completion_poll_status	status;
 	int					cq_allocated, sq_allocated;
 
+	CONFIRMPCIECONTROLLER;
 	status.done = 0;
 	nvme_ctrlr_cmd_set_num_queues(pctrlr, pctrlr->ctrlr.num_io_queues,
 	    nvme_completion_poll_cb, &status);
@@ -487,6 +500,7 @@ nvme_ctrlr_create_qpairs(struct nvme_pci_controller *pctrlr)
 	struct nvme_qpair			*qpair;
 	int					i;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++) {
 		qpair = &pctrlr->ioq[i];
 
@@ -519,6 +533,7 @@ nvme_ctrlr_destroy_qpair(struct nvme_pci_controller *pctrlr, struct nvme_qpair *
 {
 	struct nvme_completion_poll_status	status;
 
+	CONFIRMPCIECONTROLLER;
 	status.done = 0;
 	nvme_ctrlr_cmd_delete_io_sq(pctrlr, qpair,
 	    nvme_completion_poll_cb, &status);
@@ -548,6 +563,7 @@ nvme_ctrlr_construct_namespaces(struct nvme_pci_controller *pctrlr)
 	struct nvme_namespace	*ns;
 	uint32_t 		i;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < min(pctrlr->cdata.nn, NVME_MAX_NAMESPACES); i++) {
 		ns = &pctrlr->ctrlr.cns[i];
 		nvme_ns_construct(ns, i+1, pctrlr);
@@ -576,6 +592,7 @@ nvme_ctrlr_get_log_page_size(struct nvme_pci_controller *pctrlr, uint8_t page_id
 {
 	uint32_t	log_page_size;
 
+	CONFIRMPCIECONTROLLER;
 	switch (page_id) {
 	case NVME_LOG_ERROR:
 		log_page_size = min(
@@ -604,6 +621,7 @@ nvme_ctrlr_log_critical_warnings(struct nvme_pci_controller *pctrlr,
     uint8_t state)
 {
 
+	CONFIRMPCIECONTROLLER;
 	if (state & NVME_CRIT_WARN_ST_AVAILABLE_SPARE)
 		nvme_printf(pctrlr, "available spare space below threshold\n");
 
@@ -632,6 +650,10 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 	struct nvme_ns_list			*nsl;
 	struct nvme_error_information_entry	*err;
 	int i;
+	struct nvme_pci_controller *pctrlr;
+
+	pctrlr = aer->nvmea_ctrlrp->nvmec_tsp;
+	CONFIRMPCIECONTROLLER;
 
 	/*
 	 * If the log page fetch for some reason completed with an error,
@@ -639,14 +661,14 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 	 *  should never happen.
 	 */
 	if (nvme_completion_is_error(cpl))
-		nvme_notify_async_consumers(aer->nvmea_ctrlrp->nvmec_tsp, &aer->cpl,
+		nvme_notify_async_consumers(pctrlr, &aer->cpl,
 		    aer->log_page_id, NULL, 0);
 	else {
 		/* Convert data to host endian */
 		switch (aer->log_page_id) {
 		case NVME_LOG_ERROR:
 			err = (struct nvme_error_information_entry *)aer->log_page_buffer;
-			for (i = 0; i < (aer->nvmea_ctrlrp->nvmec_tsp->cdata.elpe + 1); i++)
+			for (i = 0; i < (pctrlr->cdata.elpe + 1); i++)
 				nvme_error_information_entry_swapbytes(err++);
 			break;
 		case NVME_LOG_HEALTH_INFORMATION:
@@ -672,7 +694,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 		if (aer->log_page_id == NVME_LOG_HEALTH_INFORMATION) {
 			health_info = (struct nvme_health_information_page *)
 			    aer->log_page_buffer;
-			nvme_ctrlr_log_critical_warnings(aer->nvmea_ctrlrp->nvmec_tsp,
+			nvme_ctrlr_log_critical_warnings(pctrlr,
 			    health_info->critical_warning);
 			/*
 			 * Critical warnings reported through the
@@ -683,7 +705,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 			 */
 			aer->nvmea_ctrlrp->async_event_config &=
 			    ~health_info->critical_warning;
-			nvme_ctrlr_cmd_set_async_event_config(aer->nvmea_ctrlrp->nvmec_tsp,
+			nvme_ctrlr_cmd_set_async_event_config(pctrlr,
 			    aer->nvmea_ctrlrp->async_event_config, NULL, NULL);
 		} else if (aer->log_page_id == NVME_LOG_CHANGED_NAMESPACE &&
 		    !nvme_use_nvd) {
@@ -691,7 +713,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 			for (i = 0; i < nitems(nsl->ns) && nsl->ns[i] != 0; i++) {
 				if (nsl->ns[i] > NVME_MAX_NAMESPACES)
 					break;
-				nvme_notify_ns(aer->nvmea_ctrlrp->nvmec_tsp, nsl->ns[i]);
+				nvme_notify_ns(pctrlr, nsl->ns[i]);
 			}
 		}
 
@@ -700,7 +722,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 		 * Pass the cpl data from the original async event completion,
 		 *  not the log page fetch.
 		 */
-		nvme_notify_async_consumers(aer->nvmea_ctrlrp->nvmec_tsp, &aer->cpl,
+		nvme_notify_async_consumers(pctrlr, &aer->cpl,
 		    aer->log_page_id, aer->log_page_buffer, aer->log_page_size);
 	}
 
@@ -708,13 +730,18 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 	 * Repost another asynchronous event request to replace the one
 	 *  that just completed.
 	 */
-	nvme_ctrlr_construct_and_submit_aer(aer->nvmea_ctrlrp->nvmec_tsp, aer);
+	nvme_ctrlr_construct_and_submit_aer(pctrlr, aer);
 }
 
 static void
 nvme_ctrlr_async_event_cb(void *arg, const struct nvme_completion *cpl)
 {
 	struct nvme_async_event_request	*aer = arg;
+	struct nvme_pci_controller *pctrlr;
+
+	pctrlr = aer->nvmea_ctrlrp->nvmec_tsp;
+	CONFIRMPCIECONTROLLER;
+
 
 	if (nvme_completion_is_error(cpl)) {
 		/*
@@ -729,28 +756,28 @@ nvme_ctrlr_async_event_cb(void *arg, const struct nvme_completion *cpl)
 	/* Associated log page is in bits 23:16 of completion entry dw0. */
 	aer->log_page_id = (cpl->cdw0 & 0xFF0000) >> 16;
 
-	nvme_printf(aer->nvmea_ctrlrp->nvmec_tsp, "async event occurred (type 0x%x, info 0x%02x,"
+	nvme_printf(pctrlr, "async event occurred (type 0x%x, info 0x%02x,"
 	    " page 0x%02x)\n", (cpl->cdw0 & 0x03), (cpl->cdw0 & 0xFF00) >> 8,
 	    aer->log_page_id);
 
 	if (is_log_page_id_valid(aer->log_page_id)) {
-		aer->log_page_size = nvme_ctrlr_get_log_page_size(aer->nvmea_ctrlrp->nvmec_tsp,
+		aer->log_page_size = nvme_ctrlr_get_log_page_size(pctrlr,
 		    aer->log_page_id);
 		memcpy(&aer->cpl, cpl, sizeof(*cpl));
-		nvme_ctrlr_cmd_get_log_page(aer->nvmea_ctrlrp->nvmec_tsp, aer->log_page_id,
+		nvme_ctrlr_cmd_get_log_page(pctrlr, aer->log_page_id,
 		    NVME_GLOBAL_NAMESPACE_TAG, aer->log_page_buffer,
 		    aer->log_page_size, nvme_ctrlr_async_event_log_page_cb,
 		    aer);
 		/* Wait to notify consumers until after log page is fetched. */
 	} else {
-		nvme_notify_async_consumers(aer->nvmea_ctrlrp->nvmec_tsp, cpl, aer->log_page_id,
+		nvme_notify_async_consumers(pctrlr, cpl, aer->log_page_id,
 		    NULL, 0);
 
 		/*
 		 * Repost another asynchronous event request to replace the one
 		 *  that just completed.
 		 */
-		nvme_ctrlr_construct_and_submit_aer(aer->nvmea_ctrlrp->nvmec_tsp, aer);
+		nvme_ctrlr_construct_and_submit_aer(pctrlr, aer);
 	}
 }
 
@@ -760,6 +787,7 @@ nvme_ctrlr_construct_and_submit_aer(struct nvme_pci_controller *pctrlr,
 {
 	struct nvme_request *req;
 
+	CONFIRMPCIECONTROLLER;
 	aer->nvmea_ctrlrp = &pctrlr->ctrlr;
 	req = nvme_allocate_request_null(nvme_ctrlr_async_event_cb, aer);
 	aer->req = req;
@@ -780,6 +808,7 @@ nvme_ctrlr_configure_aer(struct nvme_pci_controller *pctrlr)
 	struct nvme_async_event_request		*aer;
 	uint32_t				i;
 
+	CONFIRMPCIECONTROLLER;
 	pctrlr->ctrlr.async_event_config = NVME_CRIT_WARN_ST_AVAILABLE_SPARE |
 	    NVME_CRIT_WARN_ST_DEVICE_RELIABILITY |
 	    NVME_CRIT_WARN_ST_READ_ONLY |
@@ -815,6 +844,7 @@ static void
 nvme_ctrlr_configure_int_coalescing(struct nvme_pci_controller *pctrlr)
 {
 
+	CONFIRMPCIECONTROLLER;
 	pctrlr->int_coal_time = 0;
 	TUNABLE_INT_FETCH("hw.nvme.int_coal_time",
 	    &pctrlr->int_coal_time);
@@ -834,6 +864,7 @@ nvme_ctrlr_start(void *ctrlr_arg)
 	uint32_t old_num_io_queues;
 	int i;
 
+	CONFIRMPCIECONTROLLER;
 	/*
 	 * Only reset adminq here when we are restarting the
 	 *  controller after a reset.  During initialization,
@@ -898,6 +929,7 @@ nvme_ctrlr_start_config_hook(void *arg)
 {
 	struct nvme_pci_controller *pctrlr = arg;
 
+	CONFIRMPCIECONTROLLER;
 	nvme_qpair_reset(&pctrlr->adminq);
 	nvme_admin_qpair_enable(&pctrlr->adminq);
 
@@ -920,6 +952,7 @@ nvme_ctrlr_reset_task(void *arg, int pending)
 	struct nvme_pci_controller	*pctrlr = arg;
 	int			status;
 
+	CONFIRMPCIECONTROLLER;
 	nvme_printf(pctrlr, "resetting controller\n");
 	status = nvme_ctrlr_hw_reset(pctrlr);
 	/*
@@ -947,6 +980,7 @@ nvme_ctrlr_poll(struct nvme_pci_controller *pctrlr)
 {
 	int i;
 
+	CONFIRMPCIECONTROLLER;
 	nvme_qpair_process_completions(&pctrlr->adminq);
 
 	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
@@ -964,6 +998,7 @@ nvme_ctrlr_intx_handler(void *arg)
 {
 	struct nvme_pci_controller *pctrlr = arg;
 
+	CONFIRMPCIECONTROLLER;
 	nvme_mmio_write_4(pctrlr, intms, 1);
 	nvme_ctrlr_poll(pctrlr);
 	nvme_mmio_write_4(pctrlr, intmc, 1);
@@ -973,6 +1008,7 @@ static int
 nvme_ctrlr_configure_intx(struct nvme_pci_controller *pctrlr)
 {
 
+	CONFIRMPCIECONTROLLER;
 	pctrlr->msix_enabled = 0;
 	pctrlr->ctrlr.num_io_queues = 1;
 	pctrlr->ctrlr.num_cpus_per_ioq = mp_ncpus;
@@ -1032,6 +1068,7 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 
 	pctrlr = ctrlr->nvmec_tsp;
 
+	CONFIRMPCIECONTROLLER;
 	if (pt->len > 0) {
 		/*
 		 * vmapbuf calls vm_fault_quick_hold_pages which only maps full
@@ -1118,6 +1155,7 @@ nvme_ctrlr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
 	struct nvme_pt_command			*pt;
 
 	pctrlr = cdev->si_drv1;
+	CONFIRMPCIECONTROLLER;
 
 	switch (cmd) {
 	case NVME_RESET_CONTROLLER:
@@ -1149,6 +1187,7 @@ nvme_ctrlr_setup_interrupts(struct nvme_pci_controller *pctrlr)
 	int		num_vectors_requested, num_vectors_allocated;
 	int		num_vectors_available;
 
+	CONFIRMPCIECONTROLLER;
 	dev = pctrlr->dev;
 	min_cpus_per_ioq = 1;
 	TUNABLE_INT_FETCH("hw.nvme.min_cpus_per_ioq", &min_cpus_per_ioq);
@@ -1233,6 +1272,7 @@ nvme_ctrlr_construct(struct nvme_pci_controller *pctrlr, device_t dev)
 	uint8_t		mpsmin;
 	int		status, timeout_period;
 
+	CONFIRMPCIECONTROLLER;
 	pctrlr->dev = dev;
 
 	mtx_init(&pctrlr->ctrlr.lockc, "nvme pctrlr lock", NULL, MTX_DEF);
@@ -1263,7 +1303,7 @@ nvme_ctrlr_construct(struct nvme_pci_controller *pctrlr, device_t dev)
 	TUNABLE_INT_FETCH("hw.nvme.timeout_period", &timeout_period);
 	timeout_period = min(timeout_period, NVME_MAX_TIMEOUT_PERIOD);
 	timeout_period = max(timeout_period, NVME_MIN_TIMEOUT_PERIOD);
-	pctrlr->timeout_period = timeout_period;
+	pctrlr->ctrlr.timeout_period = timeout_period;
 
 	nvme_retry_count = NVME_DEFAULT_RETRY_COUNT;
 	TUNABLE_INT_FETCH("hw.nvme.retry_count", &nvme_retry_count);
@@ -1309,6 +1349,7 @@ nvme_ctrlr_destruct(struct nvme_pci_controller *pctrlr, device_t dev)
 {
 	int				i;
 
+	CONFIRMPCIECONTROLLER;
 	if (pctrlr->resource == NULL)
 		goto nores;
 
@@ -1371,6 +1412,7 @@ nvme_ctrlr_shutdown(struct nvme_pci_controller *pctrlr)
 	uint32_t	csts;
 	int		ticks = 0;
 
+	CONFIRMPCIECONTROLLER;
 	cc = nvme_mmio_read_4(pctrlr, cc);
 	cc &= ~(NVME_CC_REG_SHN_MASK << NVME_CC_REG_SHN_SHIFT);
 	cc |= NVME_SHN_NORMAL << NVME_CC_REG_SHN_SHIFT;
@@ -1393,6 +1435,7 @@ nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
 	struct nvme_pci_controller *pctrlr;
 
 	pctrlr = ctrlr->nvmec_tsp;
+	CONFIRMPCIECONTROLLER;
 	nvme_qpair_submit_request(&pctrlr->adminq, req);
 }
 
@@ -1404,6 +1447,7 @@ nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 	struct nvme_pci_controller *pctrlr;
 
 	pctrlr = ctrlr->nvmec_tsp;
+	CONFIRMPCIECONTROLLER;
 	qpair = &pctrlr->ioq[curcpu / pctrlr->ctrlr.num_cpus_per_ioq];
 	nvme_qpair_submit_request(qpair, req);
 }
@@ -1412,6 +1456,7 @@ device_t
 nvme_ctrlr_get_device(struct nvme_pci_controller *pctrlr)
 {
 
+	CONFIRMPCIECONTROLLER;
 	return (pctrlr->dev);
 }
 
@@ -1419,5 +1464,6 @@ const struct nvme_controller_data *
 nvme_ctrlr_get_data(struct nvme_pci_controller *pctrlr)
 {
 
+	CONFIRMPCIECONTROLLER;
 	return (&pctrlr->cdata);
 }

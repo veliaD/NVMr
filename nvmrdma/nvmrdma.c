@@ -258,6 +258,7 @@ typedef struct {
 } *nvmr_queue_t;
 
 typedef struct nvmr_cntrlr_tag {
+	char			very_first_field[NVME_VFFSTRSZ+1];
 	struct mtx         nvmrctr_lock;
 	char              *nvmrctr_subnqn;
 	nvmr_queue_t      *nvmrctr_qarr;  /* Array size determined by prof */
@@ -453,6 +454,14 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 
 	if (cntrlr == NULL) {
 		goto out;
+	}
+
+	if (cntrlr->nvmrctr_nvmec.ccdev) {
+		destroy_dev(cntrlr->nvmrctr_nvmec.ccdev);
+	}
+
+	if (cntrlr->nvmrctr_nvmec.taskqueue) {
+		taskqueue_free(cntrlr->nvmrctr_nvmec.taskqueue);
 	}
 
 	if (cntrlr->nvmrctr_qarr != NULL) {
@@ -1283,18 +1292,41 @@ typedef struct {
 } nvmr_cntrlcap_t;
 CTASSERT(sizeof(nvmr_cntrlcap_t) == sizeof(uint64_t));
 
+static void
+nvmr_ctrlr_reset_task(void *arg, int pending)
+{
+	ERRSPEW("Invoked for arg:%p pending:%d\n", arg, pending);
+}
+
+
+static void
+nvmr_ctrlr_fail_req_task(void *arg, int pending)
+{
+	ERRSPEW("Invoked for arg:%p pending:%d\n", arg, pending);
+}
+
+
+static struct cdevsw nvmr_ctrlr_cdevsw = {
+	.d_version =	D_VERSION,
+	.d_flags =	0,
+};
+
+#define NVMR_STRING "NVMe over RDMA"
+
 
 static int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp)
 {
 	int error, retval, count, qcount, qarrndx;
+	struct make_dev_args md_args;
 	nvmr_cntrlr_t cntrlr;
 	nvmr_queue_t *qarr;
 	nvmr_qndx_t qtndx;
 	unsigned long tmp;
 	nvmr_cntrlcap_t cntrlrcap;
 	uint64_t cntrlrconf;
+	uint64_t unitnum;
 	nvmripv4_t ipv4;
 	uint16_t port;
 	char *retp;
@@ -1338,6 +1370,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_subnqn = addr->nvmra_subnqn;
 	mtx_init(&cntrlr->nvmrctr_lock, "NVMr Controller Lock", NULL, MTX_DEF);
 	cntrlr->nvmrctr_refcount = 1;
+	strncpy(cntrlr->very_first_field, NVMR_STRING, NVME_VFFSTRSZ);
 
 	qcount = 0;
 	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
@@ -1455,6 +1488,54 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
 	    cntrlrcap.nvmrcc_mpsmax);
 
+	if (cntrlrcap.nvmrcc_dstrd != 0) {
+		ERRSPEW("Non-zero Doorbell stride (%lu) unsupported\n",
+		    cntrlrcap.nvmrcc_dstrd);
+		error = ENOSPC;
+		goto out;
+	}
+
+	cntrlr->nvmrctr_nvmec.min_page_size =
+	    1 << (12 + cntrlrcap.nvmrcc_mpsmin);
+	cntrlr->nvmrctr_nvmec.ready_timeout_in_ms = cntrlrcap.nvmrcc_to *
+	    500;
+	cntrlr->nvmrctr_nvmec.timeout_period = NVME_DEFAULT_TIMEOUT_PERIOD;
+	cntrlr->nvmrctr_nvmec.max_xfer_size = NVME_MAX_XFER_SIZE;
+
+	cntrlr->nvmrctr_nvmec.taskqueue = taskqueue_create("nvmr_taskq", M_WAITOK,
+	    taskqueue_thread_enqueue, &cntrlr->nvmrctr_nvmec.taskqueue);
+	taskqueue_start_threads(&cntrlr->nvmrctr_nvmec.taskqueue, 1, PI_DISK, "nvmr taskq");
+
+	cntrlr->nvmrctr_nvmec.is_resetting = 0;
+	cntrlr->nvmrctr_nvmec.is_initialized = 0;
+	cntrlr->nvmrctr_nvmec.notification_sent = 0;
+	TASK_INIT(&cntrlr->nvmrctr_nvmec.reset_task, 0,
+	    nvmr_ctrlr_reset_task, cntrlr);
+	TASK_INIT(&cntrlr->nvmrctr_nvmec.fail_req_task, 0,
+	    nvmr_ctrlr_fail_req_task, cntrlr);
+	STAILQ_INIT(&cntrlr->nvmrctr_nvmec.fail_req);
+	cntrlr->nvmrctr_nvmec.is_failed = FALSE;
+
+	make_dev_args_init(&md_args);
+	md_args.mda_devsw = &nvmr_ctrlr_cdevsw;
+	md_args.mda_uid = UID_ROOT;
+	md_args.mda_gid = GID_WHEEL;
+	md_args.mda_mode = 0600;
+	unitnum = ((uint64_t)(&cntrlr->nvmrctr_nvmec)/
+	    sizeof(cntrlr->nvmrctr_nvmec));
+	unitnum &= INT_MAX;
+	md_args.mda_unit = (int)(uint32_t)unitnum; /* Security hole? */
+	md_args.mda_si_drv1 = (void *)cntrlr;
+	retval = make_dev_s(&md_args, &cntrlr->nvmrctr_nvmec.ccdev, "nvme%d",
+	    md_args.mda_unit);
+	if (retval != 0) {
+		ERRSPEW("make_dev_s() for cntrlr:%p returned %d\n", cntrlr,
+		    retval);
+		error = retval;
+		goto out;
+	}
+
+	DBGSPEW("NVMe device with unitnum:%d\n", (int)(uint32_t)unitnum);
 
 	error = 0;
 	*retcntrlrp = cntrlr;
@@ -1523,22 +1604,10 @@ nvmr_addr_t r640gent07enp94s0f1 = {
 static nvmr_cntrlr_t glbl_cntrlr;
 
 static void
-nvmr_init(void)
+veladdr_connect(void)
 {
 	int retval;
 	nvmr_cntrlrprof_t cntrlrprof = {};
-
-	retval = ib_register_client(&nvmr_ib_client);
-	if (retval != 0) {
-		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
-		    retval);
-		goto out;
-	}
-
-	kern_uuidgen(&nvrdma_host_uuid, 1);
-	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
-	    &nvrdma_host_uuid);
-	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
 
 	cntrlrprof = nvmr_discoveryprof;
 	cntrlrprof.nvmrp_qprofs[NVMR_QTYPE_ADMIN].nvmrqp_kato =
@@ -1562,10 +1631,8 @@ out:
 
 
 static void
-nvmr_uninit(void)
+veladdr_disconnect(void)
 {
-	DBGSPEW("Uninit invoked\n");
-
 	if (glbl_cntrlr == NULL) {
 		goto out;
 	}
@@ -1576,6 +1643,94 @@ nvmr_uninit(void)
 	nvmr_cntrlr_rele(glbl_cntrlr);
 	glbl_cntrlr = NULL;
 
+out:
+	return;
+}
+
+
+#define NVMR_CONNECT_CMD "attach"
+#define NVMR_DISCONNECT_CMD "detach"
+
+static int
+nvmr_sysctl_veladdr_conn(SYSCTL_HANDLER_ARGS)
+{
+	int error;
+	char buf[40], *src;
+
+	if (glbl_cntrlr == NULL) {
+		src = "unconnected";
+	} else {
+		src = "connected";
+	}
+	strlcpy(buf, src, sizeof(buf));
+	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	if ((error == 0) && (req->newptr != NULL)) {
+		if (strncmp(buf, NVMR_CONNECT_CMD,
+		    sizeof(NVMR_CONNECT_CMD)) == 0) {
+			if (glbl_cntrlr != NULL) {
+				goto out;
+			}
+			veladdr_connect();
+		} else if (strncmp(buf, NVMR_DISCONNECT_CMD,
+		    sizeof(NVMR_DISCONNECT_CMD)) == 0) {
+			if (glbl_cntrlr == NULL) {
+				goto out;
+			}
+			veladdr_disconnect();
+		} else {
+			goto out;
+		}
+	}
+
+	if (glbl_cntrlr == NULL) {
+		src = "unconnected";
+	} else {
+		src = "connected";
+	}
+	strlcpy(buf, src, sizeof(buf));
+	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+
+out:
+	return error;
+}
+static SYSCTL_NODE(_hw, OID_AUTO, nvmrdma, CTLFLAG_RD, 0, "NVMeoRDMA");
+SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, veladdr_conn,
+	    CTLTYPE_STRING | CTLFLAG_RW,
+	    NULL, 0, nvmr_sysctl_veladdr_conn, "A", NULL);
+
+
+static void
+nvmr_init(void)
+{
+	int retval;
+
+	retval = ib_register_client(&nvmr_ib_client);
+	if (retval != 0) {
+		ERRSPEW("ib_register_client() for NVMeoF failed, ret:%d\n",
+		    retval);
+		goto out;
+	}
+
+	kern_uuidgen(&nvrdma_host_uuid, 1);
+	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
+	    &nvrdma_host_uuid);
+	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
+
+out:
+	return;
+}
+
+
+static void
+nvmr_uninit(void)
+{
+	DBGSPEW("Uninit invoked\n");
+
+	if (glbl_cntrlr == NULL) {
+		goto out;
+	}
+
+	veladdr_disconnect();
 out:
 	ib_unregister_client(&nvmr_ib_client);
 }

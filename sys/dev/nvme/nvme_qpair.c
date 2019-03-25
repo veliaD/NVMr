@@ -542,6 +542,7 @@ nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
 	uint8_t			*queuemem, *prpmem, *prp_list;
 	int			i, err;
 
+	CONFIRMPCIECONTROLLER;
 	qpair->id = id;
 	qpair->vector = vector;
 	qpair->num_entries = num_entries;
@@ -776,6 +777,7 @@ nvme_timeout(void *arg)
 	uint32_t		csts;
 	uint8_t			cfs;
 
+	CONFIRMPCIECONTROLLER;
 	/*
 	 * Read csts to get value of cfs - controller fatal status.
 	 * If no fatal status, try to call the completion routine, and
@@ -815,12 +817,13 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 	qpair->act_tr[tr->cid] = tr;
 	pctrlr = qpair->pctrlr;
 
+	CONFIRMPCIECONTROLLER;
 	if (req->timeout)
 #if __FreeBSD_version >= 800030
-		callout_reset_curcpu(&tr->timer, pctrlr->timeout_period * hz,
+		callout_reset_curcpu(&tr->timer, pctrlr->ctrlr.timeout_period * hz,
 		    nvme_timeout, tr);
 #else
-		callout_reset(&tr->timer, pctrlr->timeout_period * hz,
+		callout_reset(&tr->timer, pctrlr->ctrlr.timeout_period * hz,
 		    nvme_timeout, tr);
 #endif
 

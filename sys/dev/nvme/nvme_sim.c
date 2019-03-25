@@ -92,6 +92,7 @@ nvme_sim_nvmeio(struct cam_sim *sim, union ccb *ccb)
 	struct nvme_pci_controller *pctrlr;
 
 	pctrlr = sim2ctrlr(sim);
+	CONFIRMPCIECONTROLLER;
 	payload = nvmeio->data_ptr;
 	size = nvmeio->dxfer_len;
 	/* SG LIST ??? */
@@ -127,6 +128,7 @@ nvme_link_kBps(struct nvme_pci_controller *pctrlr)
 	uint32_t speed, lanes, link[] = { 1, 250000, 500000, 985000, 1970000 };
 	uint32_t status;
 
+	CONFIRMPCIECONTROLLER;
 	status = pcie_read_config(pctrlr->dev, PCIER_LINK_STA, 2);
 	speed = status & PCIEM_LINK_STA_SPEED;
 	lanes = (status & PCIEM_LINK_STA_WIDTH) >> 4;
@@ -150,6 +152,7 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 
 	pctrlr = sim2ctrlr(sim);
 
+	CONFIRMPCIECONTROLLER;
 	mtx_assert(&pctrlr->ctrlr.lockc, MA_OWNED);
 
 	switch (ccb->ccb_h.func_code) {
@@ -279,6 +282,7 @@ nvme_sim_new_controller(struct nvme_pci_controller *pctrlr)
 	struct cam_devq *devq;
 	int max_trans;
 
+	CONFIRMPCIECONTROLLER;
 	max_trans = pctrlr->ctrlr.max_hw_pend_io;
 	devq = cam_simq_alloc(max_trans);
 	if (devq == NULL)
@@ -323,6 +327,7 @@ nvme_sim_new_ns(struct nvme_namespace *ns, void *sc_arg)
 	struct nvme_pci_controller *pctrlr = sc->s_ctrlr;
 	union ccb *ccb;
 
+	CONFIRMPCIECONTROLLER;
 	mtx_lock(&pctrlr->ctrlr.lockc);
 
 	ccb = xpt_alloc_ccb_nowait();
@@ -351,6 +356,7 @@ nvme_sim_controller_fail(void *ctrlr_arg)
 	struct nvme_sim_softc *sc = ctrlr_arg;
 	struct nvme_pci_controller *pctrlr = sc->s_ctrlr;
 
+	CONFIRMPCIECONTROLLER;
 	mtx_lock(&pctrlr->ctrlr.lockc);
 	xpt_async(AC_LOST_DEVICE, sc->s_path, NULL);
 	xpt_free_path(sc->s_path);

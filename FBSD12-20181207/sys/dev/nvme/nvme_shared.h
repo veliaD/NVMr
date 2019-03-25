@@ -45,6 +45,15 @@
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
 
+#define NVME_DEFAULT_TIMEOUT_PERIOD	(30)    /* in seconds */
+#define NVME_MIN_TIMEOUT_PERIOD		(5)
+#define NVME_MAX_TIMEOUT_PERIOD		(120)
+
+#define NVME_VFFSTRSZ 32
+
+/* Cap nvme to 1MB transfers driver explodes with larger sizes */
+#define NVME_MAX_XFER_SIZE		(MAXPHYS < (1<<20) ? MAXPHYS : (1<<20))
+
 struct nvme_completion {
 
 	/* dword 0 */
@@ -297,7 +306,10 @@ struct nvme_controller {
 
 	STAILQ_ENTRY(nvme_controller)	nvmec_lst;
 
-	struct nvme_pci_controller	*nvmec_tsp;
+	/** timeout period in seconds */
+	uint32_t		timeout_period;
+
+	void				*nvmec_tsp;
 	void 				(*nvmec_delist)(struct nvme_controller *);
 };
 

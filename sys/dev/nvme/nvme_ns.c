@@ -204,6 +204,7 @@ nvme_ns_get_serial_number(struct nvme_namespace *ns)
 	struct nvme_pci_controller *pctrlr;
 
 	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
+	CONFIRMPCIECONTROLLER;
 	return ((const char *)pctrlr->cdata.sn);
 }
 
@@ -213,6 +214,7 @@ nvme_ns_get_model_number(struct nvme_namespace *ns)
 	struct nvme_pci_controller *pctrlr;
 
 	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
+	CONFIRMPCIECONTROLLER;
 	return ((const char *)pctrlr->cdata.mn);
 }
 
@@ -509,6 +511,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 
 	struct nvme_controller *ctrlr;
 
+	CONFIRMPCIECONTROLLER;
 	ctrlr = &pctrlr->ctrlr;
 	ns->nvmes_ctrlr = ctrlr;
 	ns->id = id;

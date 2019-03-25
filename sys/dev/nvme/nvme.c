@@ -226,6 +226,7 @@ nvme_shutdown(device_t dev)
 	struct nvme_pci_controller	*pctrlr;
 
 	pctrlr = DEVICE2SOFTC(dev);
+	CONFIRMPCIECONTROLLER;
 	nvme_ctrlr_shutdown(pctrlr);
 
 	return (0);
@@ -319,6 +320,7 @@ nvme_attach(device_t dev)
 
 	pctrlr->ctrlr.nvmec_tsp = pctrlr;
 	pctrlr->ctrlr.nvmec_delist = &nvmp_delist_cb;
+	strncpy(pctrlr->very_first_field, NVMP_STRING, NVME_VFFSTRSZ);
 
 	devid = pci_get_devid(dev);
 	subdevice = pci_get_subdevice(dev);
@@ -375,6 +377,7 @@ nvme_detach (device_t dev)
 {
 	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
 
+	CONFIRMPCIECONTROLLER;
 	nvme_unregister_controller(&pctrlr->ctrlr);
 
 	nvme_ctrlr_destruct(pctrlr, dev);
@@ -405,6 +408,7 @@ nvme_notify(struct nvme_consumer *cons,
 	pctrlr = ctrlr->nvmec_tsp;
 	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
 
+	CONFIRMPCIECONTROLLER;
 	if (cmpset == 0)
 		return;
 
@@ -437,6 +441,7 @@ nvme_notify_new_controller(struct nvme_pci_controller *pctrlr)
 {
 	int i;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		if (nvme_consumer[i].id != INVALID_CONSUMER_ID) {
 			nvme_notify(&nvme_consumer[i], &pctrlr->ctrlr);
@@ -466,6 +471,7 @@ nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 	struct nvme_consumer	*cons;
 	uint32_t		i;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->async_fn != NULL)
@@ -480,6 +486,7 @@ nvme_notify_fail_consumers(struct nvme_pci_controller *pctrlr)
 	struct nvme_consumer	*cons;
 	uint32_t		i;
 
+	CONFIRMPCIECONTROLLER;
 	/*
 	 * This controller failed during initialization (i.e. IDENTIFY
 	 *  command failed or timed out).  Do not notify any nvme
@@ -506,6 +513,7 @@ nvme_notify_ns(struct nvme_pci_controller *pctrlr, int nsid)
 	if (!pctrlr->ctrlr.is_initialized)
 		return;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->ns_fn != NULL)

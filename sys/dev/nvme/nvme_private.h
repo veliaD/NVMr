@@ -84,10 +84,6 @@ MALLOC_DECLARE(M_NVME);
 #define NVME_INT_COAL_TIME	(0)	/* disabled */
 #define NVME_INT_COAL_THRESHOLD (0)	/* 0-based */
 
-#define NVME_DEFAULT_TIMEOUT_PERIOD	(30)    /* in seconds */
-#define NVME_MIN_TIMEOUT_PERIOD		(5)
-#define NVME_MAX_TIMEOUT_PERIOD		(120)
-
 #define NVME_DEFAULT_RETRY_COUNT	(4)
 
 /* Maximum log page size to fetch for AERs. */
@@ -203,10 +199,15 @@ struct nvme_qpair {
 
 } __aligned(CACHE_LINE_SIZE);
 
+#define NVMP_STRING "NVMe over PCIe"
+#define CONFIRMPCIECONTROLLER KASSERT(strncmp(pctrlr->very_first_field, \
+    NVMP_STRING, sizeof(pctrlr->very_first_field)) == 0, \
+    ("%s@%d NOT a PCIe controller!\n", __func__, __LINE__))
 /*
  * One of these per allocated PCI device.
  */
 struct nvme_pci_controller {
+	char			very_first_field[NVME_VFFSTRSZ+1];
 	device_t		dev;
 
 	bus_space_tag_t		bus_tag;
@@ -239,9 +240,6 @@ struct nvme_pci_controller {
 
 	/** interrupt coalescing threshold */
 	uint32_t		int_coal_threshold;
-
-	/** timeout period in seconds */
-	uint32_t		timeout_period;
 
 	struct nvme_qpair	adminq;
 	struct nvme_qpair	*ioq;
