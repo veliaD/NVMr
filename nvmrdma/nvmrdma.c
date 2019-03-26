@@ -166,10 +166,8 @@ nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
-	/*
 	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
 	    ib_wc_status_msg(wc->status));
-	 */
 }
 
 static void
@@ -179,10 +177,8 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
-	/*
 	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
 	    ib_wc_status_msg(wc->status));
-	 */
 }
 
 
@@ -620,7 +616,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	void *cbuf;
 	u64 dmaddr;
 	struct ib_sge sgl;
-	struct ib_send_wr sndwr, *badsndwrp;
+	struct ib_send_wr sndwr, *sndwrp, *badsndwrp;
 	struct ib_device *ibd;
 
 	if ((c == NULL) || (q == NULL)) {
@@ -637,7 +633,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	memset(&sndwr, 0, sizeof(sndwr));
 	sndwr.next  = NULL;
 
-	if (d == NULL) {
+	if (d == NULL) { /* This same check used below */
 		memset(k, 0, sizeof(*k));
 		k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
 
@@ -729,8 +725,6 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	k->nvmrk_key = htole32(mr->rkey);
 	k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
 
-	sndwr.next  = &regwr.wr; /* Chain the MR registration WR into send WR */
-
 skip_ksgl:
 
 	c->nvmrsb_nvmf.nvmf_cid = commp->nvmrsnd_cid;
@@ -761,11 +755,19 @@ skip_ksgl:
 	sndwr.opcode = IB_WR_SEND;
 	sndwr.send_flags = IB_SEND_SIGNALED;
 
+	if (d == NULL) {
+		sndwrp = &sndwr;
+	} else {
+		/* If there's data to be RDMAed chain in the registration */
+		regwr.wr.next = &sndwr;
+		sndwrp = &regwr.wr;
+	}
+
 	badsndwrp = NULL;
-	retval = ib_post_send(q->nvmrq_ibqp, &sndwr, &badsndwrp);
+	retval = ib_post_send(q->nvmrq_ibqp, sndwrp, &badsndwrp);
 	if (retval != 0) {
 		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
-		    &sndwr, retval, badsndwrp);
+		    sndwrp, retval, badsndwrp);
 		error = retval;
 		goto out;
 	}
@@ -1495,6 +1497,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
+	mtx_init(&cntrlr->nvmrctr_nvmec.lockc, "nvme ctrlr lock", NULL,
+	    MTX_DEF);
 	cntrlr->nvmrctr_nvmec.min_page_size =
 	    1 << (12 + cntrlrcap.nvmrcc_mpsmin);
 	cntrlr->nvmrctr_nvmec.ready_timeout_in_ms = cntrlrcap.nvmrcc_to *
@@ -1502,9 +1506,11 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_nvmec.timeout_period = NVME_DEFAULT_TIMEOUT_PERIOD;
 	cntrlr->nvmrctr_nvmec.max_xfer_size = NVME_MAX_XFER_SIZE;
 
-	cntrlr->nvmrctr_nvmec.taskqueue = taskqueue_create("nvmr_taskq", M_WAITOK,
-	    taskqueue_thread_enqueue, &cntrlr->nvmrctr_nvmec.taskqueue);
-	taskqueue_start_threads(&cntrlr->nvmrctr_nvmec.taskqueue, 1, PI_DISK, "nvmr taskq");
+	cntrlr->nvmrctr_nvmec.taskqueue = taskqueue_create("nvmr_taskq",
+	    M_WAITOK, taskqueue_thread_enqueue,
+	    &cntrlr->nvmrctr_nvmec.taskqueue);
+	taskqueue_start_threads(&cntrlr->nvmrctr_nvmec.taskqueue, 1, PI_DISK,
+	    "nvmr taskq");
 
 	cntrlr->nvmrctr_nvmec.is_resetting = 0;
 	cntrlr->nvmrctr_nvmec.is_initialized = 0;

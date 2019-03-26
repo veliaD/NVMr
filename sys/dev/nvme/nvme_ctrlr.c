@@ -1275,7 +1275,7 @@ nvme_ctrlr_construct(struct nvme_pci_controller *pctrlr, device_t dev)
 	CONFIRMPCIECONTROLLER;
 	pctrlr->dev = dev;
 
-	mtx_init(&pctrlr->ctrlr.lockc, "nvme pctrlr lock", NULL, MTX_DEF);
+	mtx_init(&pctrlr->ctrlr.lockc, "nvme ctrlr lock", NULL, MTX_DEF);
 
 	status = nvme_ctrlr_allocate_bar(pctrlr);
 
