@@ -426,7 +426,7 @@ nvme_notify(struct nvme_consumer *cons,
 		 */
 		return;
 	}
-	for (ns_idx = 0; ns_idx < min(pctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
+	for (ns_idx = 0; ns_idx < min(pctrlr->ctrlr.cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
 		ns = &ctrlr->cns[ns_idx];
 		if (ns->nvmes_nsd.nsze == 0)
 			continue;

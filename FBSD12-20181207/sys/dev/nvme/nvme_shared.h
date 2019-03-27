@@ -166,6 +166,231 @@ struct nvme_async_event_request {
 	uint8_t				log_page_buffer[NVME_MAX_AER_LOG_SIZE];
 };
 
+struct nvme_power_state {
+	/** Maximum Power */
+	uint16_t	mp;			/* Maximum Power */
+	uint8_t		ps_rsvd1;
+	uint8_t		mps_nops;		/* Max Power Scale, Non-Operational State */
+
+	uint32_t	enlat;			/* Entry Latency */
+	uint32_t	exlat;			/* Exit Latency */
+
+	uint8_t		rrt;			/* Relative Read Throughput */
+	uint8_t		rrl;			/* Relative Read Latency */
+	uint8_t		rwt;			/* Relative Write Throughput */
+	uint8_t		rwl;			/* Relative Write Latency */
+
+	uint16_t	idlp;			/* Idle Power */
+	uint8_t		ips;			/* Idle Power Scale */
+	uint8_t		ps_rsvd8;
+
+	uint16_t	actp;			/* Active Power */
+	uint8_t		apw_aps;		/* Active Power Workload, Active Power Scale */
+	uint8_t		ps_rsvd10[9];
+} __packed;
+
+_Static_assert(sizeof(struct nvme_power_state) == 32, "bad size for nvme_power_state");
+
+
+struct nvme_controller_data {
+
+	/* bytes 0-255: controller capabilities and features */
+
+	/** pci vendor id */
+	uint16_t		vid;
+
+	/** pci subsystem vendor id */
+	uint16_t		ssvid;
+
+	/** serial number */
+	uint8_t			sn[NVME_SERIAL_NUMBER_LENGTH];
+
+	/** model number */
+	uint8_t			mn[NVME_MODEL_NUMBER_LENGTH];
+
+	/** firmware revision */
+	uint8_t			fr[NVME_FIRMWARE_REVISION_LENGTH];
+
+	/** recommended arbitration burst */
+	uint8_t			rab;
+
+	/** ieee oui identifier */
+	uint8_t			ieee[3];
+
+	/** multi-interface capabilities */
+	uint8_t			mic;
+
+	/** maximum data transfer size */
+	uint8_t			mdts;
+
+	/** Controller ID */
+	uint16_t		ctrlr_id;
+
+	/** Version */
+	uint32_t		ver;
+
+	/** RTD3 Resume Latency */
+	uint32_t		rtd3r;
+
+	/** RTD3 Enter Latency */
+	uint32_t		rtd3e;
+
+	/** Optional Asynchronous Events Supported */
+	uint32_t		oaes;	/* bitfield really */
+
+	/** Controller Attributes */
+	uint32_t		ctratt;	/* bitfield really */
+
+	uint8_t			reserved1[12];
+
+	/** FRU Globally Unique Identifier */
+	uint8_t			fguid[16];
+
+	uint8_t			reserved2[128];
+
+	/* bytes 256-511: admin command set attributes */
+
+	/** optional admin command support */
+	uint16_t		oacs;
+
+	/** abort command limit */
+	uint8_t			acl;
+
+	/** asynchronous event request limit */
+	uint8_t			aerl;
+
+	/** firmware updates */
+	uint8_t			frmw;
+
+	/** log page attributes */
+	uint8_t			lpa;
+
+	/** error log page entries */
+	uint8_t			elpe;
+
+	/** number of power states supported */
+	uint8_t			npss;
+
+	/** admin vendor specific command configuration */
+	uint8_t			avscc;
+
+	/** Autonomous Power State Transition Attributes */
+	uint8_t			apsta;
+
+	/** Warning Composite Temperature Threshold */
+	uint16_t		wctemp;
+
+	/** Critical Composite Temperature Threshold */
+	uint16_t		cctemp;
+
+	/** Maximum Time for Firmware Activation */
+	uint16_t		mtfa;
+
+	/** Host Memory Buffer Preferred Size */
+	uint32_t		hmpre;
+
+	/** Host Memory Buffer Minimum Size */
+	uint32_t		hmmin;
+
+	/** Name space capabilities  */
+	struct {
+		/* if nsmgmt, report tnvmcap and unvmcap */
+		uint8_t    tnvmcap[16];
+		uint8_t    unvmcap[16];
+	} __packed untncap;
+
+	/** Replay Protected Memory Block Support */
+	uint32_t		rpmbs; /* Really a bitfield */
+
+	/** Extended Device Self-test Time */
+	uint16_t		edstt;
+
+	/** Device Self-test Options */
+	uint8_t			dsto; /* Really a bitfield */
+
+	/** Firmware Update Granularity */
+	uint8_t			fwug;
+
+	/** Keep Alive Support */
+	uint16_t		kas;
+
+	/** Host Controlled Thermal Management Attributes */
+	uint16_t		hctma; /* Really a bitfield */
+
+	/** Minimum Thermal Management Temperature */
+	uint16_t		mntmt;
+
+	/** Maximum Thermal Management Temperature */
+	uint16_t		mxtmt;
+
+	/** Sanitize Capabilities */
+	uint32_t		sanicap; /* Really a bitfield */
+
+	uint8_t			reserved3[180];
+	/* bytes 512-703: nvm command set attributes */
+
+	/** submission queue entry size */
+	uint8_t			sqes;
+
+	/** completion queue entry size */
+	uint8_t			cqes;
+
+	/** Maximum Outstanding Commands */
+	uint16_t		maxcmd;
+
+	/** number of namespaces */
+	uint32_t		nn;
+
+	/** optional nvm command support */
+	uint16_t		oncs;
+
+	/** fused operation support */
+	uint16_t		fuses;
+
+	/** format nvm attributes */
+	uint8_t			fna;
+
+	/** volatile write cache */
+	uint8_t			vwc;
+
+	/** Atomic Write Unit Normal */
+	uint16_t		awun;
+
+	/** Atomic Write Unit Power Fail */
+	uint16_t		awupf;
+
+	/** NVM Vendor Specific Command Configuration */
+	uint8_t			nvscc;
+	uint8_t			reserved5;
+
+	/** Atomic Compare & Write Unit */
+	uint16_t		acwu;
+	uint16_t		reserved6;
+
+	/** SGL Support */
+	uint32_t		sgls;
+
+	/* bytes 540-767: Reserved */
+	uint8_t			reserved7[228];
+
+	/** NVM Subsystem NVMe Qualified Name */
+	uint8_t			subnqn[256];
+
+	/* bytes 1024-1791: Reserved */
+	uint8_t			reserved8[768];
+
+	/* bytes 1792-2047: NVMe over Fabrics specification */
+	uint8_t			reserved9[256];
+
+	/* bytes 2048-3071: power state descriptors */
+	struct nvme_power_state power_state[32];
+
+	/* bytes 3072-4095: vendor specific */
+	uint8_t			vs[1024];
+} __packed __aligned(4);
+
+_Static_assert(sizeof(struct nvme_controller_data) == 4096, "bad size for nvme_controller_data");
+
 struct nvme_namespace_data {
 
 	/** namespace size */
@@ -261,8 +486,6 @@ struct nvme_namespace {
 	struct mtx			lock;
 };
 
-struct nvme_pci_controller;
-
 struct nvme_controller {
 	struct mtx		lockc;
 
@@ -282,6 +505,8 @@ struct nvme_controller {
 
 	/** maximum i/o size in bytes */
 	uint32_t		max_xfer_size;
+
+	struct nvme_controller_data	cdata;
 
 	/** minimum page size supported by this controller in bytes */
 	uint32_t		min_page_size;

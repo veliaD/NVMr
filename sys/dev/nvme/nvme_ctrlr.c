@@ -434,7 +434,7 @@ nvme_ctrlr_identify(struct nvme_pci_controller *pctrlr)
 
 	CONFIRMPCIECONTROLLER;
 	status.done = 0;
-	nvme_ctrlr_cmd_identify_controller(pctrlr, &pctrlr->cdata,
+	nvme_ctrlr_cmd_identify_controller(pctrlr, &pctrlr->ctrlr.cdata,
 	    nvme_completion_poll_cb, &status);
 	while (!atomic_load_acq_int(&status.done))
 		pause("nvme", 1);
@@ -444,15 +444,15 @@ nvme_ctrlr_identify(struct nvme_pci_controller *pctrlr)
 	}
 
 	/* Convert data to host endian */
-	nvme_controller_data_swapbytes(&pctrlr->cdata);
+	nvme_controller_data_swapbytes(&pctrlr->ctrlr.cdata);
 
 	/*
 	 * Use MDTS to ensure our default max_xfer_size doesn't exceed what the
 	 *  controller supports.
 	 */
-	if (pctrlr->cdata.mdts > 0)
+	if (pctrlr->ctrlr.cdata.mdts > 0)
 		pctrlr->ctrlr.max_xfer_size = min(pctrlr->ctrlr.max_xfer_size,
-		    pctrlr->ctrlr.min_page_size * (1 << (pctrlr->cdata.mdts)));
+		    pctrlr->ctrlr.min_page_size * (1 << (pctrlr->ctrlr.cdata.mdts)));
 
 	return (0);
 }
@@ -564,7 +564,7 @@ nvme_ctrlr_construct_namespaces(struct nvme_pci_controller *pctrlr)
 	uint32_t 		i;
 
 	CONFIRMPCIECONTROLLER;
-	for (i = 0; i < min(pctrlr->cdata.nn, NVME_MAX_NAMESPACES); i++) {
+	for (i = 0; i < min(pctrlr->ctrlr.cdata.nn, NVME_MAX_NAMESPACES); i++) {
 		ns = &pctrlr->ctrlr.cns[i];
 		nvme_ns_construct(ns, i+1, pctrlr);
 	}
@@ -597,7 +597,7 @@ nvme_ctrlr_get_log_page_size(struct nvme_pci_controller *pctrlr, uint8_t page_id
 	case NVME_LOG_ERROR:
 		log_page_size = min(
 		    sizeof(struct nvme_error_information_entry) *
-		    (pctrlr->cdata.elpe + 1), NVME_MAX_AER_LOG_SIZE);
+		    (pctrlr->ctrlr.cdata.elpe + 1), NVME_MAX_AER_LOG_SIZE);
 		break;
 	case NVME_LOG_HEALTH_INFORMATION:
 		log_page_size = sizeof(struct nvme_health_information_page);
@@ -668,7 +668,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 		switch (aer->log_page_id) {
 		case NVME_LOG_ERROR:
 			err = (struct nvme_error_information_entry *)aer->log_page_buffer;
-			for (i = 0; i < (pctrlr->cdata.elpe + 1); i++)
+			for (i = 0; i < (pctrlr->ctrlr.cdata.elpe + 1); i++)
 				nvme_error_information_entry_swapbytes(err++);
 			break;
 		case NVME_LOG_HEALTH_INFORMATION:
@@ -813,7 +813,7 @@ nvme_ctrlr_configure_aer(struct nvme_pci_controller *pctrlr)
 	    NVME_CRIT_WARN_ST_DEVICE_RELIABILITY |
 	    NVME_CRIT_WARN_ST_READ_ONLY |
 	    NVME_CRIT_WARN_ST_VOLATILE_MEMORY_BACKUP;
-	if (pctrlr->cdata.ver >= NVME_REV(1, 2))
+	if (pctrlr->ctrlr.cdata.ver >= NVME_REV(1, 2))
 		pctrlr->ctrlr.async_event_config |= 0x300;
 
 	status.done = 0;
@@ -832,7 +832,7 @@ nvme_ctrlr_configure_aer(struct nvme_pci_controller *pctrlr)
 	    pctrlr->ctrlr.async_event_config, NULL, NULL);
 
 	/* aerl is a zero-based value, so we need to add 1 here. */
-	pctrlr->ctrlr.num_aers = min(NVME_MAX_ASYNC_EVENTS, (pctrlr->cdata.aerl+1));
+	pctrlr->ctrlr.num_aers = min(NVME_MAX_ASYNC_EVENTS, (pctrlr->ctrlr.cdata.aerl+1));
 
 	for (i = 0; i < pctrlr->ctrlr.num_aers; i++) {
 		aer = &pctrlr->ctrlr.aer[i];
@@ -1465,5 +1465,5 @@ nvme_ctrlr_get_data(struct nvme_pci_controller *pctrlr)
 {
 
 	CONFIRMPCIECONTROLLER;
-	return (&pctrlr->cdata);
+	return (&pctrlr->ctrlr.cdata);
 }

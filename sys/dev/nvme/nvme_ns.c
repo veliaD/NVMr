@@ -205,7 +205,7 @@ nvme_ns_get_serial_number(struct nvme_namespace *ns)
 
 	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
-	return ((const char *)pctrlr->cdata.sn);
+	return ((const char *)pctrlr->ctrlr.cdata.sn);
 }
 
 const char *
@@ -215,7 +215,7 @@ nvme_ns_get_model_number(struct nvme_namespace *ns)
 
 	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
-	return ((const char *)pctrlr->cdata.mn);
+	return ((const char *)pctrlr->ctrlr.cdata.mn);
 }
 
 const struct nvme_namespace_data *
@@ -526,9 +526,9 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	case 0x09538086:		/* Intel DC PC3500 */
 	case 0x0a538086:		/* Intel DC PC3520 */
 	case 0x0a548086:		/* Intel DC PC4500 */
-		if (pctrlr->cdata.vs[3] != 0)
+		if (pctrlr->ctrlr.cdata.vs[3] != 0)
 			ns->stripesize =
-			    (1 << pctrlr->cdata.vs[3]) * pctrlr->ctrlr.min_page_size;
+			    (1 << pctrlr->ctrlr.cdata.vs[3]) * pctrlr->ctrlr.min_page_size;
 		break;
 	default:
 		break;
@@ -579,12 +579,12 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		return (ENXIO);
 	}
 
-	oncs = pctrlr->cdata.oncs;
+	oncs = pctrlr->ctrlr.cdata.oncs;
 	dsm = (oncs >> NVME_CTRLR_DATA_ONCS_DSM_SHIFT) & NVME_CTRLR_DATA_ONCS_DSM_MASK;
 	if (dsm)
 		ns->flags |= NVME_NS_DEALLOCATE_SUPPORTED;
 
-	vwc_present = (pctrlr->cdata.vwc >> NVME_CTRLR_DATA_VWC_PRESENT_SHIFT) &
+	vwc_present = (pctrlr->ctrlr.cdata.vwc >> NVME_CTRLR_DATA_VWC_PRESENT_SHIFT) &
 		NVME_CTRLR_DATA_VWC_PRESENT_MASK;
 	if (vwc_present)
 		ns->flags |= NVME_NS_FLUSH_SUPPORTED;

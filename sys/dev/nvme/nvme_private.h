@@ -244,7 +244,6 @@ struct nvme_pci_controller {
 	struct nvme_qpair	adminq;
 	struct nvme_qpair	*ioq;
 
-	struct nvme_controller_data	cdata;
 	struct nvme_registers	*regs;
 
 	/* Fields for tracking progress during controller initialization. */

@@ -291,12 +291,12 @@ nvme_ctrlr_cmd_get_error_page(struct nvme_pci_controller *pctrlr,
 	KASSERT(num_entries > 0, ("%s called with num_entries==0\n", __func__));
 
 	/* Controller's error log page entries is 0-based. */
-	KASSERT(num_entries <= (pctrlr->cdata.elpe + 1),
+	KASSERT(num_entries <= (pctrlr->ctrlr.cdata.elpe + 1),
 	    ("%s called with num_entries=%d but (elpe+1)=%d\n", __func__,
-	    num_entries, pctrlr->cdata.elpe + 1));
+	    num_entries, pctrlr->ctrlr.cdata.elpe + 1));
 
-	if (num_entries > (pctrlr->cdata.elpe + 1))
-		num_entries = pctrlr->cdata.elpe + 1;
+	if (num_entries > (pctrlr->ctrlr.cdata.elpe + 1))
+		num_entries = pctrlr->ctrlr.cdata.elpe + 1;
 
 	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_ERROR,
 	    NVME_GLOBAL_NAMESPACE_TAG, payload, sizeof(*payload) * num_entries,
