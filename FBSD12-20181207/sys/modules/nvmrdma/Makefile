@@ -1,7 +1,8 @@
 # $FreeBSD$
-.PATH:	${.CURDIR}/../../dev/nvmeorocev2
+.PATH:	${SRCTOP}/sys/dev/nvmrdma
 
 KMOD=nvmrdma
+
 SRCS= \
 	nvmrdma.c \
 	device_if.h bus_if.h vnode_if.h pci_if.h \

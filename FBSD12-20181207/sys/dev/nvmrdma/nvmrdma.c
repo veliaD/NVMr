@@ -356,7 +356,7 @@ nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 	if (wc->status != IB_WC_SUCCESS) {
 		ERRSPEW("Local rKey invalidation failed q:%p commp:%p r:%x\n",
 		    q, commp, commp->nvmrsnd_mr->rkey);
-		/* Bail for now */
+		/* Bail for now, wake waiters */
 	}
 
 	WAKEWAITERS;
@@ -426,7 +426,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 			    "wkey:%x okey:%x\n", q, commp, c->cid,
 			    wc->ex.invalidate_rkey, commp->nvmrsnd_mr->rkey);
 
-			/* Bail for now */
+			/* Bail for now, wake waiters */
 		}
 	} else if (commp->nvmrsnd_rkeyvalid) {
 		/*
@@ -446,6 +446,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 		if (retval != 0) {
 			ERRSPEW("Local Invalidate failed! commp:%p cid:%d\n",
 			    commp, c->cid);
+			/* Bail for now, wake waiters */
 		} else {
 			DBGSPEW("Not waking so as to invalidate %p %d\n",
 			    commp, c->cid);
@@ -713,7 +714,7 @@ static int
 nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
     nvmr_ksgl_perm_t p, struct nvme_completion *r)
 {
-	int offset, count, n, nn, nnn, error, retval;
+	int offset, /* count, */ n, nn, nnn, error, retval;
 	struct scatterlist scl[MAX_SGS], *s;
 	nvmr_ksgl_t *k;
 	size_t len, translen;
@@ -745,8 +746,8 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	commp->nvmrsnd_rkeyvalid = false;
 	/* q->nvmrq_next2use = q->nvmrq_commcid[commp->nvmrsnd_cid - 1]; */
 
+	memset(k, 0, sizeof(*k));
 	if (d == NULL) { /* This same check used below */
-		memset(k, 0, sizeof(*k));
 		k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
 
 		goto skip_ksgl;
@@ -758,6 +759,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	 */
 	translen = l;
 	cbuf = d;
+	memset(&scl, 0, sizeof(scl));
 	for (n = 0; (0 < translen) && (n < MAX_SGS); n++, translen -= len) {
 		s = scl + n;
 		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
@@ -771,7 +773,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 		error = E2BIG;
 		goto out;
 	} else {
-		DBGSPEW("data is 0x%p\n", d);
+		/* DBGSPEW("data is 0x%p\n", d);
 		for (count = 0; count < n; count++) {
 			DBGSPEW("scl[%d](hex) p:%16lX o:%8X l:%8X a:%16lX\n",
 			count,
@@ -779,7 +781,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 			scl[count].offset,
 			scl[count].length,
 			scl[count].address);
-		}
+		} */
 	}
 
 	/* 2) Map the scatterlist array per the direction to/from IB device */
@@ -790,7 +792,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 		error = E2BIG;
 		goto out;
 	}
-	DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn);
+	/* DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn); */
 
 	/* 3) Map the scatterlist elements to the MR */
 	mr = commp->nvmrsnd_mr;
@@ -800,7 +802,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 		error = E2BIG;
 		goto out;
 	}
-	DBGSPEW("ib_map_mr_sg() returned a count of %d\n", nnn);
+	/* DBGSPEW("ib_map_mr_sg() returned a count of %d\n", nnn); */
 	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
 
 	/* 4) Craft the memory registration work-request but don't post it */
@@ -1714,6 +1716,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
+	cntrlr->nvmrctr_nvmec.guard0 = cntrlr->nvmrctr_nvmec.guard1 = 
+	    0xDEADD00D8BADBEEF;
 	retval = nvmr_admin_identify(cntrlr, 0, 0, 1,
 	    &cntrlr->nvmrctr_nvmec.cdata, sizeof(cntrlr->nvmrctr_nvmec.cdata));
 	if (retval != 0) {
@@ -1722,6 +1726,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	} else {
 		identp = (uint8_t *)&cntrlr->nvmrctr_nvmec.cdata;
+		KASSERT((cntrlr->nvmrctr_nvmec.guard0 == 0xDEADD00D8BADBEEF) &&
+		    (cntrlr->nvmrctr_nvmec.guard1 == 0xDEADD00D8BADBEEF),
+		    ("%s@%d Guards failed! %lx %lx", __func__, __LINE__,
+		    cntrlr->nvmrctr_nvmec.guard0,
+		    cntrlr->nvmrctr_nvmec.guard1));
+		/*
 		printf("       ");
 		for (count = 0; count < 16; count++) {
 			printf(" %02x", count);
@@ -1741,6 +1751,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 				printf("\n");
 			}
 		}
+		 */
 	}
 
 	if (cntrlrcap.nvmrcc_dstrd != 0) {

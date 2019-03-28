@@ -506,7 +506,9 @@ struct nvme_controller {
 	/** maximum i/o size in bytes */
 	uint32_t		max_xfer_size;
 
+	uint64_t		guard0;
 	struct nvme_controller_data	cdata;
+	uint64_t		guard1;
 
 	/** minimum page size supported by this controller in bytes */
 	uint32_t		min_page_size;

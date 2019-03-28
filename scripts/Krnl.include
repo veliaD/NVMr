@@ -1,0 +1,10 @@
+VELPATHTOKRNSRCS=$(cd `dirname ${0}`/../FBSD12-20181207/./; echo $PWD)
+export KERNBUILDDIR=$(cd ${VELPATHTOKRNSRCS}/../../obj/./; echo $PWD)
+export MAKEOBJDIRPREFIX=${KERNBUILDDIR}
+
+export BLDERROUT="$TEMP/buildKrnl.errout"
+export NSTLERROUT="$TEMP/installKrnl.errout"
+export KERNCONF=VEL01-DEBUG
+export HEAD=${VELPATHTOKRNSRCS}
+export KERN_CONFIG="VEL01-DEBUG"
+export MODULES_OVERRIDE="rdma ibcore linuxkpi mlx5 mlx5ib mlx5en nvd nvme nvmrdma"

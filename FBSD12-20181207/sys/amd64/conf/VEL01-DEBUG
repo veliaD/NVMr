@@ -203,3 +203,4 @@ options 	WITNESS
 options 	WITNESS_SKIPSPIN
 options 	INVARIANTS
 options 	INVARIANT_SUPPORT
+options		DEBUG_MEMGUARD
