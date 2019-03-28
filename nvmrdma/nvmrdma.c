@@ -1,9 +1,11 @@
 /**********
  TODO:
  1) Use the command cid array to track the allocated containers and use the
- STAILQ field to implement a queue of free containers.  Right now the STAILQ
- field tracks all allocated containers.
+    STAILQ field to implement a queue of free containers.  Right now the
+    STAILQ field tracks all allocated containers.
  2) !!!Remove field nvmrq_next2use whose only use is testing MR lifecycle!!!
+ 3) We should be able to remove ib_mr,s or their containing command-containers
+    from circulation if they cannot be invalidated correctly
  **********/
 
 #include <sys/cdefs.h>
@@ -129,6 +131,7 @@ struct nvmr_ncommcont {
 	u64			     nvmrsnd_dmaddr;
 	uint16_t                     nvmrsnd_cid;
 	bool                         nvmrsnd_rspndd;
+	bool                         nvmrsnd_rkeyvalid;
 };
 typedef struct nvmr_ncommcont nvmr_ncommcon_t;
 
@@ -197,8 +200,10 @@ nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
+	/*
 	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
 	    ib_wc_status_msg(wc->status));
+	 */
 }
 
 static void
@@ -208,8 +213,10 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 
 	rcve = wc->wr_cqe;
 
+	/*
 	DBGSPEW("rcve:%p, wc_status:\"%s\"\n", rcve,
 	    ib_wc_status_msg(wc->status));
+	 */
 }
 
 
@@ -324,13 +331,46 @@ nvmr_cntrlrprof_t nvmr_discoveryprof = {
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
+
+#define WAKEWAITERS \
+	if (unlikely(commp->nvmrsnd_rspndd == true)) {                      \
+		panic("%s@%d nvmrsnd_rspndd already true! q:%p commp:%p\n", \
+		    __func__, __LINE__, q, commp);                          \
+	}                                                                   \
+                                                                            \
+	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);                           \
+	commp->nvmrsnd_rspndd = true;                                       \
+	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);                         \
+	wakeup(commp)
+
+
+static void
+nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
+{
+	struct nvmr_ncommcont *commp;
+	nvmr_queue_t q;
+
+	q = cq->cq_context;
+	commp = container_of(wc->wr_cqe, struct nvmr_ncommcont, nvmrsnd_regcqe);
+
+	if (wc->status != IB_WC_SUCCESS) {
+		ERRSPEW("Local rKey invalidation failed q:%p commp:%p r:%x\n",
+		    q, commp, commp->nvmrsnd_mr->rkey);
+		/* Bail for now */
+	}
+
+	WAKEWAITERS;
+}
+
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct nvmr_ncmplcont *cmplp;
 	struct nvmr_ncommcont *commp;
 	struct nvme_completion *c;
+	struct ib_send_wr invwr, *badinvwrp;
 	nvmr_queue_t q;
+	int retval;
 
 	q = cq->cq_context;
 	cmplp = container_of(wc->wr_cqe, struct nvmr_ncmplcont, nvmrsp_cqe);
@@ -365,21 +405,56 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 		ERRSPEW("Uninitialized nvmrsnd_nvmecomplp field in commp:%p "
 		    "q:%p cid:%hu!\n", commp, q, c->cid);
 		goto out;
-	} else {
-		/* Copy the NVMe completion structure contents */
-		*commp->nvmrsnd_nvmecomplp = *c;
 	}
 
+	/* Copy the NVMe completion structure contents */
+	*commp->nvmrsnd_nvmecomplp = *c;
 
-	if (unlikely(commp->nvmrsnd_rspndd == true)) {
-		panic("%s@%d nvmrsnd_rspndd already true! q:%p commp:%p\n",
-		    __func__, __LINE__, q, commp);
+	/*
+	 * The NVMeoF spec allows the host to ask the target to send over a
+	 * rkey(remote-key)-invalidate-request after it has RDMAed into/from
+	 * the host memory.  This improves latency I suppose but is optional
+	 */
+	if (wc->wc_flags & IB_WC_WITH_INVALIDATE) {
+		/*
+		 * The target sent over an NVMe completion along with a request
+		 * to our RDMA stack to invalidate the rkey we setup for the
+		 * corresponding NVMe command.  Confirm the keys match.
+		 */
+		if (commp->nvmrsnd_mr->rkey != wc->ex.invalidate_rkey) {
+			ERRSPEW("Key's don't match! q:%p commp:%p cid:%d "
+			    "wkey:%x okey:%x\n", q, commp, c->cid,
+			    wc->ex.invalidate_rkey, commp->nvmrsnd_mr->rkey);
+
+			/* Bail for now */
+		}
+	} else if (commp->nvmrsnd_rkeyvalid) {
+		/*
+		 * We didn't request invalidation of our RDMA rkey by the
+		 * target or it was ignored.  Invalidate the rkey ourselves.
+		 */
+		memset(&invwr, 0, sizeof(invwr));
+		invwr.num_sge = 0;
+		invwr.next = NULL;
+		invwr.opcode = IB_WR_LOCAL_INV;
+		invwr.ex.invalidate_rkey = commp->nvmrsnd_mr->rkey;
+		invwr.send_flags = IB_SEND_SIGNALED;
+		invwr.wr_cqe = &commp->nvmrsnd_regcqe;
+		commp->nvmrsnd_regcqe.done = nvmr_localinv_done;
+
+		retval = ib_post_send(q->nvmrq_ibqp, &invwr, &badinvwrp);
+		if (retval != 0) {
+			ERRSPEW("Local Invalidate failed! commp:%p cid:%d\n",
+			    commp, c->cid);
+		} else {
+			DBGSPEW("Not waking so as to invalidate %p %d\n",
+			    commp, c->cid);
+			/* Continue in nvmr_localinv_done() */
+			goto out;
+		}
 	}
 
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	commp->nvmrsnd_rspndd = true;
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
-	wakeup(commp);
+	WAKEWAITERS;
 
 out:
 	return;
@@ -652,9 +727,9 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	struct ib_send_wr sndwr, *sndwrp, *badsndwrp;
 	struct ib_device *ibd;
 
-	if ((c == NULL) || (q == NULL) ||
+	if ((c == NULL) || (q == NULL) || (r == NULL) ||
 	    ((d != NULL) && (p != NVMR_QCMD_RO) && (p != NVMR_QCMD_WO))) {
-		ERRSPEW("INVALID! c:%p q:%p p:%d\n", c, q, p);
+		ERRSPEW("INVALID! r:%p c:%p q:%p p:%d\n", r, c, q, p);
 		error = EINVAL;
 		goto out;
 	}
@@ -667,7 +742,8 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	sndwr.next  = NULL;
 
 	commp = q->nvmrq_next2use;
-	q->nvmrq_next2use = q->nvmrq_commcid[commp->nvmrsnd_cid - 1];
+	commp->nvmrsnd_rkeyvalid = false;
+	/* q->nvmrq_next2use = q->nvmrq_commcid[commp->nvmrsnd_cid - 1]; */
 
 	if (d == NULL) { /* This same check used below */
 		memset(k, 0, sizeof(*k));
@@ -716,7 +792,7 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	}
 	DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn);
 
-	/* 3) Map the scatterlist elements to the MR  */
+	/* 3) Map the scatterlist elements to the MR */
 	mr = commp->nvmrsnd_mr;
 	nnn = ib_map_mr_sg(mr, scl, nn, NULL, NVMR_FOURK);
 	if (nnn < nn) {
@@ -747,14 +823,16 @@ nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
 	k->nvmrk_length[1] = (htole32(mr->length)>>8) & 0xFF;
 	k->nvmrk_length[2] = (htole32(mr->length)>>16) & 0xFF;
 	k->nvmrk_key = htole32(mr->rkey);
-	k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
+	k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_INVALIDATE;
+
+	commp->nvmrsnd_rkeyvalid = true;
 
 skip_ksgl:
 
 	c->nvmrsb_nvmf.nvmf_cid = commp->nvmrsnd_cid;
 	dmaddr = ib_dma_map_single(ibd, c, sizeof(*c), DMA_TO_DEVICE);
 	if (ib_dma_mapping_error(ibd, dmaddr) != 0) {
-		ERRSPEW("ib_dma_map_single() failed for #%d\n", count);
+		ERRSPEW("ib_dma_map_single() failed for %p\n", c);
 		error = ENOENT;
 		goto out;
 	}
@@ -848,7 +926,7 @@ out:
 		error = retval;                                            \
 		goto out;                                                  \
 	}                                                                  \
-	DBGSPEW("Successfully invoked %s()\n", routine);                   \
+	/* DBGSPEW("Successfully invoked %s()\n", routine); */             \
 	mtx_lock(&cntrlr->nvmrctr_lock);                                   \
 	if (q->nvmrq_state == (pre_state)) {                               \
 		DBGSPEW("Sleeping with message \"%s\"\n",                  \
@@ -1256,7 +1334,10 @@ typedef enum {
 #define MAX_NVMR_PROP_GET 0x12FFU
 #define IDENTIFYLEN 4096
 
-static int
+int
+nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
+    uint8_t cns, void *datap, int datalen);
+int
 nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
     uint8_t cns, void *datap, int datalen)
 {
@@ -1446,7 +1527,10 @@ static struct cdevsw nvmr_ctrlr_cdevsw = {
 #define NVMR_STRING "NVMe over RDMA"
 
 
-static int
+int
+nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
+    nvmr_cntrlr_t *retcntrlrp);
+int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp)
 {
@@ -1631,7 +1715,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	}
 
 	retval = nvmr_admin_identify(cntrlr, 0, 0, 1,
-	    &cntrlr->nvmrctr_nvmec.cdata, IDENTIFYLEN);
+	    &cntrlr->nvmrctr_nvmec.cdata, sizeof(cntrlr->nvmrctr_nvmec.cdata));
 	if (retval != 0) {
 		error = retval;
 		ERRSPEW("nvmr_admin_identify() failed:%d\n", retval);
