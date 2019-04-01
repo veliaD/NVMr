@@ -89,7 +89,7 @@ nvme_ctrlr_allocate_bar(struct nvme_pci_controller *pctrlr)
 static int
 nvme_ctrlr_construct_admin_qpair(struct nvme_pci_controller *pctrlr)
 {
-	struct nvme_qpair	*qpair;
+	struct nvme_pci_qpair	*qpair;
 	uint32_t		num_entries;
 	int			error;
 
@@ -125,7 +125,7 @@ nvme_ctrlr_construct_admin_qpair(struct nvme_pci_controller *pctrlr)
 static int
 nvme_ctrlr_construct_io_qpairs(struct nvme_pci_controller *pctrlr)
 {
-	struct nvme_qpair	*qpair;
+	struct nvme_pci_qpair	*qpair;
 	uint32_t		cap_lo;
 	uint16_t		mqes;
 	int			i, error, num_entries, num_trackers;
@@ -170,7 +170,7 @@ nvme_ctrlr_construct_io_qpairs(struct nvme_pci_controller *pctrlr)
 	 */
 	pctrlr->ctrlr.num_cpus_per_ioq = howmany(mp_ncpus, pctrlr->ctrlr.num_io_queues);
 
-	pctrlr->ioq = malloc(pctrlr->ctrlr.num_io_queues * sizeof(struct nvme_qpair),
+	pctrlr->ioq = malloc(pctrlr->ctrlr.num_io_queues * sizeof(struct nvme_pci_qpair),
 	    M_NVME, M_ZERO | M_WAITOK);
 
 	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++) {
@@ -211,10 +211,10 @@ nvme_ctrlr_fail(struct nvme_pci_controller *pctrlr)
 
 	CONFIRMPCIECONTROLLER;
 	pctrlr->ctrlr.is_failed = TRUE;
-	nvme_qpair_fail(&pctrlr->adminq);
+	nvmp_qpair_fail(&pctrlr->adminq);
 	if (pctrlr->ioq != NULL) {
 		for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
-			nvme_qpair_fail(&pctrlr->ioq[i]);
+			nvmp_qpair_fail(&pctrlr->ioq[i]);
 	}
 	nvme_notify_fail_consumers(pctrlr);
 }
@@ -242,7 +242,7 @@ nvme_ctrlr_fail_req_task(void *arg, int pending)
 	while ((req = STAILQ_FIRST(&pctrlr->ctrlr.fail_req)) != NULL) {
 		STAILQ_REMOVE_HEAD(&pctrlr->ctrlr.fail_req, stailq);
 		mtx_unlock(&pctrlr->ctrlr.lockc);
-		nvme_qpair_manual_complete_request(req->qpair, req,
+		nvme_qpair_manual_complete_request(req->rqpair, req,
 		    NVME_SCT_GENERIC, NVME_SC_ABORTED_BY_REQUEST, TRUE);
 		mtx_lock(&pctrlr->ctrlr.lockc);
 	}
@@ -358,7 +358,7 @@ nvme_ctrlr_enable(struct nvme_pci_controller *pctrlr)
 	DELAY(5000);
 
 	/* acqs and asqs are 0-based. */
-	qsize = pctrlr->adminq.num_entries - 1;
+	qsize = pctrlr->adminq.gqpair.num_qentries - 1;
 
 	aqa = 0;
 	aqa = (qsize & NVME_AQA_REG_ACQS_MASK) << NVME_AQA_REG_ACQS_SHIFT;
@@ -497,7 +497,7 @@ static int
 nvme_ctrlr_create_qpairs(struct nvme_pci_controller *pctrlr)
 {
 	struct nvme_completion_poll_status	status;
-	struct nvme_qpair			*qpair;
+	struct nvme_pci_qpair			*qpair;
 	int					i;
 
 	CONFIRMPCIECONTROLLER;
@@ -515,7 +515,7 @@ nvme_ctrlr_create_qpairs(struct nvme_pci_controller *pctrlr)
 		}
 
 		status.done = 0;
-		nvme_ctrlr_cmd_create_io_sq(qpair->pctrlr, qpair,
+		nvme_ctrlr_cmd_create_io_sq(qpair->qpctrlr, qpair,
 		    nvme_completion_poll_cb, &status);
 		while (!atomic_load_acq_int(&status.done))
 			pause("nvme", 1);
@@ -529,13 +529,14 @@ nvme_ctrlr_create_qpairs(struct nvme_pci_controller *pctrlr)
 }
 
 static int
-nvme_ctrlr_destroy_qpair(struct nvme_pci_controller *pctrlr, struct nvme_qpair *qpair)
+nvme_ctrlr_destroy_qpair(struct nvme_pci_controller *pctrlr,
+    struct nvme_pci_qpair *pqpair)
 {
 	struct nvme_completion_poll_status	status;
 
 	CONFIRMPCIECONTROLLER;
 	status.done = 0;
-	nvme_ctrlr_cmd_delete_io_sq(pctrlr, qpair,
+	nvme_ctrlr_cmd_delete_io_sq(pctrlr, pqpair,
 	    nvme_completion_poll_cb, &status);
 	while (!atomic_load_acq_int(&status.done))
 		pause("nvme", 1);
@@ -545,7 +546,7 @@ nvme_ctrlr_destroy_qpair(struct nvme_pci_controller *pctrlr, struct nvme_qpair *
 	}
 
 	status.done = 0;
-	nvme_ctrlr_cmd_delete_io_cq(pctrlr, qpair,
+	nvme_ctrlr_cmd_delete_io_cq(pctrlr, pqpair,
 	    nvme_completion_poll_cb, &status);
 	while (!atomic_load_acq_int(&status.done))
 		pause("nvme", 1);
@@ -981,11 +982,11 @@ nvme_ctrlr_poll(struct nvme_pci_controller *pctrlr)
 	int i;
 
 	CONFIRMPCIECONTROLLER;
-	nvme_qpair_process_completions(&pctrlr->adminq);
+	nvmp_qpair_process_completions(&pctrlr->adminq.gqpair);
 
 	for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
 		if (pctrlr->ioq && pctrlr->ioq[i].cpl)
-			nvme_qpair_process_completions(&pctrlr->ioq[i]);
+			nvmp_qpair_process_completions(&pctrlr->ioq[i].gqpair);
 }
 
 /*
@@ -1443,7 +1444,7 @@ void
 nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
     struct nvme_request *req)
 {
-	struct nvme_qpair       *qpair;
+	struct nvme_pci_qpair       *qpair;
 	struct nvme_pci_controller *pctrlr;
 
 	pctrlr = ctrlr->nvmec_tsp;

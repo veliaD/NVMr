@@ -1,0 +1,5 @@
+#! /usr/local/bin/bash
+
+source `dirname ${0}`/Krnl.include
+
+cp `find ${MODS_FIND_LOCATION} -type f -name '*.ko' -print` /boot/kernel/./

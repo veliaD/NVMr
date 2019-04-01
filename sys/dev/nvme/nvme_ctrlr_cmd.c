@@ -78,7 +78,7 @@ nvme_ctrlr_cmd_identify_namespace(struct nvme_pci_controller *pctrlr, uint32_t n
 
 void
 nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
-    struct nvme_qpair *io_que, uint16_t vector, nvme_cb_fn_t cb_fn,
+    struct nvme_pci_qpair *io_que, uint16_t vector, nvme_cb_fn_t cb_fn,
     void *cb_arg)
 {
 	struct nvme_request *req;
@@ -94,7 +94,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
 	 * TODO: create a create io completion queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(((io_que->num_entries-1) << 16) | io_que->id);
+	cmd->cdw10 = htole32(((io_que->gqpair.num_qentries-1) << 16) | io_que->gqpair.qid);
 	/* 0x3 = interrupts enabled | physically contiguous */
 	cmd->cdw11 = htole32((vector << 16) | 0x3);
 	cmd->prp1 = htole64(io_que->cpl_bus_addr);
@@ -104,7 +104,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
 
 void
 nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
-    struct nvme_qpair *io_que, nvme_cb_fn_t cb_fn, void *cb_arg)
+    struct nvme_pci_qpair *io_que, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 	struct nvme_command *cmd;
@@ -119,9 +119,9 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
 	 * TODO: create a create io submission queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(((io_que->num_entries-1) << 16) | io_que->id);
+	cmd->cdw10 = htole32(((io_que->gqpair.num_qentries-1) << 16) | io_que->gqpair.qid);
 	/* 0x1 = physically contiguous */
-	cmd->cdw11 = htole32((io_que->id << 16) | 0x1);
+	cmd->cdw11 = htole32((io_que->gqpair.qid << 16) | 0x1);
 	cmd->prp1 = htole64(io_que->cmd_bus_addr);
 
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
@@ -129,7 +129,7 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
 
 void
 nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
-    struct nvme_qpair *io_que, nvme_cb_fn_t cb_fn, void *cb_arg)
+    struct nvme_pci_qpair *io_que, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 	struct nvme_command *cmd;
@@ -144,14 +144,14 @@ nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
 	 * TODO: create a delete io completion queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(io_que->id);
+	cmd->cdw10 = htole32(io_que->gqpair.qid);
 
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
 void
 nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
-    struct nvme_qpair *io_que, nvme_cb_fn_t cb_fn, void *cb_arg)
+    struct nvme_pci_qpair *io_que, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 	struct nvme_command *cmd;
@@ -166,7 +166,7 @@ nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
 	 * TODO: create a delete io submission queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(io_que->id);
+	cmd->cdw10 = htole32(io_que->gqpair.qid);
 
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }

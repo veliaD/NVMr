@@ -124,10 +124,17 @@ struct nvme_completion_poll_status {
 #endif
 #define NVME_REQUEST_CCB        5
 
+struct nvme_qpair {
+	uint32_t		qid;
+	uint32_t		num_qentries;
+	boolean_t		qis_enabled;
+	struct mtx		qlock __aligned(CACHE_LINE_SIZE);
+};
+
 struct nvme_request {
 
 	struct nvme_command		cmd;
-	struct nvme_qpair		*qpair;
+	struct nvme_qpair		*rqpair;
 	union {
 		void			*payload;
 		struct bio		*bio;
@@ -145,7 +152,7 @@ struct nvme_tracker {
 
 	TAILQ_ENTRY(nvme_tracker)	tailq;
 	struct nvme_request		*req;
-	struct nvme_qpair		*qpair;
+	struct nvme_pci_qpair		*qpair;
 	struct callout			timer;
 	bus_dmamap_t			payload_dma_map;
 	uint16_t			cid;
@@ -154,10 +161,9 @@ struct nvme_tracker {
 	bus_addr_t			prp_bus_addr;
 };
 
-struct nvme_qpair {
+struct nvme_pci_qpair {
 
-	struct nvme_pci_controller	*pctrlr;
-	uint32_t		id;
+	struct nvme_pci_controller	*qpctrlr;
 	uint32_t		phase;
 
 	uint16_t		vector;
@@ -165,7 +171,6 @@ struct nvme_qpair {
 	struct resource		*res;
 	void 			*tag;
 
-	uint32_t		num_entries;
 	uint32_t		num_trackers;
 	uint32_t		sq_tdbl_off;
 	uint32_t		cq_hdbl_off;
@@ -193,10 +198,7 @@ struct nvme_qpair {
 
 	struct nvme_tracker	**act_tr;
 
-	boolean_t		is_enabled;
-
-	struct mtx		lock __aligned(CACHE_LINE_SIZE);
-
+	struct nvme_qpair	gqpair;
 } __aligned(CACHE_LINE_SIZE);
 
 #define NVMP_STRING "NVMe over PCIe"
@@ -241,8 +243,8 @@ struct nvme_pci_controller {
 	/** interrupt coalescing threshold */
 	uint32_t		int_coal_threshold;
 
-	struct nvme_qpair	adminq;
-	struct nvme_qpair	*ioq;
+	struct nvme_pci_qpair	adminq;
+	struct nvme_pci_qpair	*ioq;
 
 	struct nvme_registers	*regs;
 
@@ -308,16 +310,16 @@ void	nvme_ctrlr_cmd_get_firmware_page(struct nvme_pci_controller *pctrlr,
 					 nvme_cb_fn_t cb_fn,
 					 void *cb_arg);
 void	nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
-				    struct nvme_qpair *io_que, uint16_t vector,
+				    struct nvme_pci_qpair *io_que, uint16_t vector,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
-				    struct nvme_qpair *io_que,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
-				    struct nvme_qpair *io_que,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
-				    struct nvme_qpair *io_que,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_set_num_queues(struct nvme_pci_controller *pctrlr,
 				      uint32_t num_queues, nvme_cb_fn_t cb_fn,
@@ -344,29 +346,29 @@ void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 void	nvme_ctrlr_post_failed_request(struct nvme_pci_controller *pctrlr,
 				       struct nvme_request *req);
 
-int	nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
+int	nvme_qpair_construct(struct nvme_pci_qpair *qpair, uint32_t id,
 			     uint16_t vector, uint32_t num_entries,
 			     uint32_t num_trackers,
 			     struct nvme_pci_controller *pctrlr);
-void	nvme_qpair_submit_tracker(struct nvme_qpair *qpair,
+void	nvme_qpair_submit_tracker(struct nvme_pci_qpair *qpair,
 				  struct nvme_tracker *tr);
-bool	nvme_qpair_process_completions(struct nvme_qpair *qpair);
-void	nvme_qpair_submit_request(struct nvme_qpair *qpair,
+bool	nvmp_qpair_process_completions(struct nvme_qpair *qpair);
+void	nvme_qpair_submit_request(struct nvme_pci_qpair *qpair,
 				  struct nvme_request *req);
-void	nvme_qpair_reset(struct nvme_qpair *qpair);
-void	nvme_qpair_fail(struct nvme_qpair *qpair);
+void	nvme_qpair_reset(struct nvme_pci_qpair *qpair);
+void	nvmp_qpair_fail(struct nvme_pci_qpair *qpair);
 void	nvme_qpair_manual_complete_request(struct nvme_qpair *qpair,
 					   struct nvme_request *req,
 					   uint32_t sct, uint32_t sc,
 					   boolean_t print_on_error);
 
-void	nvme_admin_qpair_enable(struct nvme_qpair *qpair);
-void	nvme_admin_qpair_disable(struct nvme_qpair *qpair);
-void	nvme_admin_qpair_destroy(struct nvme_qpair *qpair);
+void	nvme_admin_qpair_enable(struct nvme_pci_qpair *qpair);
+void	nvme_admin_qpair_disable(struct nvme_pci_qpair *qpair);
+void	nvme_admin_qpair_destroy(struct nvme_pci_qpair *qpair);
 
-void	nvme_io_qpair_enable(struct nvme_qpair *qpair);
-void	nvme_io_qpair_disable(struct nvme_qpair *qpair);
-void	nvme_io_qpair_destroy(struct nvme_qpair *qpair);
+void	nvme_io_qpair_enable(struct nvme_pci_qpair *qpair);
+void	nvme_io_qpair_disable(struct nvme_pci_qpair *qpair);
+void	nvme_io_qpair_destroy(struct nvme_pci_qpair *qpair);
 
 int	nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 			  struct nvme_pci_controller *pctrlr);

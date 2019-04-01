@@ -58,23 +58,23 @@ SYSCTL_INT(_hw_nvme, OID_AUTO, use_nvd, CTLFLAG_RDTUN,
 #endif
 
 static void
-nvme_dump_queue(struct nvme_qpair *qpair)
+nvme_dump_queue(struct nvme_pci_qpair *qpair)
 {
 	struct nvme_completion *cpl;
 	struct nvme_command *cmd;
 	int i;
 
-	printf("id:%04Xh phase:%d\n", qpair->id, qpair->phase);
+	printf("id:%04Xh phase:%d\n", qpair->gqpair.qid, qpair->phase);
 
 	printf("Completion queue:\n");
-	for (i = 0; i < qpair->num_entries; i++) {
+	for (i = 0; i < qpair->gqpair.num_qentries; i++) {
 		cpl = &qpair->cpl[i];
 		printf("%05d: ", i);
 		nvme_dump_completion(cpl);
 	}
 
 	printf("Submission queue:\n");
-	for (i = 0; i < qpair->num_entries; i++) {
+	for (i = 0; i < qpair->gqpair.num_qentries; i++) {
 		cmd = &qpair->cmd[i];
 		printf("%05d: ", i);
 		nvme_dump_command(cmd);
@@ -85,7 +85,7 @@ nvme_dump_queue(struct nvme_qpair *qpair)
 static int
 nvme_sysctl_dump_debug(SYSCTL_HANDLER_ARGS)
 {
-	struct nvme_qpair 	*qpair = arg1;
+	struct nvme_pci_qpair 	*qpair = arg1;
 	uint32_t		val = 0;
 
 	int error = sysctl_handle_int(oidp, &val, 0, req);
@@ -160,7 +160,7 @@ nvme_sysctl_timeout_period(SYSCTL_HANDLER_ARGS)
 }
 
 static void
-nvme_qpair_reset_stats(struct nvme_qpair *qpair)
+nvme_qpair_reset_stats(struct nvme_pci_qpair *qpair)
 {
 
 	qpair->num_cmds = 0;
@@ -223,13 +223,13 @@ nvme_sysctl_reset_stats(SYSCTL_HANDLER_ARGS)
 
 
 static void
-nvme_sysctl_initialize_queue(struct nvme_qpair *qpair,
+nvme_sysctl_initialize_queue(struct nvme_pci_qpair *qpair,
     struct sysctl_ctx_list *ctrlr_ctx, struct sysctl_oid *que_tree)
 {
 	struct sysctl_oid_list	*que_list = SYSCTL_CHILDREN(que_tree);
 
 	SYSCTL_ADD_UINT(ctrlr_ctx, que_list, OID_AUTO, "num_entries",
-	    CTLFLAG_RD, &qpair->num_entries, 0,
+	    CTLFLAG_RD, &qpair->gqpair.num_qentries, 0,
 	    "Number of entries in hardware queue");
 	SYSCTL_ADD_UINT(ctrlr_ctx, que_list, OID_AUTO, "num_trackers",
 	    CTLFLAG_RD, &qpair->num_trackers, 0,

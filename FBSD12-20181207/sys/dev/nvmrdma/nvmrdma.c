@@ -277,7 +277,7 @@ typedef enum {
 
 typedef struct {
 	struct rdma_cm_id             *nvmrq_cmid;
-	struct nvmr_cntrlr_tag        *nvmrq_cntrlr; /* Owning Controller */
+	struct nvmr_cntrlr_tag        *nvmrq_cntrlr; /* Owning Controller     */
 	struct ib_pd                  *nvmrq_ibpd;
 	struct ib_cq                  *nvmrq_ibcq;
 	struct ib_qp                  *nvmrq_ibqp;
@@ -287,10 +287,10 @@ typedef struct {
 	STAILQ_HEAD(, nvmr_ncmplcont)  nvmrq_cmpls;
 	volatile nvmr_queue_state_t    nvmrq_state;  /* nvmrctr_lock protects */
 	int                            nvmrq_last_cm_status;
-	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count */
-	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count */
+	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count    */
+	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count    */
 
-	nvmr_ncommcon_t               *nvmrq_next2use;
+	nvmr_ncommcon_t               *nvmrq_next2use; /* !! REMOVE THIS !!   */
 } *nvmr_queue_t;
 
 typedef struct nvmr_cntrlr_tag {

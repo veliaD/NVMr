@@ -3,6 +3,7 @@
 source `dirname ${0}`/Krnl.include
 
 ( (cd ${VELPATHTOKRNSRCS} && make -j36 KERNFAST= buildkernel ) \
-     > ${BLDERROUT} 2>&1 || (less '+error: ' ${BLDERROUT} 2>&1; \
+     > ${BLDERROUT} 2>&1 || (less '+/error: ' ${BLDERROUT} 2>&1; \
          exit 1) && tail -n 20 $BLDERROUT )
 
+echo ${MAKEOBJDIRPREFIX}/${HEAD}/`uname -m`.`uname -m`/sys/`uname -i`

@@ -7,4 +7,5 @@ export NSTLERROUT="$TEMP/installKrnl.errout"
 export KERNCONF=VEL01-DEBUG
 export HEAD=${VELPATHTOKRNSRCS}
 export KERN_CONFIG="VEL01-DEBUG"
+export MODS_FIND_LOCATION=${MAKEOBJDIRPREFIX}/${HEAD}/`uname -m`.`uname -m`/sys/`uname -i`
 export MODULES_OVERRIDE="rdma ibcore linuxkpi mlx5 mlx5ib mlx5en nvd nvme nvmrdma"
