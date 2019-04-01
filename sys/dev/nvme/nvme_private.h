@@ -124,30 +124,6 @@ struct nvme_completion_poll_status {
 #endif
 #define NVME_REQUEST_CCB        5
 
-struct nvme_qpair {
-	uint32_t		qid;
-	uint32_t		num_qentries;
-	boolean_t		qis_enabled;
-	struct mtx		qlock __aligned(CACHE_LINE_SIZE);
-};
-
-struct nvme_request {
-
-	struct nvme_command		cmd;
-	struct nvme_qpair		*rqpair;
-	union {
-		void			*payload;
-		struct bio		*bio;
-	} u;
-	uint32_t			type;
-	uint32_t			payload_size;
-	boolean_t			timeout;
-	nvme_cb_fn_t			cb_fn;
-	void				*cb_arg;
-	int32_t				retries;
-	STAILQ_ENTRY(nvme_request)	stailq;
-};
-
 struct nvme_tracker {
 
 	TAILQ_ENTRY(nvme_tracker)	tailq;
@@ -205,6 +181,8 @@ struct nvme_pci_qpair {
 #define CONFIRMPCIECONTROLLER KASSERT(strncmp(pctrlr->very_first_field, \
     NVMP_STRING, sizeof(pctrlr->very_first_field)) == 0, \
     ("%s@%d NOT a PCIe controller!\n", __func__, __LINE__))
+#define KASSERT_NVMP_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_PCI, \
+    ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
 /*
  * One of these per allocated PCI device.
  */
@@ -339,10 +317,10 @@ int	nvme_ctrlr_hw_reset(struct nvme_pci_controller *pctrlr);
 void	nvme_ctrlr_reset(struct nvme_pci_controller *pctrlr);
 /* pctrlr defined as void * to allow use with config_intrhook. */
 void	nvme_ctrlr_start_config_hook(void *ctrlr_arg);
-void	nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
+void	nvmp_submit_adm_request(struct nvme_controller *ctrlr,
 					struct nvme_request *req);
-void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
-				     struct nvme_request *req);
+void	nvmp_submit_io_request(struct nvme_controller *ctrlr,
+					struct nvme_request *req);
 void	nvme_ctrlr_post_failed_request(struct nvme_pci_controller *pctrlr,
 				       struct nvme_request *req);
 
@@ -378,6 +356,9 @@ void	nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *pctrlr);
 
 void	nvme_dump_command(struct nvme_command *cmd);
 void	nvme_dump_completion(struct nvme_completion *cpl);
+
+#define nvme_ctrlr_submit_admin_request(c,r) (c)->nvmec_subadmreq((c), (r))
+#define nvme_ctrlr_submit_io_request(c,r) (c)->nvmec_subioreq((c), (r))
 
 static __inline void
 nvme_single_map(void *arg, bus_dma_segment_t *seg, int nseg, int error)

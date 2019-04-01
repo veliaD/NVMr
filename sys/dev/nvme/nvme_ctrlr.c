@@ -653,6 +653,7 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 	int i;
 	struct nvme_pci_controller *pctrlr;
 
+	KASSERT_NVMP_CNTRLR(aer->nvmea_ctrlrp);
 	pctrlr = aer->nvmea_ctrlrp->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
 
@@ -740,6 +741,7 @@ nvme_ctrlr_async_event_cb(void *arg, const struct nvme_completion *cpl)
 	struct nvme_async_event_request	*aer = arg;
 	struct nvme_pci_controller *pctrlr;
 
+	KASSERT_NVMP_CNTRLR(aer->nvmea_ctrlrp);
 	pctrlr = aer->nvmea_ctrlrp->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
 
@@ -1067,6 +1069,7 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 
 	struct nvme_pci_controller *pctrlr;
 
+	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
 
 	CONFIRMPCIECONTROLLER;
@@ -1430,23 +1433,23 @@ nvme_ctrlr_shutdown(struct nvme_pci_controller *pctrlr)
 }
 
 void
-nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
-    struct nvme_request *req)
+nvmp_submit_adm_request(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
 	struct nvme_pci_controller *pctrlr;
 
+	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
 	nvme_qpair_submit_request(&pctrlr->adminq, req);
 }
 
 void
-nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
-    struct nvme_request *req)
+nvmp_submit_io_request(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
 	struct nvme_pci_qpair       *qpair;
 	struct nvme_pci_controller *pctrlr;
 
+	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
 	qpair = &pctrlr->ioq[curcpu / pctrlr->ctrlr.num_cpus_per_ioq];

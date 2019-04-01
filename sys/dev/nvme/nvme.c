@@ -319,7 +319,10 @@ nvme_attach(device_t dev)
 	uint16_t		subdevice;
 
 	pctrlr->ctrlr.nvmec_tsp = pctrlr;
+	pctrlr->ctrlr.nvmec_ttype = NVMET_PCI;
 	pctrlr->ctrlr.nvmec_delist = &nvmp_delist_cb;
+	pctrlr->ctrlr.nvmec_subadmreq = &nvmp_submit_adm_request;
+	pctrlr->ctrlr.nvmec_subioreq = &nvmp_submit_io_request;
 	strncpy(pctrlr->very_first_field, NVMP_STRING, NVME_VFFSTRSZ);
 
 	devid = pci_get_devid(dev);
@@ -405,6 +408,7 @@ nvme_notify(struct nvme_consumer *cons,
 	if (!ctrlr->is_initialized)
 		return;
 
+	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
 	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
 

@@ -460,7 +460,10 @@ nvme_qpair_manual_complete_request(struct nvme_qpair *qpair,
 	error = nvme_completion_is_error(&cpl);
 
 	if (error && print_on_error) {
+		KASSERT(qpair->qttype == NVMET_PCI, ("%s@%d q:%p t:%d\n",
+		    __func__, __LINE__, qpair, qpair->qttype));
 		pqpair = __containerof(qpair, struct nvme_pci_qpair, gqpair);
+
 		nvme_qpair_print_command(pqpair, &req->cmd);
 		nvme_qpair_print_completion(pqpair, &cpl);
 	}
@@ -479,6 +482,8 @@ nvmp_qpair_process_completions(struct nvme_qpair *qpair)
 	struct nvme_completion	cpl;
 	int done = 0;
 
+	KASSERT(qpair->qttype == NVMET_PCI, ("%s@%d q:%p t:%d\n", __func__,
+	    __LINE__, qpair, qpair->qttype));
 	pqpair = __containerof(qpair, struct nvme_pci_qpair, gqpair);
 	pqpair->num_intr_handler_calls++;
 
@@ -547,6 +552,7 @@ nvme_qpair_construct(struct nvme_pci_qpair *qpair, uint32_t id,
 	int			i, err;
 
 	CONFIRMPCIECONTROLLER;
+	qpair->gqpair.qttype = NVMET_PCI;
 	qpair->gqpair.qid = id;
 	qpair->vector = vector;
 	qpair->gqpair.num_qentries = num_entries;

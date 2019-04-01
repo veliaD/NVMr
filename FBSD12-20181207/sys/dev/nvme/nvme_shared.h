@@ -486,6 +486,11 @@ struct nvme_namespace {
 	struct mtx			lock;
 };
 
+enum nvme_transport {
+	NVMET_PCI  = 0xBF83E31D,
+	NVMET_RDMA = 0x92A3317C,
+};
+
 struct nvme_controller {
 	struct mtx		lockc;
 
@@ -536,11 +541,42 @@ struct nvme_controller {
 	/** timeout period in seconds */
 	uint32_t		timeout_period;
 
+	enum nvme_transport		nvmec_ttype;
 	void				*nvmec_tsp;
 	void 				(*nvmec_delist)(struct nvme_controller *);
+	void 				(*nvmec_subadmreq)(struct nvme_controller *, struct nvme_request *);
+	void 				(*nvmec_subioreq)(struct nvme_controller *, struct nvme_request *);
 };
 
 
 void nvme_register_controller(struct nvme_controller *);
 void nvme_unregister_controller(struct nvme_controller *);
+
+typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
+
+struct nvme_qpair {
+	uint32_t		qid;
+	uint32_t		num_qentries;
+	boolean_t		qis_enabled;
+	struct mtx		qlock __aligned(CACHE_LINE_SIZE);
+	enum nvme_transport	qttype;
+};
+
+struct nvme_request {
+
+	struct nvme_command		cmd;
+	struct nvme_qpair		*rqpair;
+	union {
+		void			*payload;
+		struct bio		*bio;
+	} u;
+	uint32_t			type;
+	uint32_t			payload_size;
+	boolean_t			timeout;
+	nvme_cb_fn_t			cb_fn;
+	void				*cb_arg;
+	int32_t				retries;
+	STAILQ_ENTRY(nvme_request)	stailq;
+};
+
 #endif /* __NVME_SHARED_H__ */
