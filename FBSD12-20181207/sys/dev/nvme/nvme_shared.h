@@ -44,6 +44,8 @@
 #define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
 #define ERRSPEW(format, ...) SPEWCMN("ERR|", format, ## __VA_ARGS__)
 #define DBGSPEW(format, ...) SPEWCMN("DBG|", format, ## __VA_ARGS__)
+#define NVMESPEW(c, format, ...) printf("nvme%d:<%s@%d> " format, \
+    (c)->nvmec_unit, __func__, __LINE__, ## __VA_ARGS__)
 
 #define NVME_DEFAULT_TIMEOUT_PERIOD	(30)    /* in seconds */
 #define NVME_MIN_TIMEOUT_PERIOD		(5)
@@ -487,7 +489,7 @@ struct nvme_namespace {
 };
 
 enum nvme_transport {
-	NVMET_PCI  = 0xBF83E31D,
+	NVMET_PCIE = 0xBF83E31D,
 	NVMET_RDMA = 0x92A3317C,
 };
 
@@ -542,6 +544,7 @@ struct nvme_controller {
 	uint32_t		timeout_period;
 
 	enum nvme_transport		nvmec_ttype;
+	int				nvmec_unit;
 	void				*nvmec_tsp;
 	void 				(*nvmec_delist)(struct nvme_controller *);
 	void 				(*nvmec_subadmreq)(struct nvme_controller *, struct nvme_request *);
@@ -560,6 +563,7 @@ struct nvme_qpair {
 	boolean_t		qis_enabled;
 	struct mtx		qlock __aligned(CACHE_LINE_SIZE);
 	enum nvme_transport	qttype;
+	struct nvme_controller  *gqctrlr;
 };
 
 struct nvme_request {
@@ -579,4 +583,7 @@ struct nvme_request {
 	STAILQ_ENTRY(nvme_request)	stailq;
 };
 
+int nvme_ctrlr_construct_namespaces(struct nvme_controller *ctrlr);
+
+void nvme_ctrlr_fail_req_task(void *arg, int pending);
 #endif /* __NVME_SHARED_H__ */

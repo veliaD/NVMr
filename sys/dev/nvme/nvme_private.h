@@ -181,7 +181,7 @@ struct nvme_pci_qpair {
 #define CONFIRMPCIECONTROLLER KASSERT(strncmp(pctrlr->very_first_field, \
     NVMP_STRING, sizeof(pctrlr->very_first_field)) == 0, \
     ("%s@%d NOT a PCIe controller!\n", __func__, __LINE__))
-#define KASSERT_NVMP_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_PCI, \
+#define KASSERT_NVMP_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_PCIE, \
     ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
 /*
  * One of these per allocated PCI device.
@@ -232,6 +232,8 @@ struct nvme_pci_controller {
 	struct nvme_controller	ctrlr;
 };
 
+#define GCNTRLR2PCI(c)  __containerof((c), struct nvme_pci_controller, ctrlr)
+
 #define nvme_mmio_offsetof(reg)						       \
 	offsetof(struct nvme_registers, reg)
 
@@ -257,15 +259,15 @@ struct nvme_pci_controller {
 #define mb()	__asm volatile("mfence" ::: "memory")
 #endif
 
-#define nvme_printf(pctrlr, fmt, args...)	\
-    device_printf(pctrlr->dev, fmt, ##args)
+#define nvme_printf(ctrlr, fmt, args...)	\
+    NVMESPEW(ctrlr, fmt, ##args)
 
 void	nvme_ns_test(struct nvme_namespace *ns, u_long cmd, caddr_t arg);
 
 void	nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr,
 					   void *payload,
 					   nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_identify_namespace(struct nvme_pci_controller *pctrlr,
+void	nvme_ctrlr_cmd_identify_namespace(struct nvme_controller *ctrlr,
 					  uint32_t nsid, void *payload,
 					  nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_set_interrupt_coalescing(struct nvme_pci_controller *pctrlr,
@@ -349,7 +351,8 @@ void	nvme_io_qpair_disable(struct nvme_pci_qpair *qpair);
 void	nvme_io_qpair_destroy(struct nvme_pci_qpair *qpair);
 
 int	nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
-			  struct nvme_pci_controller *pctrlr);
+			  struct nvme_controller *ctrlr);
+
 void	nvme_ns_destruct(struct nvme_namespace *ns);
 
 void	nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *pctrlr);

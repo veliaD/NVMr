@@ -797,7 +797,7 @@ struct nvme_pci_controller;
 struct nvme_consumer;
 
 typedef void *(*nvme_cons_ns_fn_t)(struct nvme_namespace *, void *);
-typedef void *(*nvme_cons_ctrlr_fn_t)(struct nvme_pci_controller *);
+typedef void *(*nvme_cons_ctrlr_fn_t)(struct nvme_controller *);
 typedef void (*nvme_cons_async_fn_t)(void *, const struct nvme_completion *,
 				     uint32_t, void *, uint32_t);
 typedef void (*nvme_cons_fail_fn_t)(void *);

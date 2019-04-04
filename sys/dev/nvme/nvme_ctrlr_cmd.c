@@ -55,13 +55,12 @@ nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *pay
 }
 
 void
-nvme_ctrlr_cmd_identify_namespace(struct nvme_pci_controller *pctrlr, uint32_t nsid,
+nvme_ctrlr_cmd_identify_namespace(struct nvme_controller *ctrlr, uint32_t nsid,
 	void *payload, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
-	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_vaddr(payload,
 	    sizeof(struct nvme_namespace_data), cb_fn, cb_arg);
 
@@ -73,7 +72,7 @@ nvme_ctrlr_cmd_identify_namespace(struct nvme_pci_controller *pctrlr, uint32_t n
 	 */
 	cmd->nsid = htole32(nsid);
 
-	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
+	nvme_ctrlr_submit_admin_request(ctrlr, req);
 }
 
 void
@@ -242,14 +241,14 @@ nvme_ctrlr_cmd_set_interrupt_coalescing(struct nvme_pci_controller *pctrlr,
 
 	CONFIRMPCIECONTROLLER;
 	if ((microseconds/100) >= 0x100) {
-		nvme_printf(pctrlr, "invalid coal time %d, disabling\n",
+		nvme_printf(&(pctrlr->ctrlr), "invalid coal time %d, disabling\n",
 		    microseconds);
 		microseconds = 0;
 		threshold = 0;
 	}
 
 	if (threshold >= 0x100) {
-		nvme_printf(pctrlr, "invalid threshold %d, disabling\n",
+		nvme_printf(&(pctrlr->ctrlr), "invalid threshold %d, disabling\n",
 		    threshold);
 		threshold = 0;
 		microseconds = 0;

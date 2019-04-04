@@ -276,14 +276,17 @@ nvme_sim_poll(struct cam_sim *sim)
 }
 
 static void *
-nvme_sim_new_controller(struct nvme_pci_controller *pctrlr)
+nvme_sim_new_controller(struct nvme_controller *ctrlr)
 {
+	struct nvme_pci_controller *pctrlr;
 	struct nvme_sim_softc *sc;
 	struct cam_devq *devq;
 	int max_trans;
 
+	KASSERT_NVMP_CNTRLR(ctrlr);
+	pctrlr = GCNTRLR2PCI(ctrlr);
 	CONFIRMPCIECONTROLLER;
-	max_trans = pctrlr->ctrlr.max_hw_pend_io;
+	max_trans = ctrlr->max_hw_pend_io;
 	devq = cam_simq_alloc(max_trans);
 	if (devq == NULL)
 		return (NULL);
@@ -292,8 +295,8 @@ nvme_sim_new_controller(struct nvme_pci_controller *pctrlr)
 	sc->s_ctrlr = pctrlr;
 
 	sc->s_sim = cam_sim_alloc(nvme_sim_action, nvme_sim_poll,
-	    "nvme", sc, device_get_unit(pctrlr->dev),
-	    &pctrlr->ctrlr.lockc, max_trans, max_trans, devq);
+	    "nvme", sc, ctrlr->nvmec_unit,
+	    &ctrlr->lockc, max_trans, max_trans, devq);
 	if (sc->s_sim == NULL) {
 		printf("Failed to allocate a sim\n");
 		cam_simq_free(devq);

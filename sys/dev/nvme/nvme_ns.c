@@ -500,7 +500,7 @@ nvme_ns_bio_process(struct nvme_namespace *ns, struct bio *bp,
 
 int
 nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
-    struct nvme_pci_controller *pctrlr)
+    struct nvme_controller *ctrlr)
 {
 	struct make_dev_args                    md_args;
 	struct nvme_completion_poll_status	status;
@@ -511,10 +511,13 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	uint8_t					flbas_fmt;
 	uint8_t					vwc_present;
 
-	struct nvme_controller *ctrlr;
+	struct nvme_pci_controller *pctrlr;
 
-	CONFIRMPCIECONTROLLER;
-	ctrlr = &pctrlr->ctrlr;
+	if (ctrlr->nvmec_ttype == NVMET_PCIE) {
+		pctrlr = GCNTRLR2PCI(ctrlr);
+		CONFIRMPCIECONTROLLER;
+	}
+
 	ns->nvmes_ctrlr = ctrlr;
 	ns->id = id;
 	ns->stripesize = 0;
@@ -524,16 +527,19 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	 * that improves performance.  If present use for the stripe size.  NVMe
 	 * 1.3 standardized this as NOIOB, and newer Intel drives use that.
 	 */
-	switch (pci_get_devid(pctrlr->dev)) {
-	case 0x09538086:		/* Intel DC PC3500 */
-	case 0x0a538086:		/* Intel DC PC3520 */
-	case 0x0a548086:		/* Intel DC PC4500 */
-		if (pctrlr->ctrlr.cdata.vs[3] != 0)
-			ns->stripesize =
-			    (1 << pctrlr->ctrlr.cdata.vs[3]) * pctrlr->ctrlr.min_page_size;
-		break;
-	default:
-		break;
+	if (ctrlr->nvmec_ttype == NVMET_PCIE) {
+		switch (pci_get_devid(pctrlr->dev)) {
+		case 0x09538086:		/* Intel DC PC3500 */
+		case 0x0a538086:		/* Intel DC PC3520 */
+		case 0x0a548086:		/* Intel DC PC4500 */
+			if (ctrlr->cdata.vs[3] != 0)
+				ns->stripesize =
+				    (1 << ctrlr->cdata.vs[3]) *
+				    ctrlr->min_page_size;
+			break;
+		default:
+			break;
+		}
 	}
 
 	/*
@@ -548,12 +554,12 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		mtx_init(&ns->lock, "nvme ns lock", NULL, MTX_DEF);
 
 	status.done = FALSE;
-	nvme_ctrlr_cmd_identify_namespace(pctrlr, id, &ns->nvmes_nsd,
+	nvme_ctrlr_cmd_identify_namespace(ctrlr, id, &ns->nvmes_nsd,
 	    nvme_completion_poll_cb, &status);
 	while (status.done == FALSE)
 		DELAY(5);
 	if (nvme_completion_is_error(&status.cpl)) {
-		nvme_printf(pctrlr, "nvme_identify_namespace failed\n");
+		ERRSPEW("nvme_identify_namespace failed for c:%p\n", ctrlr);
 		return (ENXIO);
 	}
 
@@ -581,12 +587,12 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		return (ENXIO);
 	}
 
-	oncs = pctrlr->ctrlr.cdata.oncs;
+	oncs = ctrlr->cdata.oncs;
 	dsm = (oncs >> NVME_CTRLR_DATA_ONCS_DSM_SHIFT) & NVME_CTRLR_DATA_ONCS_DSM_MASK;
 	if (dsm)
 		ns->flags |= NVME_NS_DEALLOCATE_SUPPORTED;
 
-	vwc_present = (pctrlr->ctrlr.cdata.vwc >> NVME_CTRLR_DATA_VWC_PRESENT_SHIFT) &
+	vwc_present = (ctrlr->cdata.vwc >> NVME_CTRLR_DATA_VWC_PRESENT_SHIFT) &
 		NVME_CTRLR_DATA_VWC_PRESENT_MASK;
 	if (vwc_present)
 		ns->flags |= NVME_NS_FLUSH_SUPPORTED;
@@ -602,7 +608,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	 * Namespace IDs start at 1, so we need to subtract 1 to create a
 	 *  correct unit number.
 	 */
-	unit = device_get_unit(pctrlr->dev) * NVME_MAX_NAMESPACES + ns->id - 1;
+	unit = ctrlr->nvmec_unit * NVME_MAX_NAMESPACES + ns->id - 1;
 
 	make_dev_args_init(&md_args);
 	md_args.mda_devsw = &nvme_ns_cdevsw;
@@ -610,7 +616,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	md_args.mda_mode = 0600;
 	md_args.mda_si_drv1 = ns;
 	res = make_dev_s(&md_args, &ns->cdev, "nvme%dns%d",
-	    device_get_unit(pctrlr->dev), ns->id);
+	    ctrlr->nvmec_unit, ns->id);
 	if (res != 0)
 		return (ENXIO);
 

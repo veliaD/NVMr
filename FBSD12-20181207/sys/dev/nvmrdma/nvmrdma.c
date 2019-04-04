@@ -290,6 +290,8 @@ typedef struct {
 	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count    */
 	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count    */
 
+	struct nvme_qpair              nvmrq_gqp;
+
 	nvmr_ncommcon_t               *nvmrq_next2use; /* !! REMOVE THIS !!   */
 } *nvmr_queue_t;
 
@@ -992,6 +994,11 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	q->nvmrq_cntrlr = cntrlr;
 	q->nvmrq_state = NVMRQ_PRE_INIT;
 	q->nvmrq_prof = prof;
+	q->nvmrq_gqp.num_qentries = prof->nvmrqp_numsndqe;
+	q->nvmrq_gqp.qis_enabled = TRUE;
+	q->nvmrq_gqp.qttype = NVMET_RDMA;
+	q->nvmrq_gqp.gqctrlr = &cntrlr->nvmrctr_nvmec;
+	mtx_init(&q->nvmrq_gqp.qlock, "nvme qpair lock", NULL, MTX_DEF);
 	STAILQ_INIT(&q->nvmrq_comms);
 	STAILQ_INIT(&q->nvmrq_cmpls);
 
@@ -1514,19 +1521,77 @@ nvmr_ctrlr_reset_task(void *arg, int pending)
 }
 
 
-static void
-nvmr_ctrlr_fail_req_task(void *arg, int pending)
-{
-	ERRSPEW("Invoked for arg:%p pending:%d\n", arg, pending);
-}
-
-
 static struct cdevsw nvmr_ctrlr_cdevsw = {
 	.d_version =	D_VERSION,
 	.d_flags =	0,
 };
 
 #define NVMR_STRING "NVMe over RDMA"
+#define CONFIRMRDMACONTROLLER KASSERT(strncmp(cntrlr->very_first_field, \
+    NVMR_STRING, sizeof(cntrlr->very_first_field)) == 0, \
+    ("%s@%d NOT an RDMA controller!\n", __func__, __LINE__))
+#define KASSERT_NVMR_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_RDMA, \
+    ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
+
+static void
+nvmr_delist_cb(struct nvme_controller *ctrlrp)
+{
+	panic("%s() invoked for ctrlr:%p\n", __func__, ctrlrp);
+}
+
+#define NVMR_ADMINQNDX 0
+
+/*
+ * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
+ */
+void
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
+void
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req)
+{
+	struct nvme_controller *ctrlr;
+
+	CONFIRMRDMACONTROLLER;
+	ctrlr = &cntrlr->nvmrctr_nvmec;
+
+	mtx_lock(&ctrlr->lockc);
+	STAILQ_INSERT_TAIL(&ctrlr->fail_req, req, stailq);
+	mtx_unlock(&ctrlr->lockc);
+	taskqueue_enqueue(ctrlr->taskqueue, &ctrlr->fail_req_task);
+}
+
+
+void
+nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req);
+void
+nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req)
+{
+	nvmr_cntrlr_t cntrlr;
+
+	KASSERT_NVMR_CNTRLR(ctrlr);
+	cntrlr = ctrlr->nvmec_tsp;
+	CONFIRMRDMACONTROLLER;
+
+	req->rqpair = &cntrlr->nvmrctr_qarr[0]->nvmrq_gqp;
+	DBGSPEW("Failing req:%p\n", req);
+	nvmr_ctrlr_post_failed_request(cntrlr, req);
+}
+
+
+void
+nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req);
+void
+nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
+{
+	nvmr_cntrlr_t cntrlr;
+
+	KASSERT_NVMR_CNTRLR(ctrlr);
+	cntrlr = ctrlr->nvmec_tsp;
+	CONFIRMRDMACONTROLLER;
+
+	DBGSPEW("Failing req:%p\n", req);
+	nvmr_ctrlr_post_failed_request(cntrlr, req);
+}
 
 
 int
@@ -1582,7 +1647,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		error = ENOMEM;
 		goto outret;
 	}
-	DBGSPEW("Controller allocation of size \"%zu\"\n", sizeof(*cntrlr));
+	DBGSPEW("Controller allocation of size \"%zu\"@%p\n", sizeof(*cntrlr),
+	    cntrlr);
 	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof(cntrlr->nvmrctr_ipv4));
 	cntrlr->nvmrctr_port = port;
 	cntrlr->nvmrctr_prof = prof;
@@ -1777,12 +1843,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	    "nvmr taskq");
 
 	cntrlr->nvmrctr_nvmec.is_resetting = 0;
-	cntrlr->nvmrctr_nvmec.is_initialized = 0;
+	cntrlr->nvmrctr_nvmec.is_initialized = 1;
 	cntrlr->nvmrctr_nvmec.notification_sent = 0;
 	TASK_INIT(&cntrlr->nvmrctr_nvmec.reset_task, 0,
 	    nvmr_ctrlr_reset_task, cntrlr);
 	TASK_INIT(&cntrlr->nvmrctr_nvmec.fail_req_task, 0,
-	    nvmr_ctrlr_fail_req_task, cntrlr);
+	    nvme_ctrlr_fail_req_task, &cntrlr->nvmrctr_nvmec);
 	STAILQ_INIT(&cntrlr->nvmrctr_nvmec.fail_req);
 	cntrlr->nvmrctr_nvmec.is_failed = FALSE;
 
@@ -1794,7 +1860,11 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	unitnum = ((uint64_t)(&cntrlr->nvmrctr_nvmec)/
 	    sizeof(cntrlr->nvmrctr_nvmec));
 	unitnum &= INT_MAX;
-	md_args.mda_unit = (int)(uint32_t)unitnum; /* Security hole? */
+	cntrlr->nvmrctr_nvmec.nvmec_unit =
+	    (int)(uint32_t)unitnum;
+	cntrlr->nvmrctr_nvmec.nvmec_unit *= NVME_MAX_NAMESPACES;
+	cntrlr->nvmrctr_nvmec.nvmec_unit /= NVME_MAX_NAMESPACES;
+	md_args.mda_unit = cntrlr->nvmrctr_nvmec.nvmec_unit;/* Security hole? */
 	md_args.mda_si_drv1 = (void *)cntrlr;
 	retval = make_dev_s(&md_args, &cntrlr->nvmrctr_nvmec.ccdev, "nvme%d",
 	    md_args.mda_unit);
@@ -1804,9 +1874,21 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		error = retval;
 		goto out;
 	}
-
 	DBGSPEW("NVMe device with unitnum:%d\n", (int)(uint32_t)unitnum);
 
+	cntrlr->nvmrctr_nvmec.nvmec_tsp = cntrlr;
+	cntrlr->nvmrctr_nvmec.nvmec_ttype = NVMET_RDMA;
+	cntrlr->nvmrctr_nvmec.nvmec_delist = &nvmr_delist_cb;
+	cntrlr->nvmrctr_nvmec.nvmec_subadmreq = &nvmr_submit_adm_req;
+	cntrlr->nvmrctr_nvmec.nvmec_subioreq = &nvmr_submit_io_req;
+
+	retval = nvme_ctrlr_construct_namespaces(&cntrlr->nvmrctr_nvmec);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvme_ctrlr_construct_namespaces(c:%p):%d\n",
+		    &cntrlr->nvmrctr_nvmec, error);
+		goto out;
+	}
 	error = 0;
 	*retcntrlrp = cntrlr;
 

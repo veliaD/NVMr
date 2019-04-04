@@ -212,7 +212,7 @@ nvme_unload(void)
 	 */
 	sx_slock(&nclst_lock);
 	STAILQ_FOREACH_SAFE(ctrlr, &nclst_hd, nvmec_lst, tctrlr) {
-		DBGSPEW("Invoking .nvmec_delist:%p for ctrlr:%p\n",
+		nvme_printf(ctrlr, "Invoking .nvmec_delist:%p for ctrlr:%p\n",
 		    ctrlr->nvmec_delist, ctrlr);
 		ctrlr->nvmec_delist(ctrlr);
 		/* ctrlr invalid after this point */
@@ -285,27 +285,27 @@ nvme_dump_completion(struct nvme_completion *cpl)
 
 
 void
-nvme_register_controller(struct nvme_controller *ctrlrp)
+nvme_register_controller(struct nvme_controller *ctrlr)
 {
-	DBGSPEW("ctrlr:%p\n", ctrlrp);
+	nvme_printf(ctrlr,"c:%p\n", ctrlr);
 	sx_xlock(&nclst_lock);
-	STAILQ_INSERT_TAIL(&nclst_hd, ctrlrp, nvmec_lst);
+	STAILQ_INSERT_TAIL(&nclst_hd, ctrlr, nvmec_lst);
 	sx_xunlock(&nclst_lock);
 }
 
 void
-nvme_unregister_controller(struct nvme_controller *ctrlrp)
+nvme_unregister_controller(struct nvme_controller *ctrlr)
 {
-	DBGSPEW("ctrlr:%p\n", ctrlrp);
+	nvme_printf(ctrlr,"c:%p\n", ctrlr);
 	sx_xlock(&nclst_lock);
-	STAILQ_REMOVE(&nclst_hd, ctrlrp, nvme_controller, nvmec_lst);
+	STAILQ_REMOVE(&nclst_hd, ctrlr, nvme_controller, nvmec_lst);
 	sx_xunlock(&nclst_lock);
 }
 
 static void
-nvmp_delist_cb(struct nvme_controller *ctrlrp)
+nvmp_delist_cb(struct nvme_controller *ctrlr)
 {
-	DBGSPEW("nvmp_delist_cb() invoked for ctrlr:%p\n", ctrlrp);
+	nvme_printf(ctrlr, "nvmp_delist_cb() invoked for ctrlr:%p\n", ctrlr);
 	return;
 }
 
@@ -319,7 +319,7 @@ nvme_attach(device_t dev)
 	uint16_t		subdevice;
 
 	pctrlr->ctrlr.nvmec_tsp = pctrlr;
-	pctrlr->ctrlr.nvmec_ttype = NVMET_PCI;
+	pctrlr->ctrlr.nvmec_ttype = NVMET_PCIE;
 	pctrlr->ctrlr.nvmec_delist = &nvmp_delist_cb;
 	pctrlr->ctrlr.nvmec_subadmreq = &nvmp_submit_adm_request;
 	pctrlr->ctrlr.nvmec_subioreq = &nvmp_submit_io_request;
@@ -395,9 +395,11 @@ nvme_notify(struct nvme_consumer *cons,
 	struct nvme_namespace	*ns;
 	void			*ctrlr_cookie;
 	int			cmpset, ns_idx;
+	/*
 	struct nvme_pci_controller *pctrlr;
+	 */
 
-	DBGSPEW("Notifying consumer for ctrlr:%p\n", ctrlr);
+	nvme_printf(ctrlr, "Notifying consumer for ctrlr:%p\n", ctrlr);
 	/*
 	 * The consumer may register itself after the nvme devices
 	 *  have registered with the kernel, but before the
@@ -405,19 +407,29 @@ nvme_notify(struct nvme_consumer *cons,
 	 *  return here, and when initialization completes, the
 	 *  controller will make sure the consumer gets notified.
 	 */
-	if (!ctrlr->is_initialized)
+	if (!ctrlr->is_initialized) {
+		nvme_printf(ctrlr, "Uninited:not registering controller:%p\n",
+		    ctrlr);
 		return;
+	}
 
+	/*
 	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
+	 */
 	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
 
+	/*
 	CONFIRMPCIECONTROLLER;
-	if (cmpset == 0)
+	 */
+	if (cmpset == 0) {
+		nvme_printf(ctrlr, "Returning w/o registering controller:%u\n",
+		    ctrlr->notification_sent);
 		return;
+	}
 
 	if (cons->ctrlr_fn != NULL)
-		ctrlr_cookie = (*cons->ctrlr_fn)(pctrlr);
+		ctrlr_cookie = (*cons->ctrlr_fn)(ctrlr);
 	else
 		ctrlr_cookie = NULL;
 	ctrlr->ccons_cookie[cons->id] = ctrlr_cookie;
@@ -428,12 +440,16 @@ nvme_notify(struct nvme_consumer *cons,
 		 * Do not notify consumers about the namespaces of a
 		 *  failed controller.
 		 */
+		nvme_printf(ctrlr, "Returning w/o examing NSes controller\n");
 		return;
 	}
-	for (ns_idx = 0; ns_idx < min(pctrlr->ctrlr.cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
+	for (ns_idx = 0; ns_idx < min(ctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
+		nvme_printf(ctrlr, "Examing NS idx:%d\n", ns_idx);
 		ns = &ctrlr->cns[ns_idx];
-		if (ns->nvmes_nsd.nsze == 0)
+		nvme_printf(ctrlr, "\tsize:%lu\n", ns->nvmes_nsd.nsze);
+		if (ns->nvmes_nsd.nsze == 0) {
 			continue;
+		}
 		if (cons->ns_fn != NULL)
 			ns->cons_cookie[cons->id] =
 			    (*cons->ns_fn)(ns, ctrlr_cookie);
