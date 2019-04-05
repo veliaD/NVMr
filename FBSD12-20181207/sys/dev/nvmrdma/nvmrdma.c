@@ -124,12 +124,13 @@ typedef struct nvmr_ncmplcont nvmr_ncmplcon_t;
 struct nvmr_ncommcont {
 	struct ib_cqe		     nvmrsnd_cqe;
 	struct ib_cqe		     nvmrsnd_regcqe;
-	STAILQ_ENTRY(nvmr_ncommcont) nvmrsnd_next;
+	STAILQ_ENTRY(nvmr_ncommcont) nvmrsnd_nextfree;
 	nvmr_stub_t                 *nvmrsnd_nvmecomm;
 	struct nvme_completion      *nvmrsnd_nvmecomplp;
 	struct ib_mr                *nvmrsnd_mr;
 	u64			     nvmrsnd_dmaddr;
 	uint16_t                     nvmrsnd_cid;
+	struct nvme_request         *nvmrsnd_req;
 	bool                         nvmrsnd_rspndd;
 	bool                         nvmrsnd_rkeyvalid;
 };
@@ -285,21 +286,22 @@ typedef struct {
 	nvmr_ncommcon_t              **nvmrq_commcid; /* CID > nvmr_ncommcont */
 	STAILQ_HEAD(, nvmr_ncommcont)  nvmrq_comms;
 	STAILQ_HEAD(, nvmr_ncmplcont)  nvmrq_cmpls;
+	STAILQ_HEAD(, nvme_request)    nvmrq_defreqs;
 	volatile nvmr_queue_state_t    nvmrq_state;  /* nvmrctr_lock protects */
 	int                            nvmrq_last_cm_status;
 	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count    */
 	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count    */
+	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
 
 	struct nvme_qpair              nvmrq_gqp;
-
 	nvmr_ncommcon_t               *nvmrq_next2use; /* !! REMOVE THIS !!   */
-} *nvmr_queue_t;
+} *nvmr_qpair_t;
 
 typedef struct nvmr_cntrlr_tag {
 	char			very_first_field[NVME_VFFSTRSZ+1];
 	struct mtx         nvmrctr_lock;
 	char              *nvmrctr_subnqn;
-	nvmr_queue_t      *nvmrctr_qarr;  /* Array size determined by prof */
+	nvmr_qpair_t      *nvmrctr_qarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
 	int                nvmrctr_numqs; /* Q count not always fixed in prof */
@@ -335,6 +337,7 @@ static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
 
 #define WAKEWAITERS \
+	if (!commp->nvmrsnd_req) {                                          \
 	if (unlikely(commp->nvmrsnd_rspndd == true)) {                      \
 		panic("%s@%d nvmrsnd_rspndd already true! q:%p commp:%p\n", \
 		    __func__, __LINE__, q, commp);                          \
@@ -343,14 +346,21 @@ static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);                           \
 	commp->nvmrsnd_rspndd = true;                                       \
 	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);                         \
-	wakeup(commp)
+	wakeup(commp);                                                      \
+	} else { \
+		nvme_free_request(commp->nvmrsnd_req); \
+		commp->nvmrsnd_req = NULL; \
+		mtx_lock(&q->nvmrq_gqp.qlock); \
+		STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree); \
+		mtx_unlock(&q->nvmrq_gqp.qlock); \
+	}
 
 
 static void
 nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct nvmr_ncommcont *commp;
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 
 	q = cq->cq_context;
 	commp = container_of(wc->wr_cqe, struct nvmr_ncommcont, nvmrsnd_regcqe);
@@ -364,6 +374,39 @@ nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 	WAKEWAITERS;
 }
 
+
+void nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c);
+/**********
+ TODO:
+ 1) Retry logic
+ 2) Time out and its cancellation
+ 3) Add logic to queue NVMe requests and dequeue them when comm are available
+ 4) Track in-use comm
+ **********/
+void
+nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c)
+{
+	struct nvme_request *req;
+	boolean_t retry, error;
+
+	req = commp->nvmrsnd_req;
+	error = nvme_completion_is_error(c);
+	retry = error && nvme_completion_is_retry(c); /* Need to check count */
+
+	if (error) {
+		nvme_qpair_print_command(&q->nvmrq_gqp, &req->cmd);
+		nvme_qpair_print_completion(&q->nvmrq_gqp, c);
+	}
+
+	if (retry) {
+		ERRSPEW("Not retrying: unimplemented yet! c:%p\n", commp);
+	}
+	
+	if (req->cb_fn) {
+		req->cb_fn(req->cb_arg, c);
+	}
+}
+
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 {
@@ -371,7 +414,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	struct nvmr_ncommcont *commp;
 	struct nvme_completion *c;
 	struct ib_send_wr invwr, *badinvwrp;
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 	int retval;
 
 	q = cq->cq_context;
@@ -403,17 +446,21 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	}
 
 	commp = q->nvmrq_commcid[c->cid];
-	if (unlikely(commp->nvmrsnd_nvmecomplp == NULL)) {
-		ERRSPEW("Uninitialized nvmrsnd_nvmecomplp field in commp:%p "
-		    "q:%p cid:%hu!\n", commp, q, c->cid);
-		goto out;
+	nvme_completion_swapbytes(c);
+
+	KASSERT((!commp->nvmrsnd_req && commp->nvmrsnd_nvmecomplp) ||
+	    (commp->nvmrsnd_req && !commp->nvmrsnd_nvmecomplp),
+	    ("%s@%d c:%p r:%p p:%p", __func__, __LINE__, commp,
+	    commp->nvmrsnd_req, commp->nvmrsnd_nvmecomplp));
+	if (commp->nvmrsnd_req) {
+		nvmr_nreq_compl(q, commp, c);
+	} else {
+		/* Copy the NVMe completion structure contents */
+		*commp->nvmrsnd_nvmecomplp = *c;
 	}
 
-	/* Copy the NVMe completion structure contents */
-	*commp->nvmrsnd_nvmecomplp = *c;
-
 	/*
-	 * The NVMeoF spec allows the host to ask the target to send over a
+	 * The NVMeoF spec allows the host to ask the target to send over an
 	 * rkey(remote-key)-invalidate-request after it has RDMAed into/from
 	 * the host memory.  This improves latency I suppose but is optional
 	 */
@@ -464,7 +511,7 @@ out:
 }
 
 static void
-nvmr_queue_destroy(nvmr_queue_t q)
+nvmr_queue_destroy(nvmr_qpair_t q)
 {
 	nvmr_ncmplcon_t *cmplp, *tcmplp;
 	nvmr_ncommcon_t *commp, *tcommp;
@@ -517,7 +564,7 @@ nvmr_queue_destroy(nvmr_queue_t q)
 
 	free(q->nvmrq_commcid, M_NVMR);
 	count = 0;
-	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmrsnd_next, tcommp) {
+	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmrsnd_nextfree, tcommp) {
 		if (commp->nvmrsnd_mr != NULL) {
 			ib_dereg_mr(commp->nvmrsnd_mr);
 		}
@@ -615,7 +662,7 @@ nvmr_cntrlr_ref(nvmr_cntrlr_t cntrlr)
 static int
 nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 {
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 	nvmr_queue_state_t qstate;
 	const nvmr_rdma_cm_reject_t *ps;
 
@@ -707,13 +754,283 @@ typedef enum {
 
 #define NVMRTO 3000
 
+#define NVMR_STRING "NVMe over RDMA"
+#define CONFIRMRDMACONTROLLER KASSERT(strncmp(cntrlr->very_first_field, \
+    NVMR_STRING, sizeof(cntrlr->very_first_field)) == 0, \
+    ("%s@%d NOT an RDMA controller!\n", __func__, __LINE__))
+#define KASSERT_NVMR_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_RDMA, \
+    ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
+
+/*
+ * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
+ */
+void
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
+void
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req)
+{
+	struct nvme_controller *ctrlr;
+
+	CONFIRMRDMACONTROLLER;
+	ctrlr = &cntrlr->nvmrctr_nvmec;
+
+	mtx_lock(&ctrlr->lockc);
+	STAILQ_INSERT_TAIL(&ctrlr->fail_req, req, stailq);
+	mtx_unlock(&ctrlr->lockc);
+	taskqueue_enqueue(ctrlr->taskqueue, &ctrlr->fail_req_task);
+}
+
+
+int
+nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
+    struct ib_reg_wr *regwrp);
+int
+nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
+    struct ib_reg_wr *regwrp)
+{
+	uintptr_t offset;
+	size_t len, translen;
+	int /* count, */n, nn, nnn, error;
+	struct ib_mr *mr;
+	enum dma_data_direction dir;
+	void *cbuf;
+	struct scatterlist *s, *scl;
+	struct ib_device *ibd;
+
+	KASSERT(commp->nvmrsnd_req->type == NVME_REQUEST_VADDR, ("%s@%d r:%p "
+	    "t:%d\n", __func__, __LINE__, commp->nvmrsnd_req,
+	    commp->nvmrsnd_req->type));
+
+	ibd = q->nvmrq_cmid->device;
+	scl = q->nvmrq_scl;
+	/*
+	 * 1) Translate the optional command data into a scatterlist array
+	 *    for ib_dma_map_sg() to use a la iser_buf_to_sg()
+	 */
+	translen = commp->nvmrsnd_req->payload_size;
+	cbuf = commp->nvmrsnd_req->u.payload;
+	for (n = 0; (0 < translen) && (n < MAX_NVME_RDMA_SEGMENTS); n++,
+	    translen -= len) {
+		memset(scl + n, 0, sizeof(*scl));
+		s = scl + n;
+		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
+		len = min(PAGE_SIZE - offset, translen);
+		sg_set_buf(s, cbuf, len);
+		cbuf = (void *)(((u64)cbuf) + (u64)len);
+	}
+	if (translen != 0) {
+		ERRSPEW("Could not complete translation of Data. n:%d "
+		    "translen:%zu\n", n, translen);
+		error = E2BIG;
+		goto out;
+	} else {
+		/*
+		DBGSPEW("data is 0x%p\n", commp->nvmrsnd_req->u.payload);
+		for (count = 0; count < n; count++) {
+			DBGSPEW("scl[%d](hex) p:%16lX o:%8X l:%8X a:%16lX\n",
+			count,
+			scl[count].page_link,
+			scl[count].offset,
+			scl[count].length,
+			scl[count].address);
+		}
+		 */
+	}
+
+	/* 2) Map the scatterlist array per the direction to/from IB device */
+	switch(commp->nvmrsnd_req->cmd.opc & 0x3) {
+	case 0x1:
+		dir = DMA_TO_DEVICE;
+		break;
+	case 0x2:
+		dir = DMA_FROM_DEVICE;
+		break;
+	default:
+		panic("%s@%d Unsupported direction in NVMe command r:%p d:0x%x",
+		    __func__, __LINE__, commp->nvmrsnd_req,
+		    commp->nvmrsnd_req->cmd.opc);
+	}
+	nn = ib_dma_map_sg(ibd, scl, n, dir);
+	if (nn < 1) {
+		ERRSPEW("ib_dma_map_sg() failed with count:%d\n", nn);
+		error = E2BIG;
+		goto out;
+	}
+	/* DBGSPEW("ib_dma_map_sg() returned a count of %d\n", nn); */
+
+	/* 3) Map the scatterlist elements to the MR */
+	mr = commp->nvmrsnd_mr;
+	nnn = ib_map_mr_sg(mr, scl, nn, NULL, NVMR_FOURK);
+	if (nnn < nn) {
+		ERRSPEW("ib_map_mr_sg() failed. nnn:%d < nn:%d\n", nnn, nn);
+		error = E2BIG;
+		goto out;
+	}
+	/* DBGSPEW("ib_map_mr_sg() returned a count of %d\n", nnn); */
+	ib_update_fast_reg_key(mr, ib_inc_rkey(mr->rkey));
+
+	/* 4) Craft the memory registration work-request but don't post it */
+	commp->nvmrsnd_regcqe.done = nvmr_rg_done;
+	memset(regwrp, 0, sizeof(*regwrp));
+	/* NB the Registration work-request contains a Send work-request */
+	regwrp->wr.num_sge = 0; /* No send/recv buffers are being posted */
+	regwrp->wr.send_flags = IB_SEND_SIGNALED; /* Invoke .done when done */
+	regwrp->wr.opcode = IB_WR_REG_MR;
+	regwrp->wr.wr_cqe = &commp->nvmrsnd_regcqe;
+	regwrp->wr.next = NULL;
+	regwrp->access = (dir == DMA_TO_DEVICE) ?
+	    IB_ACCESS_REMOTE_READ : IB_ACCESS_REMOTE_WRITE;
+	regwrp->access |= IB_ACCESS_LOCAL_WRITE;
+	regwrp->key = mr->rkey;
+	regwrp->mr = mr;
+
+	k->nvmrk_address = htole64(mr->iova);
+	k->nvmrk_length[0] = htole32(mr->length) & 0xFF;
+	k->nvmrk_length[1] = (htole32(mr->length)>>8) & 0xFF;
+	k->nvmrk_length[2] = (htole32(mr->length)>>16) & 0xFF;
+	k->nvmrk_key = htole32(mr->rkey);
+	k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_INVALIDATE;
+
+	commp->nvmrsnd_rkeyvalid = true;
+	
+	error = 0;
+
+out:
+	return error;
+}
+
+
+int nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req);
+int
+nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
+{
+	nvmr_stub_t *cp;
+	nvmr_ksgl_t *k;
+	nvmr_ncommcon_t *commp;
+	struct nvme_qpair *gq;
+	nvmr_cntrlr_t cntrlr;
+	int error, retval;
+	struct ib_reg_wr regwr;
+	u64 dmaddr;
+	struct ib_sge sgl;
+	struct ib_send_wr sndwr, *sndwrp, *badsndwrp;
+	struct ib_device *ibd;
+
+	gq = &q->nvmrq_gqp;
+	cntrlr = q->nvmrq_cntrlr;
+
+	mtx_assert(&gq->qlock, MA_OWNED);
+
+	switch(req->type) {
+	case NVME_REQUEST_VADDR:
+	case NVME_REQUEST_NULL:
+		break;
+	default:
+		error = ENOTSUP;
+		goto out;
+	}
+
+	commp = STAILQ_FIRST(&q->nvmrq_comms);
+	if ((commp == NULL) || (!gq->qis_enabled)) {
+		if (cntrlr->nvmrctr_nvmec.is_failed) {
+			error = ENOSPC;
+		} else {
+			/* STAILQ_INSERT_TAIL(&q->nvmrq_defreqs, req, stailq);*/
+			error = ENOSPC;
+		}
+		goto out;
+	}
+	STAILQ_REMOVE(&q->nvmrq_comms, commp, nvmr_ncommcont, nvmrsnd_nextfree);
+
+	cp = (nvmr_stub_t *)&req->cmd;
+	ibd = q->nvmrq_cmid->device;
+	k = &cp->nvmrsb_nvmf.nvmf_ksgl;
+
+	cp->nvmrsb_nvmf.nvmf_sgl_fuse = NVMF_SINGLE_BUF_SGL;
+	memset(&sndwr, 0, sizeof(sndwr));
+	sndwr.next  = NULL;
+
+	commp->nvmrsnd_rkeyvalid = false;
+	commp->nvmrsnd_nvmecomm = cp;
+	commp->nvmrsnd_req = req;
+	commp->nvmrsnd_nvmecomplp = NULL;
+
+	memset(k, 0, sizeof(*k));
+	switch(req->type) {
+	case NVME_REQUEST_VADDR:
+		retval = nvmr_map_vaddr(q, commp, k, &regwr);
+		if (retval != 0) {
+			error = retval;
+			DBGSPEW("nvmr_map_vaddr(c:%p q:%p):%d\n", commp,
+			    q, retval);
+			goto out;
+		}
+		break;
+	case NVME_REQUEST_NULL:
+		k->nvmrk_sgl_identifier = NVMF_KEYED_SGL_NO_INVALIDATE;
+		break;
+	default:
+		panic("%s@%d Unimplemented t:%d req:%p\n", __func__, __LINE__,
+		    req->type, req);
+	}
+
+
+	cp->nvmrsb_nvmf.nvmf_cid = commp->nvmrsnd_cid;
+	dmaddr = ib_dma_map_single(ibd, cp, sizeof(*cp), DMA_TO_DEVICE);
+	if (ib_dma_mapping_error(ibd, dmaddr) != 0) {
+		ERRSPEW("ib_dma_map_single() failed for %p\n", cp);
+		error = ENOENT;
+		goto out;
+	}
+	commp->nvmrsnd_dmaddr = dmaddr;
+	commp->nvmrsnd_rspndd = false;
+	/* Transfer ownership of command structure to device */
+	ib_dma_sync_single_for_device(ibd, dmaddr, sizeof(*cp), DMA_TO_DEVICE);
+
+	memset(&sgl, 0, sizeof(sgl));
+
+	sgl.addr   = dmaddr;
+	sgl.length = sizeof(*(commp->nvmrsnd_nvmecomm));
+	sgl.lkey   = q->nvmrq_ibpd->local_dma_lkey;
+
+	commp->nvmrsnd_cqe.done = nvmr_snd_done;
+
+	sndwr.wr_cqe = &commp->nvmrsnd_cqe;
+	sndwr.sg_list = &sgl;
+	sndwr.num_sge = 1;
+	sndwr.opcode = IB_WR_SEND;
+	sndwr.send_flags = IB_SEND_SIGNALED;
+	sndwr.next = NULL;
+
+	if (req->type == NVME_REQUEST_NULL) {
+		sndwrp = &sndwr;
+	} else {
+		/* If there's data to be RDMAed chain in the registration */
+		regwr.wr.next = &sndwr;
+		sndwrp = &regwr.wr;
+	}
+
+	badsndwrp = NULL;
+	retval = ib_post_send(q->nvmrq_ibqp, sndwrp, &badsndwrp);
+	if (retval != 0) {
+		ERRSPEW("ib_post_send(%p) failed with %d, badsndwrp:%p\n",
+		    sndwrp, retval, badsndwrp);
+		error = retval;
+		goto out;
+	}
+
+	error = 0;
+out:
+	return error;
+}
+
 /*
  * Issue an NVMe command on the NVMe Q and wait for a response from the target.
  * Return the NVMe completion sent by the target after it executes the NVMe
  * command
  */
 static int
-nvmr_command_sync(nvmr_queue_t q, nvmr_stub_t *c, void *d, int l,
+nvmr_command_sync(nvmr_qpair_t q, nvmr_stub_t *c, void *d, int l,
     nvmr_ksgl_perm_t p, struct nvme_completion *r)
 {
 	int offset, /* count, */ n, nn, nnn, error, retval;
@@ -841,6 +1158,7 @@ skip_ksgl:
 		goto out;
 	}
 	commp->nvmrsnd_nvmecomm = c;
+	commp->nvmrsnd_req = NULL;
 	commp->nvmrsnd_nvmecomplp = r;
 	commp->nvmrsnd_dmaddr = dmaddr;
 	commp->nvmrsnd_rspndd = false;
@@ -957,7 +1275,7 @@ out:
 
 
 static int
-nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
+nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp)
 {
 	u64 dmaddr;
 	struct ib_mr *mr;
@@ -972,7 +1290,7 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	nvmr_ncmplcon_t *cmplp;
 	nvmr_ncommcon_t *commp, **commparrp;
 	struct ib_pd *ibpd;
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 	struct ib_qp_init_attr init_attr;
 	struct rdma_conn_param conn_param;
 	nvmr_rdma_cm_request_t privdata;
@@ -999,6 +1317,7 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	q->nvmrq_gqp.qttype = NVMET_RDMA;
 	q->nvmrq_gqp.gqctrlr = &cntrlr->nvmrctr_nvmec;
 	mtx_init(&q->nvmrq_gqp.qlock, "nvme qpair lock", NULL, MTX_DEF);
+	STAILQ_INIT(&q->nvmrq_defreqs);
 	STAILQ_INIT(&q->nvmrq_comms);
 	STAILQ_INIT(&q->nvmrq_cmpls);
 
@@ -1024,7 +1343,8 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 			/* For now bail.  This needs to be more robust */
 			goto out;
 		} else {
-			STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_next);
+			STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp,
+			    nvmrsnd_nextfree);
 			q->nvmrq_numsndqe++;
 		}
 	}
@@ -1050,13 +1370,13 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	for (count = 1; count < (q->nvmrq_numsndqe + 1); count++) {
 		commparrp[count] = commp;
 		commp->nvmrsnd_cid = count;
-		commp = STAILQ_NEXT(commp, nvmrsnd_next);
+		commp = STAILQ_NEXT(commp, nvmrsnd_nextfree);
 	}
 	KASSERT(commp == NULL, ("%s@%d commp:%p, q:%p\n", __func__, __LINE__,
 	    commp, q));
 	q->nvmrq_commcid = commparrp;
 	q->nvmrq_next2use = STAILQ_LAST(&q->nvmrq_comms, nvmr_ncommcont,
-	    nvmrsnd_next);
+	    nvmrsnd_nextfree);
 
 	/*
 	 * Allocate containers for the Recv Q elements which are always
@@ -1129,7 +1449,7 @@ nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_queue_t *qp)
 	 * posted to the IB SND Q need to describe
 	 */
 	count = 0;
-	STAILQ_FOREACH(commp, &q->nvmrq_comms, nvmrsnd_next) {
+	STAILQ_FOREACH(commp, &q->nvmrq_comms, nvmrsnd_nextfree) {
 		mr = ib_alloc_mr(ibpd, IB_MR_TYPE_MEM_REG,
 		    MAX_NVME_RDMA_SEGMENTS);
 		if (IS_ERR(mr)) {
@@ -1353,7 +1673,7 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 	int error, retval;
 	nvmr_communion_t ident;
 	struct nvme_completion compl;
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 
 	if ((cntrlr == NULL) || (datap == NULL) || (datalen != IDENTIFYLEN)) {
 		ERRSPEW("INVALID! cntrlr:%p datap:%p datalen:%d\n", cntrlr,
@@ -1404,7 +1724,7 @@ nvmr_admin_propset(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t value,
 	int error, retval;
 	nvmr_communion_t prpst;
 	struct nvme_completion compl;
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 
 	if ((cntrlr == NULL) || (offset > MAX_NVMR_PROP_GET) ||
 	    (len >= NVMR_PROPLEN_MAX)) {
@@ -1454,7 +1774,7 @@ nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
 	int error, retval;
 	nvmr_communion_t prpgt;
 	struct nvme_completion compl;
-	nvmr_queue_t q;
+	nvmr_qpair_t q;
 
 	if ((cntrlr == NULL) || (offset > MAX_NVMR_PROP_GET) ||
 	    (len >= NVMR_PROPLEN_MAX) || (valuep == NULL)) {
@@ -1526,13 +1846,6 @@ static struct cdevsw nvmr_ctrlr_cdevsw = {
 	.d_flags =	0,
 };
 
-#define NVMR_STRING "NVMe over RDMA"
-#define CONFIRMRDMACONTROLLER KASSERT(strncmp(cntrlr->very_first_field, \
-    NVMR_STRING, sizeof(cntrlr->very_first_field)) == 0, \
-    ("%s@%d NOT an RDMA controller!\n", __func__, __LINE__))
-#define KASSERT_NVMR_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_RDMA, \
-    ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
-
 static void
 nvmr_delist_cb(struct nvme_controller *ctrlrp)
 {
@@ -1541,40 +1854,32 @@ nvmr_delist_cb(struct nvme_controller *ctrlrp)
 
 #define NVMR_ADMINQNDX 0
 
-/*
- * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
- */
-void
-nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
-void
-nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req)
-{
-	struct nvme_controller *ctrlr;
-
-	CONFIRMRDMACONTROLLER;
-	ctrlr = &cntrlr->nvmrctr_nvmec;
-
-	mtx_lock(&ctrlr->lockc);
-	STAILQ_INSERT_TAIL(&ctrlr->fail_req, req, stailq);
-	mtx_unlock(&ctrlr->lockc);
-	taskqueue_enqueue(ctrlr->taskqueue, &ctrlr->fail_req_task);
-}
-
-
 void
 nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req);
 void
 nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
 	nvmr_cntrlr_t cntrlr;
+	nvmr_qpair_t q;
+	struct nvme_qpair *gqp;
+	int retval;
 
 	KASSERT_NVMR_CNTRLR(ctrlr);
 	cntrlr = ctrlr->nvmec_tsp;
 	CONFIRMRDMACONTROLLER;
 
-	req->rqpair = &cntrlr->nvmrctr_qarr[0]->nvmrq_gqp;
-	DBGSPEW("Failing req:%p\n", req);
-	nvmr_ctrlr_post_failed_request(cntrlr, req);
+	q = cntrlr->nvmrctr_qarr[0];
+	gqp = &q->nvmrq_gqp;
+	req->rqpair = gqp;
+
+	mtx_lock(&gqp->qlock);
+	retval = nvmr_command_async(cntrlr->nvmrctr_qarr[0], req);
+	mtx_unlock(&gqp->qlock);
+
+	if (retval != 0) {
+		ERRSPEW("Failing req: %d\n", retval);
+		nvmr_ctrlr_post_failed_request(cntrlr, req);
+	}
 }
 
 
@@ -1604,12 +1909,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	int error, retval, count, qcount, qarrndx;
 	struct make_dev_args md_args;
 	nvmr_cntrlr_t cntrlr;
-	nvmr_queue_t *qarr;
+	nvmr_qpair_t *qarr;
 	nvmr_qndx_t qtndx;
 	unsigned long tmp;
 	nvmr_cntrlcap_t cntrlrcap;
 	uint64_t cntrlrconf;
-	uint64_t unitnum;
+	uint32_t unitnum;
 	nvmripv4_t ipv4;
 	uint16_t port;
 	uint8_t *identp;
@@ -1667,15 +1972,15 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	}
 	cntrlr->nvmrctr_numqs = qcount;
 
-	qarr = malloc(qcount * sizeof(nvmr_queue_t), M_NVMR, M_WAITOK|M_ZERO);
+	qarr = malloc(qcount * sizeof(nvmr_qpair_t), M_NVMR, M_WAITOK|M_ZERO);
 	if (qarr == NULL) {
 		ERRSPEW("Controller Q array allocation sized \"%zu\" failed\n",
-		    qcount * sizeof(nvmr_queue_t));
+		    qcount * sizeof(nvmr_qpair_t));
 		error = ENOMEM;
 		goto out;
 	}
 	DBGSPEW("Controller Q array allocation of size \"%zu\"\n",
-	    qcount * sizeof(nvmr_queue_t));
+	    qcount * sizeof(nvmr_qpair_t));
 	cntrlr->nvmrctr_qarr = qarr;
 
 	/* Allocate the queues and store pointers to them in the qarr */
@@ -1857,13 +2162,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	md_args.mda_uid = UID_ROOT;
 	md_args.mda_gid = GID_WHEEL;
 	md_args.mda_mode = 0600;
-	unitnum = ((uint64_t)(&cntrlr->nvmrctr_nvmec)/
+	unitnum = (uint32_t)((uint64_t)(&cntrlr->nvmrctr_nvmec)/
 	    sizeof(cntrlr->nvmrctr_nvmec));
 	unitnum &= INT_MAX;
-	cntrlr->nvmrctr_nvmec.nvmec_unit =
-	    (int)(uint32_t)unitnum;
-	cntrlr->nvmrctr_nvmec.nvmec_unit *= NVME_MAX_NAMESPACES;
-	cntrlr->nvmrctr_nvmec.nvmec_unit /= NVME_MAX_NAMESPACES;
+	unitnum *= NVME_MAX_NAMESPACES;
+	unitnum /= NVME_MAX_NAMESPACES;
+	cntrlr->nvmrctr_nvmec.nvmec_unit = (int)(uint32_t)unitnum;
 	md_args.mda_unit = cntrlr->nvmrctr_nvmec.nvmec_unit;/* Security hole? */
 	md_args.mda_si_drv1 = (void *)cntrlr;
 	retval = make_dev_s(&md_args, &cntrlr->nvmrctr_nvmec.ccdev, "nvme%d",
@@ -1874,7 +2178,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		error = retval;
 		goto out;
 	}
-	DBGSPEW("NVMe device with unitnum:%d\n", (int)(uint32_t)unitnum);
+	DBGSPEW("NVMe device with unitnum:%d\n",
+	    cntrlr->nvmrctr_nvmec.nvmec_unit);
 
 	cntrlr->nvmrctr_nvmec.nvmec_tsp = cntrlr;
 	cntrlr->nvmrctr_nvmec.nvmec_ttype = NVMET_RDMA;

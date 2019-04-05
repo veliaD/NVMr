@@ -126,8 +126,8 @@ nvme_admin_qpair_print_command(struct nvme_qpair *qpair,
     struct nvme_command *cmd)
 {
 
-	nvme_printf(qpair->gqctrlr, "%s (%02x) sqid:%d cid:%d nsid:%x "
-	    "cdw10:%08x cdw11:%08x\n",
+	nvme_printf(qpair->gqctrlr, "%s (%02x)\n"
+	    "\tsqid:%d cid:%d nsid:%x cdw10:%08x cdw11:%08x\n",
 	    get_admin_opcode_string(cmd->opc), cmd->opc, qpair->qid, cmd->cid,
 	    le32toh(cmd->nsid), le32toh(cmd->cdw10), le32toh(cmd->cdw11));
 }
@@ -166,7 +166,7 @@ nvme_io_qpair_print_command(struct nvme_qpair *qpair,
 	}
 }
 
-static void
+void
 nvme_qpair_print_command(struct nvme_qpair *qpair, struct nvme_command *cmd)
 {
 	if (qpair->qid == 0)
@@ -304,7 +304,7 @@ get_status_string(uint16_t sct, uint16_t sc)
 	return (entry->str);
 }
 
-static void
+void
 nvme_qpair_print_completion(struct nvme_qpair *qpair,
     struct nvme_completion *cpl)
 {
@@ -313,12 +313,12 @@ nvme_qpair_print_completion(struct nvme_qpair *qpair,
 	sct = NVME_STATUS_GET_SCT(cpl->status);
 	sc = NVME_STATUS_GET_SC(cpl->status);
 
-	nvme_printf(qpair->gqctrlr, "%s (%02x/%02x) sqid:%d cid:%d cdw0:%x\n",
-	    get_status_string(sct, sc), sct, sc, cpl->sqid, cpl->cid,
-	    cpl->cdw0);
+	nvme_printf(qpair->gqctrlr, "%s (%02x/%02x)\n"
+	    "\tsqid:%d cid:%d cdw0:%x\n", get_status_string(sct, sc), sct, sc,
+	    cpl->sqid, cpl->cid, cpl->cdw0);
 }
 
-static boolean_t
+boolean_t
 nvme_completion_is_retry(const struct nvme_completion *cpl)
 {
 	uint8_t sct, sc, dnr;

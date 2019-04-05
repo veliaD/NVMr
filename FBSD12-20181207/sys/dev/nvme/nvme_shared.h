@@ -39,6 +39,8 @@
 #include <sys/mutex.h>
 #include <sys/taskqueue.h>
 
+#include <vm/uma.h>
+
 #define SPEWCMN(prefix, format, ...) printf(prefix "%s@%d> " format, \
     __func__, __LINE__, ## __VA_ARGS__)
 #define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
@@ -586,4 +588,66 @@ struct nvme_request {
 int nvme_ctrlr_construct_namespaces(struct nvme_controller *ctrlr);
 
 void nvme_ctrlr_fail_req_task(void *arg, int pending);
+
+/*
+ * Use presence of the BIO_UNMAPPED flag to determine whether unmapped I/O
+ *  support and the bus_dmamap_load_bio API are available on the target
+ *  kernel.  This will ease porting back to earlier stable branches at a
+ *  later point.
+ */
+#ifdef BIO_UNMAPPED
+#define NVME_UNMAPPED_BIO_SUPPORT
+#endif
+
+#define NVME_REQUEST_VADDR	1
+#define NVME_REQUEST_NULL	2 /* For requests with no payload. */
+#define NVME_REQUEST_UIO	3
+#ifdef NVME_UNMAPPED_BIO_SUPPORT
+#define NVME_REQUEST_BIO	4
+#endif
+#define NVME_REQUEST_CCB        5
+
+/* Endianess conversion functions for NVMe structs */
+static inline
+void	nvme_completion_swapbytes(struct nvme_completion *s)
+{
+
+	s->cdw0 = le32toh(s->cdw0);
+	/* omit rsvd1 */
+	s->sqhd = le16toh(s->sqhd);
+	s->sqid = le16toh(s->sqid);
+	/* omit cid */
+	s->status = le16toh(s->status);
+}
+
+extern uma_zone_t	nvme_request_zone;
+#define nvme_free_request(req)	uma_zfree(nvme_request_zone, req)
+
+#define NVME_STATUS_P_SHIFT				(0)
+#define NVME_STATUS_P_MASK				(0x1)
+#define NVME_STATUS_SC_SHIFT				(1)
+#define NVME_STATUS_SC_MASK				(0xFF)
+#define NVME_STATUS_SCT_SHIFT				(9)
+#define NVME_STATUS_SCT_MASK				(0x7)
+#define NVME_STATUS_M_SHIFT				(14)
+#define NVME_STATUS_M_MASK				(0x1)
+#define NVME_STATUS_DNR_SHIFT				(15)
+#define NVME_STATUS_DNR_MASK				(0x1)
+
+#define NVME_STATUS_GET_P(st)				(((st) >> NVME_STATUS_P_SHIFT) & NVME_STATUS_P_MASK)
+#define NVME_STATUS_GET_SC(st)				(((st) >> NVME_STATUS_SC_SHIFT) & NVME_STATUS_SC_MASK)
+#define NVME_STATUS_GET_SCT(st)				(((st) >> NVME_STATUS_SCT_SHIFT) & NVME_STATUS_SCT_MASK)
+#define NVME_STATUS_GET_M(st)				(((st) >> NVME_STATUS_M_SHIFT) & NVME_STATUS_M_MASK)
+#define NVME_STATUS_GET_DNR(st)				(((st) >> NVME_STATUS_DNR_SHIFT) & NVME_STATUS_DNR_MASK)
+
+#define nvme_completion_is_error(cpl)					\
+	(NVME_STATUS_GET_SC((cpl)->status) != 0 || NVME_STATUS_GET_SCT((cpl)->status) != 0)
+
+boolean_t
+nvme_completion_is_retry(const struct nvme_completion *cpl);
+
+void nvme_qpair_print_command(struct nvme_qpair *qpair, struct nvme_command
+    *cmd);
+void nvme_qpair_print_completion(struct nvme_qpair *qpair,
+    struct nvme_completion *cpl);
 #endif /* __NVME_SHARED_H__ */

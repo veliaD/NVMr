@@ -97,17 +97,6 @@ MALLOC_DECLARE(M_NVME);
 #define CACHE_LINE_SIZE		(64)
 #endif
 
-/*
- * Use presence of the BIO_UNMAPPED flag to determine whether unmapped I/O
- *  support and the bus_dmamap_load_bio API are available on the target
- *  kernel.  This will ease porting back to earlier stable branches at a
- *  later point.
- */
-#ifdef BIO_UNMAPPED
-#define NVME_UNMAPPED_BIO_SUPPORT
-#endif
-
-extern uma_zone_t	nvme_request_zone;
 extern int32_t		nvme_retry_count;
 
 struct nvme_completion_poll_status {
@@ -115,14 +104,6 @@ struct nvme_completion_poll_status {
 	struct nvme_completion	cpl;
 	int			done;
 };
-
-#define NVME_REQUEST_VADDR	1
-#define NVME_REQUEST_NULL	2 /* For requests with no payload. */
-#define NVME_REQUEST_UIO	3
-#ifdef NVME_UNMAPPED_BIO_SUPPORT
-#define NVME_REQUEST_BIO	4
-#endif
-#define NVME_REQUEST_CCB        5
 
 struct nvme_tracker {
 
@@ -445,8 +426,6 @@ nvme_allocate_request_ccb(union ccb *ccb, nvme_cb_fn_t cb_fn, void *cb_arg)
 
 	return (req);
 }
-
-#define nvme_free_request(req)	uma_zfree(nvme_request_zone, req)
 
 void	nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 				    const struct nvme_completion *async_cpl,

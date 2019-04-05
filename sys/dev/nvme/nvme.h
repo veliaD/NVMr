@@ -112,23 +112,6 @@
 #define NVME_CMD_FUSE_SHIFT				(8)
 #define NVME_CMD_FUSE_MASK				(0x3)
 
-#define NVME_STATUS_P_SHIFT				(0)
-#define NVME_STATUS_P_MASK				(0x1)
-#define NVME_STATUS_SC_SHIFT				(1)
-#define NVME_STATUS_SC_MASK				(0xFF)
-#define NVME_STATUS_SCT_SHIFT				(9)
-#define NVME_STATUS_SCT_MASK				(0x7)
-#define NVME_STATUS_M_SHIFT				(14)
-#define NVME_STATUS_M_MASK				(0x1)
-#define NVME_STATUS_DNR_SHIFT				(15)
-#define NVME_STATUS_DNR_MASK				(0x1)
-
-#define NVME_STATUS_GET_P(st)				(((st) >> NVME_STATUS_P_SHIFT) & NVME_STATUS_P_MASK)
-#define NVME_STATUS_GET_SC(st)				(((st) >> NVME_STATUS_SC_SHIFT) & NVME_STATUS_SC_MASK)
-#define NVME_STATUS_GET_SCT(st)				(((st) >> NVME_STATUS_SCT_SHIFT) & NVME_STATUS_SCT_MASK)
-#define NVME_STATUS_GET_M(st)				(((st) >> NVME_STATUS_M_SHIFT) & NVME_STATUS_M_MASK)
-#define NVME_STATUS_GET_DNR(st)				(((st) >> NVME_STATUS_DNR_SHIFT) & NVME_STATUS_DNR_MASK)
-
 #define NVME_PWR_ST_MPS_SHIFT				(0)
 #define NVME_PWR_ST_MPS_MASK				(0x1)
 #define NVME_PWR_ST_NOPS_SHIFT				(1)
@@ -924,19 +907,6 @@ void	nvme_ns_trim_cmd(struct nvme_command *cmd, uint32_t nsid,
 extern int nvme_use_nvd;
 
 #endif /* _KERNEL */
-
-/* Endianess conversion functions for NVMe structs */
-static inline
-void	nvme_completion_swapbytes(struct nvme_completion *s)
-{
-
-	s->cdw0 = le32toh(s->cdw0);
-	/* omit rsvd1 */
-	s->sqhd = le16toh(s->sqhd);
-	s->sqid = le16toh(s->sqid);
-	/* omit cid */
-	s->status = le16toh(s->status);
-}
 
 static inline
 void	nvme_power_state_swapbytes(struct nvme_power_state *s)
