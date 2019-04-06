@@ -201,23 +201,13 @@ nvme_ns_get_flags(struct nvme_namespace *ns)
 const char *
 nvme_ns_get_serial_number(struct nvme_namespace *ns)
 {
-	struct nvme_pci_controller *pctrlr;
-
-	KASSERT_NVMP_CNTRLR(ns->nvmes_ctrlr);
-	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
-	CONFIRMPCIECONTROLLER;
-	return ((const char *)pctrlr->ctrlr.cdata.sn);
+	return ((const char *)ns->nvmes_ctrlr->cdata.sn);
 }
 
 const char *
 nvme_ns_get_model_number(struct nvme_namespace *ns)
 {
-	struct nvme_pci_controller *pctrlr;
-
-	KASSERT_NVMP_CNTRLR(ns->nvmes_ctrlr);
-	pctrlr = ns->nvmes_ctrlr->nvmec_tsp;
-	CONFIRMPCIECONTROLLER;
-	return ((const char *)pctrlr->ctrlr.cdata.mn);
+	return ((const char *)ns->nvmes_ctrlr->cdata.mn);
 }
 
 const struct nvme_namespace_data *

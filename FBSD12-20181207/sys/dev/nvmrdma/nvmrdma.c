@@ -1889,12 +1889,18 @@ void
 nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
 	nvmr_cntrlr_t cntrlr;
+	nvmr_qpair_t q;
+	struct nvme_qpair *gqp;
 
 	KASSERT_NVMR_CNTRLR(ctrlr);
 	cntrlr = ctrlr->nvmec_tsp;
 	CONFIRMRDMACONTROLLER;
 
-	DBGSPEW("Failing req:%p\n", req);
+	q = cntrlr->nvmrctr_qarr[0]; /* Dummy Q until I/O queues are up */
+	gqp = &q->nvmrq_gqp;
+	req->rqpair = gqp;
+
+	DBGSPEW("Blindly Failing req:%p\n", req);
 	nvmr_ctrlr_post_failed_request(cntrlr, req);
 }
 

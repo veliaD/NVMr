@@ -399,7 +399,9 @@ nvme_notify(struct nvme_consumer *cons,
 	struct nvme_pci_controller *pctrlr;
 	 */
 
+	/*
 	nvme_printf(ctrlr, "Notifying consumer for ctrlr:%p\n", ctrlr);
+	 */
 	/*
 	 * The consumer may register itself after the nvme devices
 	 *  have registered with the kernel, but before the
@@ -413,18 +415,13 @@ nvme_notify(struct nvme_consumer *cons,
 		return;
 	}
 
-	/*
-	KASSERT_NVMP_CNTRLR(ctrlr);
-	pctrlr = ctrlr->nvmec_tsp;
-	 */
 	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
 
-	/*
-	CONFIRMPCIECONTROLLER;
-	 */
 	if (cmpset == 0) {
+		/*
 		nvme_printf(ctrlr, "Returning w/o registering controller:%u\n",
 		    ctrlr->notification_sent);
+		 */
 		return;
 	}
 
@@ -440,13 +437,19 @@ nvme_notify(struct nvme_consumer *cons,
 		 * Do not notify consumers about the namespaces of a
 		 *  failed controller.
 		 */
+		/*
 		nvme_printf(ctrlr, "Returning w/o examing NSes controller\n");
+		 */
 		return;
 	}
 	for (ns_idx = 0; ns_idx < min(ctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
+		/*
 		nvme_printf(ctrlr, "Examing NS idx:%d\n", ns_idx);
+		 */
 		ns = &ctrlr->cns[ns_idx];
+		/*
 		nvme_printf(ctrlr, "\tsize:%lu\n", ns->nvmes_nsd.nsze);
+		 */
 		if (ns->nvmes_nsd.nsze == 0) {
 			continue;
 		}
