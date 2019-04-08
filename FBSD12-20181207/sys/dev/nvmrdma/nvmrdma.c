@@ -802,6 +802,8 @@ nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
 	void *cbuf;
 	struct scatterlist *s, *scl;
 	struct ib_device *ibd;
+	uint8_t dirbits;
+	nvmr_communion_t *cmd;
 
 	KASSERT(commp->nvmrsnd_req->type == NVME_REQUEST_VADDR, ("%s@%d r:%p "
 	    "t:%d\n", __func__, __LINE__, commp->nvmrsnd_req,
@@ -844,7 +846,14 @@ nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
 	}
 
 	/* 2) Map the scatterlist array per the direction to/from IB device */
-	switch(commp->nvmrsnd_req->cmd.opc & 0x3) {
+	cmd = (nvmr_communion_t *)&commp->nvmrsnd_req->cmd;
+	if (cmd->nvmrcu_stub.nvmrsb_nvmf.nvmf_opc == NVME_OPC_FABRIC_COMMAND) {
+		dirbits = cmd->nvmrcu_stub.nvmrsb_nvmf.nvmf_fctype;
+	} else {
+		dirbits = cmd->nvmrcu_stub.nvmrsb_nvmf.nvmf_opc;
+	}
+	dirbits &= 0x3;
+	switch(dirbits) {
 	case 0x1:
 		dir = DMA_TO_DEVICE;
 		break;
@@ -852,10 +861,10 @@ nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
 		dir = DMA_FROM_DEVICE;
 		break;
 	default:
-		panic("%s@%d Unsupported direction in NVMe command r:%p d:0x%x",
-		    __func__, __LINE__, commp->nvmrsnd_req,
-		    commp->nvmrsnd_req->cmd.opc);
+		panic("%s@%d Bad direction in NVMe command r:%p d:0x%x",
+		    __func__, __LINE__, commp->nvmrsnd_req, dirbits);
 	}
+
 	nn = ib_dma_map_sg(ibd, scl, n, dir);
 	if (nn < 1) {
 		ERRSPEW("ib_dma_map_sg() failed with count:%d\n", nn);
@@ -1676,10 +1685,10 @@ int
 nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
     uint8_t cns, void *datap, int datalen)
 {
-	int error, retval;
-	nvmr_communion_t ident;
-	struct nvme_completion compl;
-	nvmr_qpair_t q;
+	int error;
+	nvmr_communion_t *cmd;
+	struct nvme_request *req;
+	struct nvme_completion_poll_status status;
 
 	if ((cntrlr == NULL) || (datap == NULL) || (datalen != IDENTIFYLEN)) {
 		ERRSPEW("INVALID! cntrlr:%p datap:%p datalen:%d\n", cntrlr,
@@ -1688,33 +1697,24 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 		goto out;
 	}
 
-	q = cntrlr->nvmrctr_adminqp;
-	memset(&ident, 0, sizeof(ident));
-	ident.nvmrcu_idnt.nvmrid_nvmf.nvmf_opc = NVME_OPC_IDENTIFY;
-	ident.nvmrcu_idnt.nvmrid_nvmf.nvmf_nsid = htole32(nsid);
-	ident.nvmrcu_idnt.nvmrid_cns = cns;
-	ident.nvmrcu_idnt.nvmrid_cntid = htole16(cntid);
+	req = nvme_allocate_request_vaddr(&cntrlr->nvmrctr_nvmec.cdata,
+	    sizeof(struct nvme_controller_data), nvme_completion_poll_cb,
+	    &status);
+	cmd = (nvmr_communion_t *)&req->cmd;
+	cmd->nvmrcu_idnt.nvmrid_nvmf.nvmf_opc = NVME_OPC_IDENTIFY;
+	cmd->nvmrcu_idnt.nvmrid_nvmf.nvmf_nsid = htole32(nsid);
+	cmd->nvmrcu_idnt.nvmrid_cns = cns;
+	cmd->nvmrcu_idnt.nvmrid_cntid = htole16(cntid);
 
-	/*
-	 * Now queue the IDENTIFY command and wait for the NVMe response
-	 */
-	retval = nvmr_command_sync(q, &ident.nvmrcu_stub, datap,
-	    datalen, NVMR_QCMD_WO, &compl);
-	if (retval != 0) {
+	status.done = 0;
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	while (!atomic_load_acq_int(&status.done))
+		pause("nvme", 1);
+	if (nvme_completion_is_error(&status.cpl)) {
 		ERRSPEW("IDENTIFY NVMeoF command to subNQN \"%s\" failed!\n",
-		   cntrlr->nvmrctr_subnqn);
-		error = retval;
-		goto out;
-	}
-
-	if (compl.status != 0) {
-		ERRSPEW("Bad resp(%p) for IDENTIFY to subNQN:\n\t"
-		   "\"%s\"\n", &compl, cntrlr->nvmrctr_subnqn);
-		error = EPROTO;
-		goto out;
-	} else {
-		DBGSPEW("IDENTIFY command succeeded to subNQN \"%s\"\n",
 		    cntrlr->nvmrctr_subnqn);
+		error = ENXIO;
+		goto out;
 	}
 
 	error = 0;
@@ -1968,15 +1968,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_refcount = 1;
 	strncpy(cntrlr->very_first_field, NVMR_STRING, NVME_VFFSTRSZ);
 
-	retval = nvmr_qpair_create(cntrlr, &cntrlr->nvmrctr_adminqp,
-	    &prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN]);
-	if (retval != 0) {
-		ERRSPEW("%s creation failed with %d\n",
-		    nvmr_qndx2name(NVMR_QTYPE_ADMIN), retval);
-		error = retval;
-		goto out;
-	}
-
 	/**********
 	 Set up the NVMe stack facing fields so we can issue NVMe commands to
 	 the target using the stack
@@ -2005,6 +1996,15 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_nvmec.nvmec_delist = &nvmr_delist_cb;
 	cntrlr->nvmrctr_nvmec.nvmec_subadmreq = &nvmr_submit_adm_req;
 	cntrlr->nvmrctr_nvmec.nvmec_subioreq = &nvmr_submit_io_req;
+
+	retval = nvmr_qpair_create(cntrlr, &cntrlr->nvmrctr_adminqp,
+	    &prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN]);
+	if (retval != 0) {
+		ERRSPEW("%s creation failed with %d\n",
+		    nvmr_qndx2name(NVMR_QTYPE_ADMIN), retval);
+		error = retval;
+		goto out;
+	}
 
 	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
 	    NVMR_PROPLEN_8BYTES);
