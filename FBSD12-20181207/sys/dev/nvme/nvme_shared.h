@@ -653,4 +653,55 @@ void nvme_qpair_print_completion(struct nvme_qpair *qpair,
 
 void	nvme_ns_destruct(struct nvme_namespace *ns);
 
+struct nvme_completion_poll_status {
+
+	struct nvme_completion	cpl;
+	int			done;
+};
+
+static __inline struct nvme_request *
+_nvme_allocate_request(nvme_cb_fn_t cb_fn, void *cb_arg)
+{
+	struct nvme_request *req;
+
+	req = uma_zalloc(nvme_request_zone, M_NOWAIT | M_ZERO);
+	if (req != NULL) {
+		req->cb_fn = cb_fn;
+		req->cb_arg = cb_arg;
+		req->timeout = TRUE;
+	}
+	return (req);
+}
+
+static __inline struct nvme_request *
+nvme_allocate_request_null(nvme_cb_fn_t cb_fn, void *cb_arg)
+{
+	struct nvme_request *req;
+
+	req = _nvme_allocate_request(cb_fn, cb_arg);
+	if (req != NULL)
+		req->type = NVME_REQUEST_NULL;
+	return (req);
+}
+
+static __inline struct nvme_request *
+nvme_allocate_request_vaddr(void *payload, uint32_t payload_size,
+    nvme_cb_fn_t cb_fn, void *cb_arg)
+{
+	struct nvme_request *req;
+
+	req = _nvme_allocate_request(cb_fn, cb_arg);
+	if (req != NULL) {
+		req->type = NVME_REQUEST_VADDR;
+		req->u.payload = payload;
+		req->payload_size = payload_size;
+	}
+	return (req);
+}
+
+void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
+
+#define nvme_ctrlr_submit_admin_request(c,r) (c)->nvmec_subadmreq((c), (r))
+#define nvme_ctrlr_submit_io_request(c,r) (c)->nvmec_subioreq((c), (r))
+
 #endif /* __NVME_SHARED_H__ */

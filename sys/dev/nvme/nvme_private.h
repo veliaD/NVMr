@@ -99,12 +99,6 @@ MALLOC_DECLARE(M_NVME);
 
 extern int32_t		nvme_retry_count;
 
-struct nvme_completion_poll_status {
-
-	struct nvme_completion	cpl;
-	int			done;
-};
-
 struct nvme_tracker {
 
 	TAILQ_ENTRY(nvme_tracker)	tailq;
@@ -291,8 +285,6 @@ void	nvme_ctrlr_cmd_set_async_event_config(struct nvme_pci_controller *pctrlr,
 void	nvme_ctrlr_cmd_abort(struct nvme_pci_controller *pctrlr, uint16_t cid,
 			     uint16_t sqid, nvme_cb_fn_t cb_fn, void *cb_arg);
 
-void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
-
 int	nvme_ctrlr_construct(struct nvme_pci_controller *pctrlr, device_t dev);
 void	nvme_ctrlr_destruct(struct nvme_pci_controller *pctrlr, device_t dev);
 void	nvme_ctrlr_shutdown(struct nvme_pci_controller *pctrlr);
@@ -339,9 +331,6 @@ void	nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *pctrlr);
 void	nvme_dump_command(struct nvme_command *cmd);
 void	nvme_dump_completion(struct nvme_completion *cpl);
 
-#define nvme_ctrlr_submit_admin_request(c,r) (c)->nvmec_subadmreq((c), (r))
-#define nvme_ctrlr_submit_io_request(c,r) (c)->nvmec_subioreq((c), (r))
-
 static __inline void
 nvme_single_map(void *arg, bus_dma_segment_t *seg, int nseg, int error)
 {
@@ -350,46 +339,6 @@ nvme_single_map(void *arg, bus_dma_segment_t *seg, int nseg, int error)
 	if (error != 0)
 		printf("nvme_single_map err %d\n", error);
 	*bus_addr = seg[0].ds_addr;
-}
-
-static __inline struct nvme_request *
-_nvme_allocate_request(nvme_cb_fn_t cb_fn, void *cb_arg)
-{
-	struct nvme_request *req;
-
-	req = uma_zalloc(nvme_request_zone, M_NOWAIT | M_ZERO);
-	if (req != NULL) {
-		req->cb_fn = cb_fn;
-		req->cb_arg = cb_arg;
-		req->timeout = TRUE;
-	}
-	return (req);
-}
-
-static __inline struct nvme_request *
-nvme_allocate_request_vaddr(void *payload, uint32_t payload_size,
-    nvme_cb_fn_t cb_fn, void *cb_arg)
-{
-	struct nvme_request *req;
-
-	req = _nvme_allocate_request(cb_fn, cb_arg);
-	if (req != NULL) {
-		req->type = NVME_REQUEST_VADDR;
-		req->u.payload = payload;
-		req->payload_size = payload_size;
-	}
-	return (req);
-}
-
-static __inline struct nvme_request *
-nvme_allocate_request_null(nvme_cb_fn_t cb_fn, void *cb_arg)
-{
-	struct nvme_request *req;
-
-	req = _nvme_allocate_request(cb_fn, cb_arg);
-	if (req != NULL)
-		req->type = NVME_REQUEST_NULL;
-	return (req);
 }
 
 static __inline struct nvme_request *
