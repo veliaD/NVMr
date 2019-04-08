@@ -1678,6 +1678,14 @@ typedef enum {
 #define MAX_NVMR_PROP_GET 0x12FFU
 #define IDENTIFYLEN 4096
 
+#define ISSUE_WAIT_CHECK_REQ                                          \
+	status.done = 0;                                              \
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req); \
+	while (!atomic_load_acq_int(&status.done)) {                  \
+		pause("nvmr", HZ > 100 ? (HZ/100) : 1);               \
+	}                                                             \
+	if (nvme_completion_is_error(&status.cpl))
+
 int
 nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
     uint8_t cns, void *datap, int datalen);
@@ -1706,11 +1714,7 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 	cmd->nvmrcu_idnt.nvmrid_cns = cns;
 	cmd->nvmrcu_idnt.nvmrid_cntid = htole16(cntid);
 
-	status.done = 0;
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
-	while (!atomic_load_acq_int(&status.done))
-		pause("nvme", 1);
-	if (nvme_completion_is_error(&status.cpl)) {
+	ISSUE_WAIT_CHECK_REQ {
 		ERRSPEW("IDENTIFY NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
 		error = ENXIO;
@@ -1751,12 +1755,7 @@ nvmr_admin_propset(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t value,
 	cmd->nvmrcu_prst.nvmrps_ofst = offset;
 	cmd->nvmrcu_prst.nvmrps_value = value;
 
-	status.done = FALSE;
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
-	while (status.done == FALSE) {
-		DELAY(5);
-	}
-	if (nvme_completion_is_error(&status.cpl)) {
+	ISSUE_WAIT_CHECK_REQ {
 		ERRSPEW("PROPSET NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
 		error = ENXIO;
@@ -1885,12 +1884,7 @@ nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
 	cmd->nvmrcu_prgt.nvmrpg_attrib = len;
 	cmd->nvmrcu_prgt.nvmrpg_ofst = offset;
 
-	status.done = FALSE;
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
-	while (status.done == FALSE) {
-		DELAY(5);
-	}
-	if (nvme_completion_is_error(&status.cpl)) {
+	ISSUE_WAIT_CHECK_REQ {
 		ERRSPEW("PROPGET NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
 		error = ENXIO;
