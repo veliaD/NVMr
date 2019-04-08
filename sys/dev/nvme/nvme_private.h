@@ -334,8 +334,6 @@ void	nvme_io_qpair_destroy(struct nvme_pci_qpair *qpair);
 int	nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 			  struct nvme_controller *ctrlr);
 
-void	nvme_ns_destruct(struct nvme_namespace *ns);
-
 void	nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *pctrlr);
 
 void	nvme_dump_command(struct nvme_command *cmd);

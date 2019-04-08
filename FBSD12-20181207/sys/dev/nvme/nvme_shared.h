@@ -650,4 +650,7 @@ void nvme_qpair_print_command(struct nvme_qpair *qpair, struct nvme_command
     *cmd);
 void nvme_qpair_print_completion(struct nvme_qpair *qpair,
     struct nvme_completion *cpl);
+
+void	nvme_ns_destruct(struct nvme_namespace *ns);
+
 #endif /* __NVME_SHARED_H__ */

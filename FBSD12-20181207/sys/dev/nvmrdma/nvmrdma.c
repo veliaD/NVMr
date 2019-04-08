@@ -301,10 +301,11 @@ typedef struct nvmr_cntrlr_tag {
 	char			very_first_field[NVME_VFFSTRSZ+1];
 	struct mtx         nvmrctr_lock;
 	char              *nvmrctr_subnqn;
-	nvmr_qpair_t      *nvmrctr_qarr;  /* Array size determined by prof */
+	nvmr_qpair_t       nvmrctr_adminqp;
+	nvmr_qpair_t      *nvmrctr_ioqarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
-	int                nvmrctr_numqs; /* Q count not always fixed in prof */
+	int                nvmrctr_numioqs; /* count not always fixed in prof */
 	volatile int       nvmrctr_refcount;
 	uint16_t           nvmrctr_port;
 	struct nvme_controller nvmrctr_nvmec;
@@ -610,6 +611,10 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 		goto out;
 	}
 
+	for (count = 0; count < NVME_MAX_NAMESPACES; count++) {
+		nvme_ns_destruct(&cntrlr->nvmrctr_nvmec.cns[count]);
+	}
+
 	if (cntrlr->nvmrctr_nvmec.ccdev) {
 		destroy_dev(cntrlr->nvmrctr_nvmec.ccdev);
 	}
@@ -618,14 +623,15 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 		taskqueue_free(cntrlr->nvmrctr_nvmec.taskqueue);
 	}
 
-	if (cntrlr->nvmrctr_qarr != NULL) {
-		for (count = 0; count < cntrlr->nvmrctr_numqs; count++) {
-			nvmr_queue_destroy(cntrlr->nvmrctr_qarr[count]);
-			cntrlr->nvmrctr_qarr[count] = NULL;
+	if (cntrlr->nvmrctr_ioqarr != NULL) {
+		for (count = 0; count < cntrlr->nvmrctr_numioqs; count++) {
+			nvmr_queue_destroy(cntrlr->nvmrctr_ioqarr[count]);
+			cntrlr->nvmrctr_ioqarr[count] = NULL;
 		}
-		DBGSPEW("free(%p)ing Q array\n", cntrlr->nvmrctr_qarr);
-		free(cntrlr->nvmrctr_qarr, M_NVMR);
+		DBGSPEW("free(%p)ing Q array\n", cntrlr->nvmrctr_ioqarr);
+		free(cntrlr->nvmrctr_ioqarr, M_NVMR);
 	}
+	nvmr_queue_destroy(cntrlr->nvmrctr_adminqp);
 
 	DBGSPEW("free(%p)ing NVMr controller\n", cntrlr);
 	free(cntrlr, M_NVMR);
@@ -1275,7 +1281,7 @@ out:
 
 
 static int
-nvmr_queue_create(nvmr_qprof_t *prof, nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp)
+nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, nvmr_qprof_t *prof)
 {
 	u64 dmaddr;
 	struct ib_mr *mr;
@@ -1682,7 +1688,7 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 		goto out;
 	}
 
-	q = cntrlr->nvmrctr_qarr[0];
+	q = cntrlr->nvmrctr_adminqp;
 	memset(&ident, 0, sizeof(ident));
 	ident.nvmrcu_idnt.nvmrid_nvmf.nvmf_opc = NVME_OPC_IDENTIFY;
 	ident.nvmrcu_idnt.nvmrid_nvmf.nvmf_nsid = htole32(nsid);
@@ -1734,7 +1740,7 @@ nvmr_admin_propset(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t value,
 		goto out;
 	}
 
-	q = cntrlr->nvmrctr_qarr[0];
+	q = cntrlr->nvmrctr_adminqp;
 	memset(&prpst, 0, sizeof(prpst));
 	prpst.nvmrcu_prst.nvmrps_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
 	prpst.nvmrcu_prst.nvmrps_nvmf.nvmf_fctype = NVMF_FCTYPE_PROPSET;
@@ -1784,7 +1790,7 @@ nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
 		goto out;
 	}
 
-	q = cntrlr->nvmrctr_qarr[0];
+	q = cntrlr->nvmrctr_adminqp;
 	memset(&prpgt, 0, sizeof(prpgt));
 	prpgt.nvmrcu_prgt.nvmrpg_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
 	prpgt.nvmrcu_prgt.nvmrpg_nvmf.nvmf_fctype = NVMF_FCTYPE_PROPGET;
@@ -1868,12 +1874,12 @@ nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 	cntrlr = ctrlr->nvmec_tsp;
 	CONFIRMRDMACONTROLLER;
 
-	q = cntrlr->nvmrctr_qarr[0];
+	q = cntrlr->nvmrctr_adminqp;
 	gqp = &q->nvmrq_gqp;
 	req->rqpair = gqp;
 
 	mtx_lock(&gqp->qlock);
-	retval = nvmr_command_async(cntrlr->nvmrctr_qarr[0], req);
+	retval = nvmr_command_async(cntrlr->nvmrctr_adminqp, req);
 	mtx_unlock(&gqp->qlock);
 
 	if (retval != 0) {
@@ -1896,7 +1902,7 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 	cntrlr = ctrlr->nvmec_tsp;
 	CONFIRMRDMACONTROLLER;
 
-	q = cntrlr->nvmrctr_qarr[0]; /* Dummy Q until I/O queues are up */
+	q = cntrlr->nvmrctr_adminqp; /* Dummy Q until I/O queues are up */
 	gqp = &q->nvmrq_gqp;
 	req->rqpair = gqp;
 
@@ -1912,16 +1918,16 @@ int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp)
 {
-	int error, retval, count, qcount, qarrndx;
+	int error, retval, count;
 	struct make_dev_args md_args;
 	nvmr_cntrlr_t cntrlr;
 	nvmr_qpair_t *qarr;
-	nvmr_qndx_t qtndx;
 	unsigned long tmp;
 	nvmr_cntrlcap_t cntrlrcap;
 	uint64_t cntrlrconf;
 	uint32_t unitnum;
 	nvmripv4_t ipv4;
+	nvmr_qprof_t *pf;
 	uint16_t port;
 	uint8_t *identp;
 	char *retp;
@@ -1968,50 +1974,55 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_refcount = 1;
 	strncpy(cntrlr->very_first_field, NVMR_STRING, NVME_VFFSTRSZ);
 
-	qcount = 0;
-	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
-		for (count = 0;
-		    count < prof->nvmrp_qprofs[qtndx].nvmrqp_numqueues;
-		    count++) {
-			qcount++;
-		}
-	}
-	cntrlr->nvmrctr_numqs = qcount;
-
-	qarr = malloc(qcount * sizeof(nvmr_qpair_t), M_NVMR, M_WAITOK|M_ZERO);
-	if (qarr == NULL) {
-		ERRSPEW("Controller Q array allocation sized \"%zu\" failed\n",
-		    qcount * sizeof(nvmr_qpair_t));
-		error = ENOMEM;
+	retval = nvmr_qpair_create(cntrlr, &cntrlr->nvmrctr_adminqp,
+	    &prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN]);
+	if (retval != 0) {
+		ERRSPEW("%s creation failed with %d\n",
+		    nvmr_qndx2name(NVMR_QTYPE_ADMIN), retval);
+		error = retval;
 		goto out;
 	}
-	DBGSPEW("Controller Q array allocation of size \"%zu\"\n",
-	    qcount * sizeof(nvmr_qpair_t));
-	cntrlr->nvmrctr_qarr = qarr;
 
-	/* Allocate the queues and store pointers to them in the qarr */
-	qarrndx = 0;
-	for (qtndx = 0; qtndx < NVMR_NUM_QTYPES; qtndx++) {
-		for (count = 0;
-		    count < prof->nvmrp_qprofs[qtndx].nvmrqp_numqueues;
-		    count++) {
-			retval = nvmr_queue_create(&prof->nvmrp_qprofs[qtndx],
-			    cntrlr, &qarr[qarrndx]);
+	pf = &prof->nvmrp_qprofs[NVMR_QTYPE_IO];
+	/**********
+	 Get smarter about this.
+	 **********/
+	cntrlr->nvmrctr_numioqs = pf->nvmrqp_numqueues;
+
+	if (cntrlr->nvmrctr_numioqs != 0) {
+		qarr = malloc(cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t),
+		    M_NVMR, M_WAITOK|M_ZERO);
+		if (qarr == NULL) {
+			ERRSPEW("IO Q array allocation sized \"%zu\" failed\n",
+			    cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t));
+			error = ENOMEM;
+			goto out;
+		}
+		DBGSPEW("IO Q array allocation of size \"%zu\"\n",
+		    cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t));
+		cntrlr->nvmrctr_ioqarr = qarr;
+
+		/* Allocate the queues and store pointers to them in the qarr */
+		for (count = 0; count < pf->nvmrqp_numqueues; count++) {
+			retval = nvmr_qpair_create(cntrlr, &qarr[count], pf);
 			if (retval != 0) {
 				ERRSPEW("%s#%d creation failed with %d\n",
-				    nvmr_qndx2name(qtndx), count, retval);
-				break;
-			} else {
-				qarrndx++;
+				    nvmr_qndx2name(NVMR_QTYPE_IO), count,
+				    retval);
+				error = retval;
+				goto out;
 			}
 		}
-		if (count != prof->nvmrp_qprofs[qtndx].nvmrqp_numqueues) {
+		if (count != pf->nvmrqp_numqueues) {
 			error = retval;
 			goto out;
 		}
+		KASSERT(count == cntrlr->nvmrctr_numioqs,
+		    ("count:%d numqs:%d", count, cntrlr->nvmrctr_numioqs));
+	} else {
+		cntrlr->nvmrctr_ioqarr = NULL;
 	}
-	KASSERT(qarrndx == cntrlr->nvmrctr_numqs,("qarrndx:%d numqs:%d",
-	    qarrndx, cntrlr->nvmrctr_numqs));
+
 
 	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
 	    NVMR_PROPLEN_8BYTES);
