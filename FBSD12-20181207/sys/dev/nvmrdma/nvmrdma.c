@@ -1288,6 +1288,14 @@ out:
 		goto out;                                                  \
 	}                                                                  \
 
+#define ISSUE_WAIT_CHECK_REQ                                          \
+	status.done = 0;                                              \
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req); \
+	while (!atomic_load_acq_int(&status.done)) {                  \
+		pause("nvmr", HZ > 100 ? (HZ/100) : 1);               \
+	}                                                             \
+	if (nvme_completion_is_error(&status.cpl))
+
 
 static int
 nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, nvmr_qprof_t *prof)
@@ -1311,8 +1319,11 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, nvmr_qprof_t *prof)
 	nvmr_rdma_cm_request_t privdata;
 	struct ib_cq *ibcq;
 	struct nvmrdma_connect_data ncdata;
-	nvmr_communion_t comm;
-	struct nvme_completion compl;
+
+	nvmr_communion_t *cmd;
+	struct nvme_request *req;
+	struct nvme_completion_poll_status status;
+
 
 	sin4 = (struct sockaddr_in *)&saddr;
 
@@ -1622,42 +1633,25 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, nvmr_qprof_t *prof)
 	snprintf(ncdata.nvmrcd_hostnqn, sizeof(ncdata.nvmrcd_hostnqn),
 	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string);
 
-	memset(&comm, 0, sizeof(comm));
-	comm.nvmrcu_conn.nvmrcn_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
-	comm.nvmrcu_conn.nvmrcn_nvmf.nvmf_fctype = NVMF_FCTYPE_CONNECT;
-	comm.nvmrcu_conn.nvmrcn_recfmt = 0;
-	comm.nvmrcu_conn.nvmrcn_qid = 0;
-	comm.nvmrcu_conn.nvmrcn_sqsize =
+	req = nvme_allocate_request_vaddr(&ncdata, sizeof(ncdata),
+	    nvme_completion_poll_cb, &status);
+	cmd = (nvmr_communion_t *)&req->cmd;
+	cmd->nvmrcu_conn.nvmrcn_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
+	cmd->nvmrcu_conn.nvmrcn_nvmf.nvmf_fctype = NVMF_FCTYPE_CONNECT;
+	cmd->nvmrcu_conn.nvmrcn_recfmt = 0;
+	cmd->nvmrcu_conn.nvmrcn_qid = 0;
+	cmd->nvmrcu_conn.nvmrcn_sqsize =
 	    htole16(prof->nvmrqp_pdnumsndqsz);
-	comm.nvmrcu_conn.nvmrcn_cattr = 0;
-	comm.nvmrcu_conn.nvmrcn_kato = htole32(prof->nvmrqp_kato);
+	cmd->nvmrcu_conn.nvmrcn_cattr = 0;
+	cmd->nvmrcu_conn.nvmrcn_kato = htole32(prof->nvmrqp_kato);
 
-	/*
-	 * Now queue the CONNECT command along with the CONNECT data
-	 * and wait for the NVMe response
-	 */
-	retval = nvmr_command_sync(q, &comm.nvmrcu_stub, &ncdata,
-	    sizeof(ncdata), NVMR_QCMD_RO, &compl);
-	if (retval != 0) {
+	ISSUE_WAIT_CHECK_REQ {
 		ERRSPEW("CONNECT NVMeoF command to subNQN \"%s\" failed!\n",
-		   cntrlr->nvmrctr_subnqn);
-		error = retval;
-		goto out;
-	}
-
-	if (compl.status != 0) {
-		ERRSPEW("Bad resp(%p) for CONNECT to subNQN:\n\t"
-		   "\"%s\"\n", &compl, cntrlr->nvmrctr_subnqn);
-		error = EPROTO;
-		goto out;
-	} else {
-		DBGSPEW("CONNECT command succeeded to subNQN \"%s\"\n",
 		    cntrlr->nvmrctr_subnqn);
+		error = ENXIO;
+		goto out;
 	}
 
-	/**********
-	 Need to cleanup!!!!!!
-	 **********/
 	error = 0;
 
 out:
@@ -1677,14 +1671,6 @@ typedef enum {
 
 #define MAX_NVMR_PROP_GET 0x12FFU
 #define IDENTIFYLEN 4096
-
-#define ISSUE_WAIT_CHECK_REQ                                          \
-	status.done = 0;                                              \
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req); \
-	while (!atomic_load_acq_int(&status.done)) {                  \
-		pause("nvmr", HZ > 100 ? (HZ/100) : 1);               \
-	}                                                             \
-	if (nvme_completion_is_error(&status.cpl))
 
 int
 nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
