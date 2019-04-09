@@ -2,6 +2,8 @@ VELPATHTOKRNSRCS=$(cd `dirname ${0}`/../FBSD12-20181207/./; echo $PWD)
 export KERNBUILDDIR=$(cd ${VELPATHTOKRNSRCS}/../../obj/./; echo $PWD)
 export MAKEOBJDIRPREFIX=${KERNBUILDDIR}
 
+export VELKERNELINSTALLLOCATION="/boot/kernel/./"
+export VELDEBUGINSTALLLOCATION="/usr/lib/debug/${VELKERNELINSTALLLOCATION}"
 export BLDERROUT="$TEMP/buildKrnl.errout"
 export NSTLERROUT="$TEMP/installKrnl.errout"
 export KERNCONF=VEL01-DEBUG

@@ -183,7 +183,7 @@ CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
 #define HOSTNQN_TEMPLATE "nqn.2014-08.org.nvmexpress:uuid:%s"
 #define DISCOVERY_SUBNQN "nqn.2014-08.org.nvmexpress.discovery"
 
-#define NVMR_DEFAULT_KATO 0x1D4C0
+#define NVMR_DEFAULT_KATO 0x1D4C0000
 #define NVMR_DISCOVERY_KATO 0x0 /* DISCOVERY KATO has to be 0 */
 #define NVMF_FCTYPE_PROPSET 0x0
 #define NVMF_FCTYPE_CONNECT 0x1
@@ -422,6 +422,46 @@ nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_comple
 }
 
 static void
+nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc);
+
+static int
+nvmr_post_cmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp)
+{
+	struct nvme_completion *ncmp;
+	struct ib_recv_wr rcvwr, *badrcvwrp;
+	struct ib_sge sgl;
+	struct ib_device *ibd;
+	int retval;
+	struct ib_pd *ibpd;
+
+	ibd = q->nvmrq_cmid->device;
+	ibpd = q->nvmrq_ibpd;
+
+	ncmp = &cmplp->nvmrsp_nvmecmpl;
+	memset(&rcvwr, 0, sizeof(rcvwr));
+	memset(&sgl, 0, sizeof(sgl));
+	cmplp->nvmrsp_nvmecompl = ncmp;
+
+	sgl.addr   = cmplp->nvmrsp_dmaddr;
+	sgl.length = sizeof(*(cmplp->nvmrsp_nvmecompl));
+	sgl.lkey   = ibpd->local_dma_lkey;
+
+	cmplp->nvmrsp_cqe.done = nvmr_recv_cmplhndlr;
+
+	rcvwr.sg_list = &sgl;
+	rcvwr.num_sge = 1;
+	rcvwr.wr_cqe  = &cmplp->nvmrsp_cqe;
+	rcvwr.next    = NULL;
+
+	ib_dma_sync_single_for_device(ibd, cmplp->nvmrsp_dmaddr,
+	    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
+	retval = ib_post_recv(q->nvmrq_ibqp, &rcvwr, &badrcvwrp);
+
+	return retval;
+}
+
+
+static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct nvmr_ncmplcont *cmplp;
@@ -439,13 +479,17 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	case IB_WC_WR_FLUSH_ERR:
 		break;
 	default:
-		ERRSPEW("cmplp:%p, wc_status:\"%s\". Repost me!\n", cmplp,
+		ERRSPEW("cmplp:%p, wc_status:\"%s\"\n", cmplp,
 		    ib_wc_status_msg(wc->status));
 		break;
 	}
 
 	ib_dma_sync_single_for_cpu(q->nvmrq_cmid->device, cmplp->nvmrsp_dmaddr,
 	    sizeof(*(cmplp->nvmrsp_nvmecompl)), DMA_FROM_DEVICE);
+
+	if (wc->status == IB_WC_WR_FLUSH_ERR) {
+		goto out_no_repost;
+	}
 
 	if (wc->status != IB_WC_SUCCESS) {
 		goto out;
@@ -521,6 +565,9 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	WAKEWAITERS;
 
 out:
+	nvmr_post_cmpl(q, cmplp);
+
+out_no_repost:
 	return;
 }
 
@@ -800,45 +847,42 @@ nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req)
 }
 
 
+/*
+ *    Based on iser_bio_to_sg()
+ */
 int
-nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
-    struct ib_reg_wr *regwrp);
+nvmr_map_bio(nvmr_qpair_t q, nvmr_ncommcon_t *commp, int *np);
 int
-nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
-    struct ib_reg_wr *regwrp)
+nvmr_map_bio(nvmr_qpair_t q, nvmr_ncommcon_t *commp, int *np)
 {
 	uintptr_t offset;
+	int n, error;
 	size_t len, translen;
-	int /* count, */n, nn, nnn, error;
-	struct ib_mr *mr;
-	enum dma_data_direction dir;
-	void *cbuf;
 	struct scatterlist *s, *scl;
-	struct ib_device *ibd;
-	uint8_t dirbits;
-	nvmr_communion_t *cmd;
+	struct bio *bio;
 
-	KASSERT(commp->nvmrsnd_req->type == NVME_REQUEST_VADDR, ("%s@%d r:%p "
-	    "t:%d\n", __func__, __LINE__, commp->nvmrsnd_req,
-	    commp->nvmrsnd_req->type));
+	mtx_assert(&q->nvmrq_gqp.qlock, MA_OWNED);
 
-	ibd = q->nvmrq_cmid->device;
+	*np = 0;
+	bio = commp->nvmrsnd_req->u.bio;
+	translen = bio->bio_bcount;
+	if (translen == 0) {
+		error = ENOTSUPP;
+		ERRSPEW("0 length NVMe request data not supported\n");
+		goto out;
+	}
+	offset = bio->bio_ma_offset;
 	scl = q->nvmrq_scl;
-	/*
-	 * 1) Translate the optional command data into a scatterlist array
-	 *    for ib_dma_map_sg() to use a la iser_buf_to_sg()
-	 */
-	translen = commp->nvmrsnd_req->payload_size;
-	cbuf = commp->nvmrsnd_req->u.payload;
+
 	for (n = 0; (0 < translen) && (n < MAX_NVME_RDMA_SEGMENTS); n++,
 	    translen -= len) {
 		memset(scl + n, 0, sizeof(*scl));
 		s = scl + n;
-		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
 		len = min(PAGE_SIZE - offset, translen);
-		sg_set_buf(s, cbuf, len);
-		cbuf = (void *)(((u64)cbuf) + (u64)len);
+		sg_set_page(s, bio->bio_ma[n], len, offset);
+		offset = 0;
 	}
+
 	if (translen != 0) {
 		ERRSPEW("Could not complete translation of Data. n:%d "
 		    "translen:%zu\n", n, translen);
@@ -857,6 +901,159 @@ nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
 		}
 		 */
 	}
+	sg_mark_end(s);
+
+	*np = n;
+	error = 0;
+
+out:
+	return error;
+}
+
+/*
+ *    Based on iser_buf_to_sg()
+ */
+int
+nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, int *np);
+int
+nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, int *np)
+{
+	uintptr_t offset;
+	int n, error;
+	size_t len, translen;
+	void *cbuf;
+	struct scatterlist *s, *scl;
+	uint32_t type;
+
+	mtx_assert(&q->nvmrq_gqp.qlock, MA_OWNED);
+
+	*np = 0;
+	scl = q->nvmrq_scl;
+	type = commp->nvmrsnd_req->type;
+
+	switch (type) {
+	case NVME_REQUEST_BIO:
+		translen = commp->nvmrsnd_req->u.bio->bio_bcount;
+		cbuf = commp->nvmrsnd_req->u.bio->bio_data;
+		break;
+	case NVME_REQUEST_VADDR:
+		translen = commp->nvmrsnd_req->payload_size;
+		cbuf = commp->nvmrsnd_req->u.payload;
+		break;
+	default:
+		panic("%s@%d Unsupported NVMe request type:%d c:%p\n", __func__,
+		    __LINE__, type, commp);
+		break;
+	}
+
+	if (cbuf == NULL) {
+		error = EINVAL;
+		ERRSPEW("NULL NVMe request data not supported, t:%u\n", type);
+		goto out;
+	}
+	if (translen == 0) {
+		error = ENOTSUPP;
+		ERRSPEW("0 length NVMe request data not supported\n");
+		goto out;
+	}
+
+	for (n = 0; (0 < translen) && (n < MAX_NVME_RDMA_SEGMENTS); n++,
+	    translen -= len) {
+		memset(scl + n, 0, sizeof(*scl));
+		s = scl + n;
+		offset = ((uintptr_t)cbuf) & ~PAGE_MASK;
+		len = min(PAGE_SIZE - offset, translen);
+		sg_set_buf(s, cbuf, len);
+		cbuf = (void *)(((u64)cbuf) + (u64)len);
+	}
+
+	if (translen != 0) {
+		ERRSPEW("Could not complete translation of Data. n:%d "
+		    "translen:%zu\n", n, translen);
+		error = E2BIG;
+		goto out;
+	} else {
+		/*
+		DBGSPEW("data is 0x%p\n", commp->nvmrsnd_req->u.payload);
+		for (count = 0; count < n; count++) {
+			DBGSPEW("scl[%d](hex) p:%16lX o:%8X l:%8X a:%16lX\n",
+			count,
+			scl[count].page_link,
+			scl[count].offset,
+			scl[count].length,
+			scl[count].address);
+		}
+		 */
+	}
+	sg_mark_end(s);
+
+	*np = n;
+	error = 0;
+
+out:
+	return error;
+}
+
+int
+nvmr_map_data(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
+    struct ib_reg_wr *regwrp);
+int
+nvmr_map_data(nvmr_qpair_t q, nvmr_ncommcon_t *commp, nvmr_ksgl_t *k,
+    struct ib_reg_wr *regwrp)
+{
+	int n, nn, nnn, error, retval;
+	struct ib_mr *mr;
+	struct scatterlist *scl;
+	enum dma_data_direction dir;
+	struct ib_device *ibd;
+	uint8_t dirbits;
+	nvmr_communion_t *cmd;
+	uint16_t bf;
+
+	mtx_assert(&q->nvmrq_gqp.qlock, MA_OWNED);
+
+	KASSERT(commp->nvmrsnd_req->type != NVME_REQUEST_NULL, ("%s@%d r:%p "
+	    "t:%d\n", __func__, __LINE__, commp->nvmrsnd_req,
+	    commp->nvmrsnd_req->type));
+
+	ibd = q->nvmrq_cmid->device;
+	/*
+	 * 1) Translate the command data into a scatterlist array
+	 *    for ib_dma_map_sg() to use a la iser_buf_to_sg()
+	 */
+	switch (commp->nvmrsnd_req->type) {
+	case NVME_REQUEST_VADDR:
+		retval = nvmr_map_vaddr(q, commp, &n);
+		break;
+	case NVME_REQUEST_BIO:
+		bf = commp->nvmrsnd_req->u.bio->bio_flags;
+		switch(bf & (BIO_VLIST|BIO_UNMAPPED)) {
+		case 0:
+			retval = nvmr_map_vaddr(q, commp, &n);
+			break;
+		case BIO_UNMAPPED:
+			retval = nvmr_map_bio(q, commp, &n);
+			break;
+		case BIO_VLIST:
+		default:
+			retval = ENOTSUPP;
+			break;
+
+		}
+		break;
+	default:
+		panic("%s@%d Unsupported NVMe req memory type r:%p t:0x%x",
+		    __func__, __LINE__, commp->nvmrsnd_req,
+		    commp->nvmrsnd_req->type);
+	}
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_map_(q:%p commp:%p) failed:%d\n", q, commp,
+		    retval);
+		goto out;
+	}
+
+	scl = q->nvmrq_scl; /* Now contains RDMA segments */
 
 	/* 2) Map the scatterlist array per the direction to/from IB device */
 	cmd = (nvmr_communion_t *)&commp->nvmrsnd_req->cmd;
@@ -950,6 +1147,7 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 	mtx_assert(&gq->qlock, MA_OWNED);
 
 	switch(req->type) {
+	case NVME_REQUEST_BIO:
 	case NVME_REQUEST_VADDR:
 	case NVME_REQUEST_NULL:
 		break;
@@ -961,9 +1159,13 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 	commp = STAILQ_FIRST(&q->nvmrq_comms);
 	if ((commp == NULL) || (!gq->qis_enabled)) {
 		if (cntrlr->nvmrctr_nvmec.is_failed) {
-			error = ENOSPC;
+			ERRSPEW("Controller:%p:%p has failed\n", cntrlr,
+			    &cntrlr->nvmrctr_nvmec);
+			error = ESHUTDOWN;
 		} else {
 			/* STAILQ_INSERT_TAIL(&q->nvmrq_defreqs, req, stailq);*/
+			ERRSPEW("Deferred Qing unimplemented. c:%p:%p\n",
+			    cntrlr, &cntrlr->nvmrctr_nvmec);
 			error = ENOSPC;
 		}
 		goto out;
@@ -985,11 +1187,12 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 
 	memset(k, 0, sizeof(*k));
 	switch(req->type) {
+	case NVME_REQUEST_BIO:
 	case NVME_REQUEST_VADDR:
-		retval = nvmr_map_vaddr(q, commp, k, &regwr);
+		retval = nvmr_map_data(q, commp, k, &regwr);
 		if (retval != 0) {
 			error = retval;
-			DBGSPEW("nvmr_map_vaddr(c:%p q:%p):%d\n", commp,
+			ERRSPEW("nvmr_map_data(c:%p q:%p):%d\n", commp,
 			    q, retval);
 			goto out;
 		}
@@ -1102,18 +1305,13 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
 	nvmr_cntrlr_t cntrlr;
 	nvmr_qpair_t q;
-	struct nvme_qpair *gqp;
 
 	KASSERT_NVMR_CNTRLR(ctrlr);
 	cntrlr = ctrlr->nvmec_tsp;
 	CONFIRMRDMACONTROLLER;
 
-	q = cntrlr->nvmrctr_adminqp; /* Dummy Q until I/O queues are up */
-	gqp = &q->nvmrq_gqp;
-	req->rqpair = gqp;
-
-	DBGSPEW("Blindly Failing req:%p\n", req);
-	nvmr_ctrlr_post_failed_request(cntrlr, req);
+	q = cntrlr->nvmrctr_ioqarr[0]; /* Single Q until I/O queues are up */
+	nvmr_submit_req(q, req);
 }
 
 
@@ -1167,9 +1365,6 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 {
 	u64 dmaddr;
 	struct ib_mr *mr;
-	struct ib_recv_wr rcvwr, *badrcvwrp;
-	struct ib_sge sgl;
-	struct nvme_completion *ncmp;
 	struct ib_device *ibd;
 	struct sockaddr_storage saddr;
 	struct sockaddr_in *sin4;
@@ -1432,26 +1627,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	 * associated Completion Q elements as well.
 	 */
 	STAILQ_FOREACH(cmplp, &q->nvmrq_cmpls, nvmrsp_next) {
-		ncmp = &cmplp->nvmrsp_nvmecmpl;
-		memset(ncmp, 0, sizeof(*ncmp));
-		memset(&rcvwr, 0, sizeof(rcvwr));
-		memset(&sgl, 0, sizeof(sgl));
-		cmplp->nvmrsp_nvmecompl = ncmp;
-
-		sgl.addr   = cmplp->nvmrsp_dmaddr;
-		sgl.length = sizeof(*(cmplp->nvmrsp_nvmecompl));
-		sgl.lkey   = ibpd->local_dma_lkey;
-
-		cmplp->nvmrsp_cqe.done = nvmr_recv_cmplhndlr;
-
-		rcvwr.sg_list = &sgl;
-		rcvwr.num_sge = 1;
-		rcvwr.wr_cqe  = &cmplp->nvmrsp_cqe;
-		rcvwr.next    = NULL;
-
-		ib_dma_sync_single_for_device(ibd, cmplp->nvmrsp_dmaddr,
-		    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
-		retval = ib_post_recv(q->nvmrq_ibqp, &rcvwr, &badrcvwrp);
+		retval = nvmr_post_cmpl(q, cmplp);
 		if (retval != 0) {
 			ERRSPEW("ib_post_recv() failed for #%d with %d\n",
 			    count, retval);
