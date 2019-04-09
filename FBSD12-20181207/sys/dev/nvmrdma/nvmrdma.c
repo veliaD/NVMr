@@ -317,6 +317,7 @@ nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
 	return;
 }
 
+#define MAX_IO_WORK_REQUESTS 1000
 nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
 		.nvmrqp_numqueues = 1,
@@ -334,13 +335,13 @@ nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_IO] = {
 		.nvmrqp_numqueues = 1,
 
-		.nvmrqp_numsndqe = (3 * MAX_ADMIN_WORK_REQUESTS) + 1,
+		.nvmrqp_numsndqe = (3 * MAX_IO_WORK_REQUESTS) + 1,
 		.nvmrqp_numsndsge = 1 + 1, /* NVMe Command  + Register MR */
-		.nvmrqp_pdnumsndqsz = MAX_ADMIN_WORK_REQUESTS - 1,
+		.nvmrqp_pdnumsndqsz = MAX_IO_WORK_REQUESTS - 1,
 
-		.nvmrqp_numrcvqe = MAX_ADMIN_WORK_REQUESTS + 1,
+		.nvmrqp_numrcvqe = MAX_IO_WORK_REQUESTS + 1,
 		.nvmrqp_numrcvsge = 1, /* NVMe Completion */
-		.nvmrqp_pdnumrcvqsz = MAX_ADMIN_WORK_REQUESTS,
+		.nvmrqp_pdnumrcvqsz = MAX_IO_WORK_REQUESTS,
 
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
 	},
