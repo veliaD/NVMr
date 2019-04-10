@@ -1646,7 +1646,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	memset(&conn_param, 0, sizeof(conn_param));
 	memset(&privdata, 0, sizeof(privdata));
 	privdata.nvmrcr_recfmt = 0;
-	privdata.nvmrcr_qid = 0;
+	privdata.nvmrcr_qid = qid;
 	privdata.nvmrcr_hrqsize = htole16(prof->nvmrqp_pdnumrcvqsz);
 	privdata.nvmrcr_hsqsize = htole16(prof->nvmrqp_pdnumsndqsz);
 	conn_param.responder_resources = ibd->attrs.max_qp_rd_atom;
