@@ -634,6 +634,8 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 		goto out;
 	}
 
+	nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
+
 	for (count = 0; count < NVME_MAX_NAMESPACES; count++) {
 		nvme_ns_destruct(&cntrlr->nvmrctr_nvmec.cns[count]);
 	}
@@ -2261,6 +2263,7 @@ veladdr_connect(void)
 
 	nvmr_cntrlr_ref(glbl_cntrlr); /* For the nvme registration below */
 	nvme_register_controller(&glbl_cntrlr->nvmrctr_nvmec);
+	nvme_notify_new_controller(&glbl_cntrlr->nvmrctr_nvmec);
 out:
 
 

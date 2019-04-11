@@ -460,14 +460,13 @@ nvme_notify(struct nvme_consumer *cons,
 }
 
 void
-nvme_notify_new_controller(struct nvme_pci_controller *pctrlr)
+nvme_notify_new_controller(struct nvme_controller *ctrlr)
 {
 	int i;
 
-	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		if (nvme_consumer[i].id != INVALID_CONSUMER_ID) {
-			nvme_notify(&nvme_consumer[i], &pctrlr->ctrlr);
+			nvme_notify(&nvme_consumer[i], ctrlr);
 		}
 	}
 }
@@ -504,25 +503,24 @@ nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 }
 
 void
-nvme_notify_fail_consumers(struct nvme_pci_controller *pctrlr)
+nvme_notify_fail_consumers(struct nvme_controller *ctrlr)
 {
 	struct nvme_consumer	*cons;
 	uint32_t		i;
 
-	CONFIRMPCIECONTROLLER;
 	/*
 	 * This controller failed during initialization (i.e. IDENTIFY
 	 *  command failed or timed out).  Do not notify any nvme
 	 *  consumers of the failure here, since the consumer does not
 	 *  even know about the controller yet.
 	 */
-	if (!pctrlr->ctrlr.is_initialized)
+	if (!ctrlr->is_initialized)
 		return;
 
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->fail_fn != NULL)
-			cons->fail_fn(pctrlr->ctrlr.ccons_cookie[i]);
+			cons->fail_fn(ctrlr->ccons_cookie[i]);
 	}
 }
 

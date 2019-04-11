@@ -216,7 +216,7 @@ nvme_ctrlr_fail(struct nvme_pci_controller *pctrlr)
 		for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
 			nvmp_qpair_fail(&pctrlr->ioq[i]);
 	}
-	nvme_notify_fail_consumers(pctrlr);
+	nvme_notify_fail_consumers(&pctrlr->ctrlr);
 }
 
 void
@@ -954,7 +954,7 @@ nvme_ctrlr_start_config_hook(void *arg)
 	config_intrhook_disestablish(&pctrlr->config_hook);
 
 	pctrlr->ctrlr.is_initialized = 1;
-	nvme_notify_new_controller(pctrlr);
+	nvme_notify_new_controller(&pctrlr->ctrlr);
 }
 
 static void
@@ -1367,7 +1367,7 @@ nvme_ctrlr_destruct(struct nvme_pci_controller *pctrlr, device_t dev)
 	if (pctrlr->resource == NULL)
 		goto nores;
 
-	nvme_notify_fail_consumers(pctrlr);
+	nvme_notify_fail_consumers(&pctrlr->ctrlr);
 
 	for (i = 0; i < NVME_MAX_NAMESPACES; i++)
 		nvme_ns_destruct(&pctrlr->ctrlr.cns[i]);

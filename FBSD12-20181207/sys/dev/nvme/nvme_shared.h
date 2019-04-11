@@ -709,4 +709,7 @@ void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 #define nvme_ctrlr_submit_admin_request(c,r) (c)->nvmec_subadmreq((c), (r))
 #define nvme_ctrlr_submit_io_request(c,r) (c)->nvmec_subioreq((c), (r))
 
+void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
+void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
+
 #endif /* __NVME_SHARED_H__ */

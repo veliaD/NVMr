@@ -378,8 +378,6 @@ void	nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 				    const struct nvme_completion *async_cpl,
 				    uint32_t log_page_id, void *log_page_buffer,
 				    uint32_t log_page_size);
-void	nvme_notify_fail_consumers(struct nvme_pci_controller *pctrlr);
-void	nvme_notify_new_controller(struct nvme_pci_controller *pctrlr);
 void	nvme_notify_ns(struct nvme_pci_controller *pctrlr, int nsid);
 
 void	nvme_ctrlr_intx_handler(void *arg);
