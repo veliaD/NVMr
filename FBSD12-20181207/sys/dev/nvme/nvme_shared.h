@@ -384,7 +384,12 @@ struct nvme_controller_data {
 	uint8_t			reserved8[768];
 
 	/* bytes 1792-2047: NVMe over Fabrics specification */
-	uint8_t			reserved9[256];
+	uint32_t		nidf_ioccsz;
+	uint32_t		nidf_iorcsz;
+	uint16_t		nidf_icdoff;
+	uint8_t			nidf_ctrattr;
+	uint8_t			nidf_msdbd;
+	uint8_t			reserved9[244];
 
 	/* bytes 2048-3071: power state descriptors */
 	struct nvme_power_state power_state[32];

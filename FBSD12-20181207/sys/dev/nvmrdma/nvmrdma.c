@@ -28,7 +28,6 @@
 
 #include <dev/nvme/nvme_shared.h>
 
-#define MAX_ADMIN_WORK_REQUESTS 32
 #define MAX_NVME_RDMA_SEGMENTS 256
 
 typedef struct {
@@ -233,11 +232,7 @@ typedef struct {
 	int      nvmrqp_numqueues;
 	int      nvmrqp_numsndqe;
 	int      nvmrqp_numrcvqe;
-	int      nvmrqp_numsndsge;
-	int      nvmrqp_numrcvsge;
 	uint32_t nvmrqp_kato;
-	uint16_t nvmrqp_pdnumsndqsz;
-	uint16_t nvmrqp_pdnumrcvqsz;
 } nvmr_qprof_t;
 
 typedef enum {
@@ -260,7 +255,6 @@ nvmr_qndx2name(nvmr_qndx_t qndx)
 
 typedef struct {
 	nvmr_qprof_t	   nvmrp_qprofs[NVMR_NUM_QTYPES];
-	nvmr_crtcntrlrcb_t nvmrp_cbfunc;
 } nvmr_cntrlrprof_t;
 
 typedef enum {
@@ -317,35 +311,25 @@ nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
 	return;
 }
 
-#define MAX_IO_WORK_REQUESTS 1000
+#define NVMR_NUMSNDSGE (1 + 1) /* NVMe Command  + Inline data */
+#define NVMR_NUMRCVSGE 1       /* NVMe Completion */
+
+#define MAX_ADMINQ_ELEMENTS 32
+#define MAX_IOQ_ELEMENTS 1000
+
 nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
 		.nvmrqp_numqueues = 1,
-
-		.nvmrqp_numsndqe = (3 * MAX_ADMIN_WORK_REQUESTS) + 1,
-		.nvmrqp_numsndsge = 1 + 1, /* NVMe Command  + Register MR */
-		.nvmrqp_pdnumsndqsz = MAX_ADMIN_WORK_REQUESTS - 1,
-
-		.nvmrqp_numrcvqe = MAX_ADMIN_WORK_REQUESTS + 1,
-		.nvmrqp_numrcvsge = 1, /* NVMe Completion */
-		.nvmrqp_pdnumrcvqsz = MAX_ADMIN_WORK_REQUESTS,
-
+		.nvmrqp_numsndqe = MAX_ADMINQ_ELEMENTS - 1,
+		.nvmrqp_numrcvqe = MAX_ADMINQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
 	},
 	.nvmrp_qprofs[NVMR_QTYPE_IO] = {
 		.nvmrqp_numqueues = 1,
-
-		.nvmrqp_numsndqe = (3 * MAX_IO_WORK_REQUESTS) + 1,
-		.nvmrqp_numsndsge = 1 + 1, /* NVMe Command  + Register MR */
-		.nvmrqp_pdnumsndqsz = MAX_IO_WORK_REQUESTS - 1,
-
-		.nvmrqp_numrcvqe = MAX_IO_WORK_REQUESTS + 1,
-		.nvmrqp_numrcvsge = 1, /* NVMe Completion */
-		.nvmrqp_pdnumrcvqsz = MAX_IO_WORK_REQUESTS,
-
+		.nvmrqp_numsndqe = MAX_IOQ_ELEMENTS - 1,
+		.nvmrqp_numrcvqe = MAX_IOQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
 	},
-	.nvmrp_cbfunc   = nvmr_discov_cntrlr,
 };
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
@@ -1380,6 +1364,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	nvmr_rdma_cm_request_t privdata;
 	struct ib_cq *ibcq;
 	struct nvmrdma_connect_data ncdata;
+	size_t msz;
 
 	nvmr_communion_t *cmd;
 	struct nvme_request *req;
@@ -1388,18 +1373,17 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 
 	sin4 = (struct sockaddr_in *)&saddr;
 
-	q = malloc(sizeof *q, M_NVMR, M_WAITOK|M_ZERO);
+	msz = sizeof *q;
+	q = malloc(msz, M_NVMR, M_WAITOK|M_ZERO);
 	if (q == NULL) {
-		ERRSPEW("NVMr Q allocation sized \"%zu\" failed\n",
-		    sizeof *q);
+		ERRSPEW("NVMr Q allocation sized \"%zu\" failed\n", msz);
 		error = ENOMEM;
 		goto out;
 	}
-	DBGSPEW("NVMr Q allocation of size \"%zu\"\n", sizeof *q);
+	DBGSPEW("NVMr Q allocation of size \"%zu\"\n", msz);
 	q->nvmrq_cntrlr = cntrlr;
 	q->nvmrq_state = NVMRQ_PRE_INIT;
 	q->nvmrq_prof = prof;
-	q->nvmrq_gqp.num_qentries = prof->nvmrqp_numsndqe;
 	q->nvmrq_gqp.qis_enabled = TRUE;
 	q->nvmrq_gqp.qttype = NVMET_RDMA;
 	q->nvmrq_gqp.gqctrlr = &cntrlr->nvmrctr_nvmec;
@@ -1422,7 +1406,8 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	 * struct nvme_command (or fabric equivalent)
 	 */
 	for (count = 0; count < prof->nvmrqp_numsndqe; count++) {
-		commp = malloc(sizeof(*commp),  M_NVMR, M_WAITOK|M_ZERO);
+		msz = sizeof(*commp);
+		commp = malloc(msz,  M_NVMR, M_WAITOK|M_ZERO);
 		if (commp == NULL) {
 			ERRSPEW("Command Q container allocation failed after"
 			    " %d iterations\n", count);
@@ -1436,22 +1421,22 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 		}
 	}
 	DBGSPEW("Alloced %d command Q containers\n", q->nvmrq_numsndqe);
+	q->nvmrq_gqp.num_qentries = q->nvmrq_numsndqe;
 
 	/*
 	 * Allocate a mapping array for looking up an NVMe command when we get
 	 * an NVMe completion
 	 */
 
-	commparrp = malloc((sizeof(*commparrp)) * q->nvmrq_numsndqe, M_NVMR,
-	    M_WAITOK|M_ZERO);
+	msz = sizeof(*commparrp) * (q->nvmrq_numsndqe + 1);
+	commparrp = malloc(msz, M_NVMR, M_WAITOK|M_ZERO);
 	if (commparrp == NULL) {
 		ERRSPEW("NVMr allocation of %zu for mapping array failed \n",
-		    sizeof(*commparrp) * q->nvmrq_numsndqe);
+		    msz);
 		error = ENOMEM;
 		goto out;
 	}
-	DBGSPEW("NVMr allocation of %zu bytes for mapping array\n",
-	    sizeof(*commparrp) * (q->nvmrq_numsndqe + 1));
+	DBGSPEW("NVMr allocation of %zu bytes for mapping array\n", msz);
 	commp = STAILQ_FIRST(&q->nvmrq_comms);
 	commparrp[0] = (nvmr_ncommcon_t *)(0xDEADD00D8BADBEEFull);
 	for (count = 1; count < (q->nvmrq_numsndqe + 1); count++) {
@@ -1470,7 +1455,8 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	 * struct nvme_completion
 	 */
 	for (count = 0; count < prof->nvmrqp_numrcvqe; count++) {
-		cmplp = malloc(sizeof(*cmplp),  M_NVMR, M_WAITOK|M_ZERO);
+		msz = sizeof(*cmplp);
+		cmplp = malloc(msz,  M_NVMR, M_WAITOK|M_ZERO);
 		if (cmplp == NULL) {
 			ERRSPEW("Completion Q container allocation failed after"
 			    " %d iterations\n", count);
@@ -1584,13 +1570,31 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	POST_ASYNC_CM_INVOCATION(__stringify(rdma_resolve_route),
 	    NVMRQ_PRE_ROUTE_RESOLV, NVMRQ_ROUTE_RESOLV_SUCCEEDED);
 
+
+	/*
+	 * Now create the RDMA queue pair that we can post the NVMe command
+	 * (Send Q) and NVMe completion (Recv Q) buffers to.
+	 */
+	memset(&init_attr, 0, sizeof(init_attr));
+	/*
+	 * Every Send Queue Element can potentially use a Work Request for:
+	 * 1) The Send 2) An optional MR Registration 3) An invalidate for
+	 * the MR Registration.  So a total of 3 per SendQE.  Add one more
+	 * for when ib_drain_qp() is invoked.
+	 */
+	init_attr.cap.max_send_wr = (q->nvmrq_numsndqe * 3) + 1;
+
+	/* One more for ib_drain_qp() */
+	init_attr.cap.max_recv_wr = q->nvmrq_numrcvqe + 1;
+
 	/*
 	 * Allocate an RDMA completion Q for receiving the status of Work
 	 * Requests (Send/Recv) on the Q pair.  It should be deep enough to
-	 * handle completion Q elements from both Qs in the pair.
+	 * handle completion Q elements from WRs (not QEs) in both Qs in
+	 * the pair.
 	 */
-	ibcq = ib_alloc_cq(ibd, q,
-	    q->nvmrq_numrcvqe + q->nvmrq_numsndqe, 0 /* completion vector */,
+	ibcq = ib_alloc_cq(ibd, q, init_attr.cap.max_send_wr +
+	    init_attr.cap.max_recv_wr, 0 /* hard-coded! completion vector */,
 	    IB_POLL_WORKQUEUE);
 	if (IS_ERR(ibcq)) {
 		ERRSPEW("ib_alloc_cq() failed with 0x%lX\n", PTR_ERR(ibcq));
@@ -1599,22 +1603,13 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	}
 	q->nvmrq_ibcq = ibcq;
 
-	/*
-	 * Now create the RDMA queue pair that we can post the NVMe command
-	 * (Send Q) and NVMe completion (Recv Q) buffers to.
-	 */
-	memset(&init_attr, 0, sizeof(init_attr));
-	init_attr.cap.max_send_wr = q->nvmrq_numsndqe;
-	init_attr.cap.max_recv_wr = q->nvmrq_numrcvqe;
-	init_attr.cap.max_recv_sge = prof->nvmrqp_numrcvsge;
-	init_attr.cap.max_send_sge = prof->nvmrqp_numsndsge;
+	init_attr.cap.max_send_sge = NVMR_NUMSNDSGE;
+	init_attr.cap.max_recv_sge = NVMR_NUMRCVSGE;
 	init_attr.qp_type = IB_QPT_RC;
 	init_attr.send_cq = ibcq;
 	init_attr.recv_cq = ibcq;
 	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
-
 	init_attr.event_handler = nvmr_qphndlr;
-
 	retval = rdma_create_qp(cmid, ibpd, &init_attr);
 	if (retval != 0) {
 		ERRSPEW("rdma_create_qp() failed with %d\n", retval);
@@ -1647,8 +1642,8 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	memset(&privdata, 0, sizeof(privdata));
 	privdata.nvmrcr_recfmt = 0;
 	privdata.nvmrcr_qid = qid;
-	privdata.nvmrcr_hrqsize = htole16(prof->nvmrqp_pdnumrcvqsz);
-	privdata.nvmrcr_hsqsize = htole16(prof->nvmrqp_pdnumsndqsz);
+	privdata.nvmrcr_hrqsize = htole16(q->nvmrq_numrcvqe);
+	privdata.nvmrcr_hsqsize = htole16(q->nvmrq_numsndqe);
 	conn_param.responder_resources = ibd->attrs.max_qp_rd_atom;
 	conn_param.qp_num = q->nvmrq_ibqp->qp_num;
 	conn_param.flow_control = 1;
@@ -1682,8 +1677,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	cmd->nvmrcu_conn.nvmrcn_nvmf.nvmf_fctype = NVMF_FCTYPE_CONNECT;
 	cmd->nvmrcu_conn.nvmrcn_recfmt = 0;
 	cmd->nvmrcu_conn.nvmrcn_qid = qid;
-	cmd->nvmrcu_conn.nvmrcn_sqsize =
-	    htole16(prof->nvmrqp_pdnumsndqsz);
+	cmd->nvmrcu_conn.nvmrcn_sqsize = htole16(q->nvmrq_numsndqe - 1);
 	cmd->nvmrcu_conn.nvmrcn_cattr = 0;
 	cmd->nvmrcu_conn.nvmrcn_kato = htole32(prof->nvmrqp_kato);
 
@@ -1880,6 +1874,7 @@ out:
 
 
 #define NVMR_IOQID_ADDEND 1 /* Only a single AdminQ */
+#define NVMR_PAYLOAD_UNIT 16U
 
 int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
@@ -1899,8 +1894,9 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	nvmripv4_t ipv4;
 	nvmr_qprof_t *pf;
 	uint16_t port;
-	uint8_t *identp;
+	/* uint8_t *identp; */
 	char *retp;
+	struct nvme_controller_data *cd;
 
 	retval = -1;
 	if ((addr->nvmra_subnqn == NULL) ||
@@ -2071,13 +2067,13 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		ERRSPEW("nvmr_admin_identify() failed:%d\n", retval);
 		goto out;
 	} else {
-		identp = (uint8_t *)&cntrlr->nvmrctr_nvmec.cdata;
 		KASSERT((cntrlr->nvmrctr_nvmec.guard0 == 0xDEADD00D8BADBEEF) &&
 		    (cntrlr->nvmrctr_nvmec.guard1 == 0xDEADD00D8BADBEEF),
 		    ("%s@%d Guards failed! %lx %lx", __func__, __LINE__,
 		    cntrlr->nvmrctr_nvmec.guard0,
 		    cntrlr->nvmrctr_nvmec.guard1));
 		/*
+		identp = (uint8_t *)&cntrlr->nvmrctr_nvmec.cdata;
 		printf("       ");
 		for (count = 0; count < 16; count++) {
 			printf(" %02x", count);
@@ -2098,6 +2094,14 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 			}
 		}
 		 */
+	}
+	cd = &cntrlr->nvmrctr_nvmec.cdata;
+	DBGSPEW("ioccsz:%u iorcsz:%u icdoff:%hu ctrattr:%hhu msdbd:%hhu\n",
+	     cd->nidf_ioccsz, cd->nidf_iorcsz, cd->nidf_icdoff,
+	     cd->nidf_ctrattr, cd->nidf_msdbd);
+	if ((cd->nidf_ioccsz*NVMR_PAYLOAD_UNIT) > sizeof(nvmr_stub_t)) {
+		ERRSPEW("\n\t!!! Unimplemented inline data @%lu possible !!!\n",
+		    (cd->nidf_ioccsz*NVMR_PAYLOAD_UNIT) - sizeof(nvmr_stub_t));
 	}
 
 	if (cntrlrcap.nvmrcc_dstrd != 0) {
