@@ -114,7 +114,6 @@ CTASSERT(sizeof(nvmr_communion_t) == sizeof(struct nvme_command));
 struct nvmr_ncmplcont {
 	struct ib_cqe			nvmrsp_cqe;
 	STAILQ_ENTRY(nvmr_ncmplcont)	nvmrsp_next;
-	struct nvme_completion	       *nvmrsp_nvmecompl;
 	struct nvme_completion	        nvmrsp_nvmecmpl;
 	u64				nvmrsp_dmaddr;
 };
@@ -125,7 +124,6 @@ struct nvmr_ncommcont {
 	struct ib_cqe		     nvmrsnd_regcqe;
 	STAILQ_ENTRY(nvmr_ncommcont) nvmrsnd_nextfree;
 	nvmr_stub_t                 *nvmrsnd_nvmecomm;
-	struct nvme_completion      *nvmrsnd_nvmecomplp;
 	struct ib_mr                *nvmrsnd_mr;
 	u64			     nvmrsnd_dmaddr;
 	uint16_t                     nvmrsnd_cid;
@@ -335,24 +333,12 @@ nvmr_cntrlrprof_t nvmr_regularprof = {
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
 
-#define WAKEWAITERS \
-	if (!commp->nvmrsnd_req) {                                          \
-	if (unlikely(commp->nvmrsnd_rspndd == true)) {                      \
-		panic("%s@%d nvmrsnd_rspndd already true! q:%p commp:%p\n", \
-		    __func__, __LINE__, q, commp);                          \
-	}                                                                   \
-                                                                            \
-	mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);                           \
-	commp->nvmrsnd_rspndd = true;                                       \
-	mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);                         \
-	wakeup(commp);                                                      \
-	} else { \
-		nvme_free_request(commp->nvmrsnd_req); \
-		commp->nvmrsnd_req = NULL; \
-		mtx_lock(&q->nvmrq_gqp.qlock); \
-		STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree); \
-		mtx_unlock(&q->nvmrq_gqp.qlock); \
-	}
+#define CLEANUPCMPL \
+	nvme_free_request(commp->nvmrsnd_req);                        \
+	commp->nvmrsnd_req = NULL;                                    \
+	mtx_lock(&q->nvmrq_gqp.qlock);                                \
+	STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree); \
+	mtx_unlock(&q->nvmrq_gqp.qlock)
 
 
 static void
@@ -370,7 +356,7 @@ nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 		/* Bail for now, wake waiters */
 	}
 
-	WAKEWAITERS;
+	CLEANUPCMPL;
 }
 
 
@@ -425,10 +411,9 @@ nvmr_post_cmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp)
 	ncmp = &cmplp->nvmrsp_nvmecmpl;
 	memset(&rcvwr, 0, sizeof(rcvwr));
 	memset(&sgl, 0, sizeof(sgl));
-	cmplp->nvmrsp_nvmecompl = ncmp;
 
 	sgl.addr   = cmplp->nvmrsp_dmaddr;
-	sgl.length = sizeof(*(cmplp->nvmrsp_nvmecompl));
+	sgl.length = sizeof(*ncmp);
 	sgl.lkey   = ibpd->local_dma_lkey;
 
 	cmplp->nvmrsp_cqe.done = nvmr_recv_cmplhndlr;
@@ -470,7 +455,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	}
 
 	ib_dma_sync_single_for_cpu(q->nvmrq_cmid->device, cmplp->nvmrsp_dmaddr,
-	    sizeof(*(cmplp->nvmrsp_nvmecompl)), DMA_FROM_DEVICE);
+	    sizeof cmplp->nvmrsp_nvmecmpl, DMA_FROM_DEVICE);
 
 	if (wc->status == IB_WC_WR_FLUSH_ERR) {
 		goto out_no_repost;
@@ -480,7 +465,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 		goto out;
 	}
 
-	c = cmplp->nvmrsp_nvmecompl;
+	c = &cmplp->nvmrsp_nvmecmpl;
 
 	if ((c->cid == 0) || (c->cid > q->nvmrq_numsndqe)) {
 		ERRSPEW("Returned CID in NVMe completion is not valid "
@@ -491,16 +476,9 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	commp = q->nvmrq_commcid[c->cid];
 	nvme_completion_swapbytes(c);
 
-	KASSERT((!commp->nvmrsnd_req && commp->nvmrsnd_nvmecomplp) ||
-	    (commp->nvmrsnd_req && !commp->nvmrsnd_nvmecomplp),
-	    ("%s@%d c:%p r:%p p:%p", __func__, __LINE__, commp,
-	    commp->nvmrsnd_req, commp->nvmrsnd_nvmecomplp));
-	if (commp->nvmrsnd_req) {
-		nvmr_nreq_compl(q, commp, c);
-	} else {
-		/* Copy the NVMe completion structure contents */
-		*commp->nvmrsnd_nvmecomplp = *c;
-	}
+	KASSERT(commp->nvmrsnd_req != NULL, ("%s@%d c:%p r:%p", __func__,
+	    __LINE__, commp, commp->nvmrsnd_req));
+	nvmr_nreq_compl(q, commp, c);
 
 	/*
 	 * The NVMeoF spec allows the host to ask the target to send over an
@@ -547,7 +525,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 		}
 	}
 
-	WAKEWAITERS;
+	CLEANUPCMPL;
 
 out:
 	nvmr_post_cmpl(q, cmplp);
@@ -1168,7 +1146,6 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 	commp->nvmrsnd_rkeyvalid = false;
 	commp->nvmrsnd_nvmecomm = cp;
 	commp->nvmrsnd_req = req;
-	commp->nvmrsnd_nvmecomplp = NULL;
 
 	memset(k, 0, sizeof(*k));
 	switch(req->type) {
