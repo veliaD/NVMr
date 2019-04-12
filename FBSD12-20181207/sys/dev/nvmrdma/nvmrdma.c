@@ -313,7 +313,7 @@ nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
 #define NVMR_NUMRCVSGE 1       /* NVMe Completion */
 
 #define MAX_ADMINQ_ELEMENTS 32
-#define MAX_IOQ_ELEMENTS 1000
+#define MAX_IOQ_ELEMENTS 32
 
 nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
@@ -332,13 +332,43 @@ nvmr_cntrlrprof_t nvmr_regularprof = {
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
+int nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req);
+void
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
 
-#define CLEANUPCMPL \
-	nvme_free_request(commp->nvmrsnd_req);                        \
-	commp->nvmrsnd_req = NULL;                                    \
-	mtx_lock(&q->nvmrq_gqp.qlock);                                \
-	STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree); \
-	mtx_unlock(&q->nvmrq_gqp.qlock)
+void nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp);
+void
+nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp)
+{
+	int retval;
+	struct nvme_request *req;
+
+	nvme_free_request(commp->nvmrsnd_req);
+	commp->nvmrsnd_req = NULL;
+
+	mtx_lock(&q->nvmrq_gqp.qlock);
+
+	STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree);
+
+	retval = EDOOFUS;
+	while (retval != 0) {
+		req = STAILQ_FIRST(&q->nvmrq_defreqs);
+		if (req == NULL) {
+			break;
+		}
+
+		STAILQ_REMOVE(&q->nvmrq_defreqs, req, nvme_request, stailq);
+		retval = nvmr_command_async(q, req);
+		if (retval != 0) {
+			mtx_unlock(&q->nvmrq_gqp.qlock);
+			ERRSPEW("Failing req: %d\n", retval);
+			nvmr_ctrlr_post_failed_request(q->nvmrq_cntrlr, req);
+			mtx_lock(&q->nvmrq_gqp.qlock);
+		}
+	}
+
+	mtx_unlock(&q->nvmrq_gqp.qlock);
+}
 
 
 static void
@@ -356,7 +386,7 @@ nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 		/* Bail for now, wake waiters */
 	}
 
-	CLEANUPCMPL;
+	nvmr_cleanup_q_next(q, commp);
 }
 
 
@@ -525,7 +555,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 		}
 	}
 
-	CLEANUPCMPL;
+	nvmr_cleanup_q_next(q, commp);
 
 out:
 	nvmr_post_cmpl(q, cmplp);
@@ -795,8 +825,6 @@ typedef enum {
 /*
  * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
  */
-void
-nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
 void
 nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req)
 {
@@ -1090,7 +1118,6 @@ out:
 }
 
 
-int nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req);
 int
 nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 {
@@ -1128,10 +1155,8 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 			    &cntrlr->nvmrctr_nvmec);
 			error = ESHUTDOWN;
 		} else {
-			/* STAILQ_INSERT_TAIL(&q->nvmrq_defreqs, req, stailq);*/
-			ERRSPEW("Deferred Qing unimplemented. c:%p:%p\n",
-			    cntrlr, &cntrlr->nvmrctr_nvmec);
-			error = ENOSPC;
+			STAILQ_INSERT_TAIL(&q->nvmrq_defreqs, req, stailq);
+			error = 0;
 		}
 		goto out;
 	}
