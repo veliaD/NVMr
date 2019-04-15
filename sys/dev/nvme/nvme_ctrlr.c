@@ -237,7 +237,7 @@ nvme_ctrlr_fail_req_task(void *arg, int pending)
 	struct nvme_controller	*ctrlr = arg;
 	struct nvme_request	*req;
 
-	KASSERT((ctrlr->nvmec_ttype == NVMET_RDMA) ||
+	KASSERT((ctrlr->nvmec_ttype == NVMET_PCIE) ||
 	    (ctrlr->nvmec_ttype == NVMET_RDMA),
 	    ("Unknown NVMe transport c:%p t:%d", ctrlr, ctrlr->nvmec_ttype));
 

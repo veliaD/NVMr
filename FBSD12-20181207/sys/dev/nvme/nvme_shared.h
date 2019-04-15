@@ -542,7 +542,7 @@ struct nvme_controller {
 	uint32_t			is_initialized;
 	uint32_t			notification_sent;
 
-	boolean_t			is_failed;
+	volatile boolean_t		is_failed;
 	STAILQ_HEAD(, nvme_request)	fail_req;
 
 	STAILQ_ENTRY(nvme_controller)	nvmec_lst;
@@ -567,7 +567,7 @@ typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
 struct nvme_qpair {
 	uint32_t		qid;
 	uint32_t		num_qentries;
-	boolean_t		qis_enabled;
+	volatile boolean_t	qis_enabled;
 	struct mtx		qlock __aligned(CACHE_LINE_SIZE);
 	enum nvme_transport	qttype;
 	struct nvme_controller  *gqctrlr;

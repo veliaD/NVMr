@@ -279,35 +279,65 @@ typedef struct {
 	STAILQ_HEAD(, nvmr_ncommcont)  nvmrq_comms;
 	STAILQ_HEAD(, nvmr_ncmplcont)  nvmrq_cmpls;
 	STAILQ_HEAD(, nvme_request)    nvmrq_defreqs;
-	volatile nvmr_queue_state_t    nvmrq_state;  /* nvmrctr_lock protects */
+	volatile nvmr_queue_state_t    nvmrq_state;  /* nvmrctr_nvmec.lockc */
 	int                            nvmrq_last_cm_status;
 	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count    */
 	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count    */
+	uint16_t                       nvmrq_numFsndqe;/* nvmrq_comms count   */
+	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls count   */
 	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
 
 	struct nvme_qpair              nvmrq_gqp;
 	nvmr_ncommcon_t               *nvmrq_next2use; /* !! REMOVE THIS !!   */
 } *nvmr_qpair_t;
 
+
+/*
+ * An NVMr controller requires multiple memory allocations and n/w
+ * interactions to be fully setup.  An initial admin QP is created which
+ * is used to interrogate the properties of the remote NVMr controller.
+ * Thereafter additional IO QPs are created. As soon as the admin QP is even
+ * partly setup it can receive async events from the RDMA stack about
+ * disconnects or RNIC device removals.  These removals should trigger a
+ * teardown of the controller that could still be initializing.
+ *
+ * The same events can be generated once the controller has initialized.
+ *
+ * To deal with all the resulting scenarios a state variable has been introduced
+ *
+ * A taskqueue has been introduced to handle destroying a controller.
+ * Controllers will not be tossed into this queue on a destruction event
+ * if it is determined that it is still being initialized (NVMRC_PRE_INIT).
+ * However they will be moved to the NVMRC_CONDEMNED state.
+ * The NVMRC_CONDEMNED serves two purposes:
+ * 1) Destruction/condemn events can work out that a previous condemn event has
+ *    happened on a controller and that nothing more has to be done to
+ *    condemn it.
+ * 2) The initialization logic in nvmr_cntrlr_create() monitors the state to
+ *    check if a condemn event has happened on a controller it is initializing.
+ *    If so the initialization is aborted and the initialization logic
+ *    tosses the controller onto the condemned taskqueue for destruction
+ */
+typedef enum {
+	NVMRC_PRE_INIT = 0,
+	NVMRC_INITED,
+	NVMRC_CONDEMNED
+} nvmr_cntrlr_state_t;
+
 typedef struct nvmr_cntrlr_tag {
 	char			very_first_field[NVME_VFFSTRSZ+1];
-	struct mtx         nvmrctr_lock;
 	char              *nvmrctr_subnqn;
 	nvmr_qpair_t       nvmrctr_adminqp;
 	nvmr_qpair_t      *nvmrctr_ioqarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
 	int                nvmrctr_numioqs; /* count not always fixed in prof */
-	volatile int       nvmrctr_refcount;
 	uint16_t           nvmrctr_port;
 	struct nvme_controller nvmrctr_nvmec;
+	volatile nvmr_cntrlr_state_t nvmrctr_state;  /* nvmrctr_nvmec.lockc */
+	TAILQ_ENTRY(nvmr_cntrlr_tag) nvmrctr_nxt;
+	boolean_t          nvmrctr_nvmereg;
 } *nvmr_cntrlr_t;
-
-static void
-nvmr_discov_cntrlr(nvmr_cntrlr_t cntrlr)
-{
-	return;
-}
 
 #define NVMR_NUMSNDSGE (1 + 1) /* NVMe Command  + Inline data */
 #define NVMR_NUMRCVSGE 1       /* NVMe Completion */
@@ -395,8 +425,7 @@ void nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_c
  TODO:
  1) Retry logic
  2) Time out and its cancellation
- 3) Add logic to queue NVMe requests and dequeue them when comm are available
- 4) Track in-use comm
+ 3) Track in-use comm
  **********/
 void
 nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c)
@@ -422,6 +451,22 @@ nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_comple
 	}
 }
 
+void nvmr_qfail_freecmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp);
+void
+nvmr_qfail_freecmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp)
+{
+	mtx_lock(&q->nvmrq_gqp.qlock);
+	STAILQ_INSERT_HEAD(&q->nvmrq_cmpls, cmplp, nvmrsp_next);
+	q->nvmrq_numFrcvqe++;
+	if (q->nvmrq_numFrcvqe == q->nvmrq_numrcvqe) {
+		wakeup(&q->nvmrq_numFrcvqe);
+	}
+	mtx_unlock(&q->nvmrq_gqp.qlock);
+}
+
+
+#define Q_IS_FAILED(q) (atomic_load_acq_int(&q->nvmrq_gqp.qis_enabled) == FALSE)
+
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc);
 
@@ -434,6 +479,13 @@ nvmr_post_cmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp)
 	struct ib_device *ibd;
 	int retval;
 	struct ib_pd *ibpd;
+
+	if (Q_IS_FAILED(q)) {
+		retval = ESHUTDOWN;
+		DBGSPEW("Q:%p has failed, freeing %p\n", q, cmplp);
+		nvmr_qfail_freecmpl(q, cmplp);
+		goto out;
+	}
 
 	ibd = q->nvmrq_cmid->device;
 	ibpd = q->nvmrq_ibpd;
@@ -457,6 +509,7 @@ nvmr_post_cmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp)
 	    sizeof(cmplp->nvmrsp_nvmecmpl), DMA_FROM_DEVICE);
 	retval = ib_post_recv(q->nvmrq_ibqp, &rcvwr, &badrcvwrp);
 
+out:
 	return retval;
 }
 
@@ -488,6 +541,7 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	    sizeof cmplp->nvmrsp_nvmecmpl, DMA_FROM_DEVICE);
 
 	if (wc->status == IB_WC_WR_FLUSH_ERR) {
+		nvmr_qfail_freecmpl(q, cmplp);
 		goto out_no_repost;
 	}
 
@@ -564,6 +618,25 @@ out_no_repost:
 	return;
 }
 
+void nvmr_qfail_drain(nvmr_qpair_t q, uint16_t *counter, uint16_t count);
+void
+nvmr_qfail_drain(nvmr_qpair_t q, uint16_t *counter, uint16_t count)
+{
+	KASSERT(Q_IS_FAILED(q), ("q:%p is still enabled!\n", q));
+
+	KASSERT((counter == &q->nvmrq_numFsndqe) ||
+	    (counter == &q->nvmrq_numFrcvqe), ("%s@%d %p is neither of q:%p\n",
+	    __func__, __LINE__, counter, q));
+
+	mtx_lock(&q->nvmrq_gqp.qlock);
+	while(*counter != count) {
+		DBGSPEW("Sleeping for q:%p field:%p to drain\n", q, counter);
+		mtx_sleep(counter, &q->nvmrq_gqp.qlock, 0, "qdrain", HZ);
+	}
+	mtx_unlock(&q->nvmrq_gqp.qlock);
+}
+
+
 static void
 nvmr_queue_destroy(nvmr_qpair_t q)
 {
@@ -575,6 +648,9 @@ nvmr_queue_destroy(nvmr_qpair_t q)
 	if (q == NULL) {
 		goto out;
 	}
+
+	atomic_store_rel_int(&q->nvmrq_gqp.qis_enabled, FALSE);
+
 	ibd = q->nvmrq_cmid->device;
 
 	if (q->nvmrq_state >= NVMRQ_CONNECT_SUCCEEDED) {
@@ -595,6 +671,10 @@ nvmr_queue_destroy(nvmr_qpair_t q)
 		ib_free_cq(q->nvmrq_ibcq);
 		q->nvmrq_ibcq = NULL;
 	}
+
+	nvmr_qfail_drain(q, &q->nvmrq_numFrcvqe, q->nvmrq_numrcvqe);
+	KASSERT(q->nvmrq_numFrcvqe == q->nvmrq_numrcvqe, ("%s@%d q:%p\n",
+	    __func__, __LINE__, q));
 
 	/*
 	 * Loop through the list of completion container structures unmapping
@@ -617,6 +697,11 @@ nvmr_queue_destroy(nvmr_qpair_t q)
 	DBGSPEW("Freed %d completion containers\n", q->nvmrq_numrcvqe);
 
 	free(q->nvmrq_commcid, M_NVMR);
+
+	nvmr_qfail_drain(q, &q->nvmrq_numFsndqe, q->nvmrq_numsndqe);
+	KASSERT(q->nvmrq_numFsndqe == q->nvmrq_numsndqe, ("%s@%d q:%p\n",
+	    __func__, __LINE__, q));
+
 	count = 0;
 	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmrsnd_nextfree, tcommp) {
 		if (commp->nvmrsnd_mr != NULL) {
@@ -655,13 +740,175 @@ out:
 }
 
 
+/* Tracks the number of NVMr controllers */
+int nvmr_cntrlrs_count;
+
+TASKQUEUE_DEFINE_THREAD(nvmr_cntrlrs_reaper);
+
+void nvmr_destroy_cntrlrs(void *arg, int pending);
+struct task nvmr_destroy_cntrlrs_task =
+    TASK_INITIALIZER(0, nvmr_destroy_cntrlrs, NULL);
+
+
+TAILQ_HEAD(, nvmr_cntrlr_tag) nvmr_cntrlrs =
+    TAILQ_HEAD_INITIALIZER(nvmr_cntrlrs);
+
+TAILQ_HEAD(, nvmr_cntrlr_tag) nvmr_condemned_cntrlrs =
+    TAILQ_HEAD_INITIALIZER(nvmr_condemned_cntrlrs);
+
+/* Protects the two lists above, as well as nvmr_cntrlrs_count */
+struct mtx nvmr_cntrlrs_lstslock;
+MTX_SYSINIT(nvmr_cntrlrs_lstslock, &nvmr_cntrlrs_lstslock,
+    "NVMr Lists of Controllers Lock", MTX_DEF);
+
+
+typedef enum {
+	NVMRCD_ENQUEUE = 0,
+	NVMRCD_SKIP_ENQUEUE
+}nvmr_condemned_disposition_t;
+
+/*
+ * Atomically, looks at the state of the controller and switches it to the
+ * condemned state while deciding to enqueue right away or later
+ */
+nvmr_condemned_disposition_t nvmr_cntrlr_mark_condemned(nvmr_cntrlr_t cntrlr);
+nvmr_condemned_disposition_t
+nvmr_cntrlr_mark_condemned(nvmr_cntrlr_t cntrlr)
+{
+	nvmr_condemned_disposition_t retval;
+
+	mtx_assert(&cntrlr->nvmrctr_nvmec.lockc, MA_OWNED);
+
+	switch(cntrlr->nvmrctr_state) {
+	case NVMRC_PRE_INIT:
+	case NVMRC_INITED:
+		atomic_store_rel_int(&cntrlr->nvmrctr_state, NVMRC_CONDEMNED);
+		switch (cntrlr->nvmrctr_state) {
+		case NVMRC_PRE_INIT:
+			retval = NVMRCD_SKIP_ENQUEUE;
+		default:
+			retval = NVMRCD_ENQUEUE;
+			break;
+		}
+		break;
+
+	case NVMRC_CONDEMNED:
+		retval = NVMRCD_SKIP_ENQUEUE;
+	}
+
+	return retval;
+}
+
+
+/*
+ * Routine that blindly adds a controller to the condemned queue for destruction
+ */
+void nvmr_cntrlr_condemn_enqueue(nvmr_cntrlr_t cntrlr);
+void
+nvmr_cntrlr_condemn_enqueue(nvmr_cntrlr_t cntrlr)
+{
+	DBGSPEW("Queueing controller:%p for destruction\n", cntrlr);
+	mtx_lock(&nvmr_cntrlrs_lstslock);
+	TAILQ_REMOVE(&nvmr_cntrlrs, cntrlr, nvmrctr_nxt);
+	TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
+	DBGSPEW("ctrlr:%p queued for destruction\n", cntrlr);
+	mtx_unlock(&nvmr_cntrlrs_lstslock);
+
+	taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
+	    &nvmr_destroy_cntrlrs_task);
+}
+
+
+/*
+ * High-level routine invoked when something bad has been detected on the
+ * controller and it needs to be destroyed.  It might enqueue for immediate
+ * destruction or not based on the current state.
+ */
+void nvmr_cntrlr_destroy_init(nvmr_cntrlr_t cntrlr);
+void
+nvmr_cntrlr_destroy_init(nvmr_cntrlr_t cntrlr)
+{
+	nvmr_condemned_disposition_t retval;
+
+	DBGSPEW("Condemning controller:%p\n", cntrlr);
+	mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);
+	retval = nvmr_cntrlr_mark_condemned(cntrlr);
+	mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
+
+	if (retval == NVMRCD_ENQUEUE) {
+		nvmr_cntrlr_condemn_enqueue(cntrlr);
+	}
+}
+
+
+/*
+ * Moves a controller from the pre-init state to the initialized state unless
+ * it has been condemned
+ */
+void nvmr_cntrlr_inited(nvmr_cntrlr_t cntrlr);
+void
+nvmr_cntrlr_inited(nvmr_cntrlr_t cntrlr)
+{
+	mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);
+	switch(cntrlr->nvmrctr_state) {
+	case NVMRC_PRE_INIT:
+		atomic_store_rel_int(&cntrlr->nvmrctr_state, NVMRC_INITED);
+		break;
+	case NVMRC_INITED:
+		panic("%s@%d Controller:%p already marked initialized!\n",
+		    __func__, __LINE__, cntrlr);
+		break;
+	case NVMRC_CONDEMNED:
+		break;
+	}
+	mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
+}
+
+
+/*
+ * This routine runs through the controllers that have not been condemned
+ * and queues them for destruction if they are not in the process of being
+ * initialized.
+ */
+void nvmr_all_cntrlrs_condemn_init(void);
+void
+nvmr_all_cntrlrs_condemn_init(void)
+{
+	nvmr_cntrlr_t cntrlr, tcntrlr;
+	nvmr_condemned_disposition_t retval;
+
+	mtx_lock(&nvmr_cntrlrs_lstslock);
+	TAILQ_FOREACH_SAFE(cntrlr, &nvmr_cntrlrs, nvmrctr_nxt, tcntrlr) {
+		mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);
+		retval = nvmr_cntrlr_mark_condemned(cntrlr);
+		mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
+
+		if (retval == NVMRCD_SKIP_ENQUEUE) {
+			continue;
+		}
+
+		TAILQ_REMOVE(&nvmr_cntrlrs, cntrlr, nvmrctr_nxt);
+		TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
+		DBGSPEW("Queued ctrlr:%p for destruction\n", cntrlr);
+	}
+	mtx_unlock(&nvmr_cntrlrs_lstslock);
+
+	taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
+	    &nvmr_destroy_cntrlrs_task);
+}
+
+
 static void
 nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 {
 	int count;
 
-	if (cntrlr == NULL) {
-		goto out;
+	DBGSPEW("Controller:%p being destroyed\n", cntrlr);
+
+	atomic_store_rel_int(&cntrlr->nvmrctr_nvmec.is_failed, TRUE);
+
+	if (cntrlr->nvmrctr_nvmereg) {
+		nvme_unregister_controller(&cntrlr->nvmrctr_nvmec);
 	}
 
 	nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
@@ -688,35 +935,37 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 	}
 	nvmr_queue_destroy(cntrlr->nvmrctr_adminqp);
 
-	DBGSPEW("free(%p)ing NVMr controller\n", cntrlr);
-	free(cntrlr, M_NVMR);
-out:
+	DBGSPEW("Controller:%p destroyed, but not freed\n", cntrlr);
+
 	return;
 }
 
 
-static void
-nvmr_cntrlr_rele(nvmr_cntrlr_t cntrlr)
+void
+nvmr_destroy_cntrlrs(void *arg, int pending)
 {
-	int retval;
+	nvmr_cntrlr_t cntrlr;
+	int count;
 
-	retval = atomic_fetchadd_int(&cntrlr->nvmrctr_refcount, -1);
-	KASSERT(retval > 0, ("%s@%d refcount:%d cntrlr:%p\n", __func__,
-	    __LINE__, retval, cntrlr));
-	if (retval == 1) {
+	DBGSPEW("Controller destruction task woken up\n");
+	count = 0;
+	while (cntrlr = TAILQ_FIRST(&nvmr_condemned_cntrlrs), cntrlr != NULL) {
+		count++;
 		nvmr_cntrlr_destroy(cntrlr);
+
+		mtx_lock(&nvmr_cntrlrs_lstslock);
+		TAILQ_REMOVE(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
+		nvmr_cntrlrs_count--;
+		if (nvmr_cntrlrs_count == 0) {
+			DBGSPEW("nvmr_cntrlrs_count is 0\n");
+			wakeup(&nvmr_cntrlrs_count);
+		}
+		mtx_unlock(&nvmr_cntrlrs_lstslock);
+
+		DBGSPEW("free(%p)ing NVMr controller\n", cntrlr);
+		free(cntrlr, M_NVMR);
 	}
-}
-
-
-static void
-nvmr_cntrlr_ref(nvmr_cntrlr_t cntrlr)
-{
-	int retval;
-
-	retval = atomic_fetchadd_int(&cntrlr->nvmrctr_refcount, 1);
-	KASSERT(retval > 0, ("%s@%d refcount:%d cntrlr:%p\n", __func__,
-	    __LINE__, retval, cntrlr));
+	DBGSPEW("%d controllers destroyed\n", count);
 }
 
 
@@ -778,14 +1027,15 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 			panic("%s@%d: Unhandled Conn Manager event Q:%p e:%d\n",
 			    __func__, __LINE__, q, event->event);
 		}
-		mtx_lock(&q->nvmrq_cntrlr->nvmrctr_lock);
+		mtx_lock(&q->nvmrq_cntrlr->nvmrctr_nvmec.lockc);
 		q->nvmrq_state = qstate;
-		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_lock);
+		mtx_unlock(&q->nvmrq_cntrlr->nvmrctr_nvmec.lockc);
 		wakeup(&q->nvmrq_cmid);
-		nvmr_cntrlr_rele(q->nvmrq_cntrlr);
 		/* No touching q beyond this point */
 		break;
 	case RDMA_CM_EVENT_DISCONNECTED:
+	case RDMA_CM_EVENT_DEVICE_REMOVAL:
+		nvmr_cntrlr_destroy_init(q->nvmrq_cntrlr);
 		break;
 
 	default:
@@ -1149,7 +1399,7 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 	}
 
 	commp = STAILQ_FIRST(&q->nvmrq_comms);
-	if ((commp == NULL) || (!gq->qis_enabled)) {
+	if (commp == NULL) {
 		if (cntrlr->nvmrctr_nvmec.is_failed) {
 			ERRSPEW("Controller:%p:%p has failed\n", cntrlr,
 			    &cntrlr->nvmrctr_nvmec);
@@ -1260,7 +1510,11 @@ nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
 	req->rqpair = gqp;
 
 	mtx_lock(&gqp->qlock);
-	retval = nvmr_command_async(q, req);
+	if (Q_IS_FAILED(q)) {
+		retval = ESHUTDOWN;
+	} else {
+		retval = nvmr_command_async(q, req);
+	}
 	mtx_unlock(&gqp->qlock);
 
 	if (retval != 0) {
@@ -1305,7 +1559,6 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 
 
 #define PRE_ASYNC_CM_INVOCATION(pre_state) \
-	nvmr_cntrlr_ref(cntrlr); \
 	q->nvmrq_state = (pre_state);
 
 #define POST_ASYNC_CM_INVOCATION(routine, pre_state, success_state)        \
@@ -1315,13 +1568,14 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 		goto out;                                                  \
 	}                                                                  \
 	/* DBGSPEW("Successfully invoked %s()\n", routine); */             \
-	mtx_lock(&cntrlr->nvmrctr_lock);                                   \
+	mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);                            \
 	if (q->nvmrq_state == (pre_state)) {                               \
 		DBGSPEW("Sleeping with message \"%s\"\n",                  \
 		    __stringify(__LINE__));                                \
-		retval = mtx_sleep(&q->nvmrq_cmid, &cntrlr->nvmrctr_lock,  \
+		retval = mtx_sleep(&q->nvmrq_cmid,                         \
+		    &cntrlr->nvmrctr_nvmec.lockc,                          \
 		    0, __stringify(__LINE__), NVMRTO+1000);                \
-		mtx_unlock(&cntrlr->nvmrctr_lock);                         \
+		mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);                  \
 		switch (retval) {                                          \
 		case 0:                                                    \
 			break;                                             \
@@ -1332,7 +1586,7 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 			goto out;                                          \
 		}                                                          \
 	} else {                                                           \
-		mtx_unlock(&cntrlr->nvmrctr_lock);                         \
+		mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);                  \
 	}                                                                  \
 	if (q->nvmrq_state < (success_state)) {                            \
 		error = q->nvmrq_last_cm_status;                           \
@@ -1388,9 +1642,9 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	q->nvmrq_cntrlr = cntrlr;
 	q->nvmrq_state = NVMRQ_PRE_INIT;
 	q->nvmrq_prof = prof;
-	q->nvmrq_gqp.qis_enabled = TRUE;
 	q->nvmrq_gqp.qttype = NVMET_RDMA;
 	q->nvmrq_gqp.gqctrlr = &cntrlr->nvmrctr_nvmec;
+	atomic_store_rel_int(&q->nvmrq_gqp.qis_enabled, FALSE);
 	mtx_init(&q->nvmrq_gqp.qlock, "nvme qpair lock", NULL, MTX_DEF);
 	STAILQ_INIT(&q->nvmrq_defreqs);
 	STAILQ_INIT(&q->nvmrq_comms);
@@ -1415,14 +1669,12 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 		if (commp == NULL) {
 			ERRSPEW("Command Q container allocation failed after"
 			    " %d iterations\n", count);
-			error = ENOMEM;
-			/* For now bail.  This needs to be more robust */
-			goto out;
-		} else {
-			STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp,
-			    nvmrsnd_nextfree);
-			q->nvmrq_numsndqe++;
+			break;
 		}
+
+		STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree);
+		q->nvmrq_numFsndqe++;
+		q->nvmrq_numsndqe++;
 	}
 	DBGSPEW("Alloced %d command Q containers\n", q->nvmrq_numsndqe);
 	q->nvmrq_gqp.num_qentries = q->nvmrq_numsndqe;
@@ -1464,13 +1716,18 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 		if (cmplp == NULL) {
 			ERRSPEW("Completion Q container allocation failed after"
 			    " %d iterations\n", count);
-			error = ENOMEM;
-			/* For now bail.  This needs to be more robust */
-			goto out;
+			break;
 		}
 
 		STAILQ_INSERT_HEAD(&q->nvmrq_cmpls, cmplp, nvmrsp_next);
+		q->nvmrq_numFrcvqe++;
 		q->nvmrq_numrcvqe++;
+	}
+	if (q->nvmrq_numrcvqe < q->nvmrq_gqp.num_qentries) {
+		ERRSPEW("Only allocated %hu of %u required, failing\n",
+		    q->nvmrq_numrcvqe, q->nvmrq_gqp.num_qentries);
+		error = ENOMEM;
+		goto out;
 	}
 
 
@@ -1622,11 +1879,23 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	}
 	q->nvmrq_ibqp = cmid->qp;
 
+	/* The QP is now open for business */
+	atomic_store_rel_int(&q->nvmrq_gqp.qis_enabled, TRUE);
+
 	/*
-	 * Map NVMe completion buffers to the RDMA Recv Q, registering their
-	 * associated Completion Q elements as well.
+	 * Post NVMe completion buffers to the RDMA Recv Q, registering their
+	 * associated Completion Q elements as well.  Use locks because the QP
+	 * is active and the posting here can race with any flushing that
+	 * can be triggered asynchronously.
 	 */
+	count = 0;
 	STAILQ_FOREACH(cmplp, &q->nvmrq_cmpls, nvmrsp_next) {
+		mtx_lock(&q->nvmrq_gqp.qlock);
+		STAILQ_REMOVE(&q->nvmrq_cmpls, cmplp, nvmr_ncmplcont,
+		    nvmrsp_next);
+		q->nvmrq_numFrcvqe--;
+		mtx_unlock(&q->nvmrq_gqp.qlock);
+
 		retval = nvmr_post_cmpl(q, cmplp);
 		if (retval != 0) {
 			ERRSPEW("ib_post_recv() failed for #%d with %d\n",
@@ -1634,6 +1903,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 			error = ENOMSG;
 			goto out;
 		}
+		count++;
 	}
 	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
 	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
@@ -1880,6 +2150,22 @@ out:
 #define NVMR_IOQID_ADDEND 1 /* Only a single AdminQ */
 #define NVMR_PAYLOAD_UNIT 16U
 
+static void
+nvmr_register_cntrlr(nvmr_cntrlr_t cntrlr)
+{
+	mtx_lock(&nvmr_cntrlrs_lstslock);
+	TAILQ_INSERT_HEAD(&nvmr_cntrlrs, cntrlr, nvmrctr_nxt);
+	nvmr_cntrlrs_count++;
+	mtx_unlock(&nvmr_cntrlrs_lstslock);
+}
+
+#define BAIL_IF_CNTRLR_CONDEMNED(c)                                        \
+	if (atomic_load_acq_int(&(c)->nvmrctr_state) == NVMRC_CONDEMNED) { \
+		error = ESHUTDOWN;                                         \
+		goto out;                                                  \
+	}
+
+
 int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp);
@@ -1940,9 +2226,13 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_port = port;
 	cntrlr->nvmrctr_prof = prof;
 	cntrlr->nvmrctr_subnqn = addr->nvmra_subnqn;
-	mtx_init(&cntrlr->nvmrctr_lock, "NVMr Controller Lock", NULL, MTX_DEF);
-	cntrlr->nvmrctr_refcount = 1;
+	cntrlr->nvmrctr_state = NVMRC_PRE_INIT;
+	cntrlr->nvmrctr_nvmereg = FALSE;
 	strncpy(cntrlr->very_first_field, NVMR_STRING, NVME_VFFSTRSZ);
+	mtx_init(&cntrlr->nvmrctr_nvmec.lockc, "nvme ctrlr lock", NULL,
+	    MTX_DEF);
+
+	nvmr_register_cntrlr(cntrlr);
 
 	/**********
 	 Set up the NVMe stack facing fields so we can issue NVMe commands to
@@ -1957,8 +2247,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	STAILQ_INIT(&cntrlr->nvmrctr_nvmec.fail_req);
 	cntrlr->nvmrctr_nvmec.is_failed = FALSE;
 
-	mtx_init(&cntrlr->nvmrctr_nvmec.lockc, "nvme ctrlr lock", NULL,
-	    MTX_DEF);
 	cntrlr->nvmrctr_nvmec.timeout_period = NVME_DEFAULT_TIMEOUT_PERIOD;
 	cntrlr->nvmrctr_nvmec.max_xfer_size = NVME_MAX_XFER_SIZE;
 	cntrlr->nvmrctr_nvmec.taskqueue = taskqueue_create("nvmr_taskq",
@@ -2166,6 +2454,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	/* Get smarter about this */
 	cntrlr->nvmrctr_numioqs = pf->nvmrqp_numqueues;
 
+	BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
+
 	if (cntrlr->nvmrctr_numioqs != 0) {
 		qarr = malloc(cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t),
 		    M_NVMR, M_WAITOK|M_ZERO);
@@ -2191,6 +2481,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 				error = retval;
 				goto out;
 			}
+
+			BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
 		}
 		if (count != pf->nvmrqp_numqueues) {
 			error = retval;
@@ -2202,7 +2494,14 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		cntrlr->nvmrctr_ioqarr = NULL;
 	}
 
+	nvmr_cntrlr_inited(cntrlr);
+	BAIL_IF_CNTRLR_CONDEMNED(cntrlr); /* It's important this be here */
+
 	cntrlr->nvmrctr_nvmec.is_initialized = 1;
+
+	nvme_register_controller(&cntrlr->nvmrctr_nvmec);
+	cntrlr->nvmrctr_nvmereg = TRUE;
+	nvme_notify_new_controller(&cntrlr->nvmrctr_nvmec);
 
 	error = 0;
 	*retcntrlrp = cntrlr;
@@ -2212,9 +2511,10 @@ out:
 		goto outret;
 	}
 
-	ERRSPEW("Returning with error \"%d\"\n", error);
+	DBGSPEW("Controller:%p init failed:%d, queuing for destruction\n",
+	    cntrlr, error);
 
-	nvmr_cntrlr_rele(cntrlr);
+	nvmr_cntrlr_condemn_enqueue(cntrlr);
 	*retcntrlrp = NULL;
 
 outret:
@@ -2282,15 +2582,7 @@ veladdr_connect(void)
 		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\", \"%s\") failed "
 		    "with %d\n", VELADDR.nvmra_ipaddr, VELADDR.nvmra_port,
 		    VELADDR.nvmra_subnqn, retval);
-		goto out;
 	}
-
-
-	nvmr_cntrlr_ref(glbl_cntrlr); /* For the nvme registration below */
-	nvme_register_controller(&glbl_cntrlr->nvmrctr_nvmec);
-	nvme_notify_new_controller(&glbl_cntrlr->nvmrctr_nvmec);
-out:
-
 
 	return;
 }
@@ -2303,10 +2595,7 @@ veladdr_disconnect(void)
 		goto out;
 	}
 
-	nvme_unregister_controller(&glbl_cntrlr->nvmrctr_nvmec);
-	nvmr_cntrlr_rele(glbl_cntrlr);
-
-	nvmr_cntrlr_rele(glbl_cntrlr);
+	nvmr_cntrlr_destroy_init(glbl_cntrlr);
 	glbl_cntrlr = NULL;
 
 out:
@@ -2392,12 +2681,18 @@ nvmr_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
 
-	if (glbl_cntrlr == NULL) {
-		goto out;
-	}
-
 	veladdr_disconnect();
-out:
+
+	nvmr_all_cntrlrs_condemn_init();
+
+	mtx_lock(&nvmr_cntrlrs_lstslock);
+	while (nvmr_cntrlrs_count != 0) {
+		ERRSPEW("Waiting for all NVMr controllers to be deallocated\n");
+		mtx_sleep(&nvmr_cntrlrs_count, &nvmr_cntrlrs_lstslock, 0,
+		    "cdrain", HZ*2);
+	}
+	mtx_unlock(&nvmr_cntrlrs_lstslock);
+
 	ib_unregister_client(&nvmr_ib_client);
 }
 
