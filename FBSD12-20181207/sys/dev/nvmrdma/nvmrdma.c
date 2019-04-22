@@ -223,6 +223,12 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 #define NUMIPV4OCTETS 4
 typedef uint8_t nvmripv4_t[NUMIPV4OCTETS];
 
+#define NUMSUBNQNBYTES 256
+typedef char nvmrsubnqn_t[NUMSUBNQNBYTES+1];
+
+#define NUMIPV4STRNGSZ 15
+typedef char nvmripv4str_t[NUMIPV4STRNGSZ+1];
+
 struct nvmr_cntrlr_tag;
 typedef void (*nvmr_crtcntrlrcb_t)(struct nvmr_cntrlr_tag *cntrlr);
 
@@ -324,9 +330,16 @@ typedef enum {
 	NVMRC_CONDEMNED
 } nvmr_cntrlr_state_t;
 
+typedef enum {
+	NVMR_CNTRLRLST_INVALID = 0,
+	NVMR_CNTRLRLST_ACTIVE = 0x45FE129,
+	NVMR_CNTRLRLST_CONDEMNED = 0xB9388F
+} nvmr_cntrlr_lst_t;
+
 typedef struct nvmr_cntrlr_tag {
 	char			very_first_field[NVME_VFFSTRSZ+1];
-	char              *nvmrctr_subnqn;
+	nvmrsubnqn_t       nvmrctr_subnqn;
+	nvmripv4str_t      nvmrctr_ipv4str;
 	nvmr_qpair_t       nvmrctr_adminqp;
 	nvmr_qpair_t      *nvmrctr_ioqarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
@@ -335,6 +348,7 @@ typedef struct nvmr_cntrlr_tag {
 	uint16_t           nvmrctr_port;
 	struct nvme_controller nvmrctr_nvmec;
 	volatile nvmr_cntrlr_state_t nvmrctr_state;  /* nvmrctr_nvmec.lockc */
+	nvmr_cntrlr_lst_t  nvmrctr_glblst;  /* nvmrctr_nvmec.lockc */
 	TAILQ_ENTRY(nvmr_cntrlr_tag) nvmrctr_nxt;
 	boolean_t          nvmrctr_nvmereg;
 } *nvmr_cntrlr_t;
@@ -750,8 +764,8 @@ struct task nvmr_destroy_cntrlrs_task =
     TASK_INITIALIZER(0, nvmr_destroy_cntrlrs, NULL);
 
 
-TAILQ_HEAD(, nvmr_cntrlr_tag) nvmr_cntrlrs =
-    TAILQ_HEAD_INITIALIZER(nvmr_cntrlrs);
+TAILQ_HEAD(, nvmr_cntrlr_tag) nvmr_cntrlrs_active =
+    TAILQ_HEAD_INITIALIZER(nvmr_cntrlrs_active);
 
 TAILQ_HEAD(, nvmr_cntrlr_tag) nvmr_condemned_cntrlrs =
     TAILQ_HEAD_INITIALIZER(nvmr_condemned_cntrlrs);
@@ -811,9 +825,19 @@ nvmr_cntrlr_condemn_enqueue(nvmr_cntrlr_t cntrlr)
 {
 	DBGSPEW("Queueing controller:%p for destruction\n", cntrlr);
 	mtx_lock(&nvmr_cntrlrs_lstslock);
-	TAILQ_REMOVE(&nvmr_cntrlrs, cntrlr, nvmrctr_nxt);
-	TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
-	DBGSPEW("ctrlr:%p queued for destruction\n", cntrlr);
+
+	if (cntrlr->nvmrctr_glblst != NVMR_CNTRLRLST_CONDEMNED) {
+		KASSERT(cntrlr->nvmrctr_glblst == NVMR_CNTRLRLST_ACTIVE,
+		    ("%s@%d c:%p type:%d\n", __func__, __LINE__, cntrlr,
+		    cntrlr->nvmrctr_glblst));
+		TAILQ_REMOVE(&nvmr_cntrlrs_active, cntrlr, nvmrctr_nxt);
+
+		TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
+		cntrlr->nvmrctr_glblst = NVMR_CNTRLRLST_CONDEMNED;
+
+		DBGSPEW("ctrlr:%p queued for destruction\n", cntrlr);
+	}
+
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 
 	taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
@@ -880,17 +904,23 @@ nvmr_all_cntrlrs_condemn_init(void)
 	nvmr_condemned_disposition_t retval;
 
 	mtx_lock(&nvmr_cntrlrs_lstslock);
-	TAILQ_FOREACH_SAFE(cntrlr, &nvmr_cntrlrs, nvmrctr_nxt, tcntrlr) {
+	TAILQ_FOREACH_SAFE(cntrlr, &nvmr_cntrlrs_active, nvmrctr_nxt, tcntrlr) {
 		mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);
 		retval = nvmr_cntrlr_mark_condemned(cntrlr);
 		mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
 
-		if (retval == NVMRCD_SKIP_ENQUEUE) {
+		if ((retval == NVMRCD_SKIP_ENQUEUE) ||
+		    (cntrlr->nvmrctr_glblst == NVMR_CNTRLRLST_CONDEMNED)) {
 			continue;
 		}
 
-		TAILQ_REMOVE(&nvmr_cntrlrs, cntrlr, nvmrctr_nxt);
+		KASSERT(cntrlr->nvmrctr_glblst == NVMR_CNTRLRLST_ACTIVE,
+		    ("%s@%d c:%p type:%d\n", __func__, __LINE__, cntrlr,
+		    cntrlr->nvmrctr_glblst));
+		TAILQ_REMOVE(&nvmr_cntrlrs_active, cntrlr, nvmrctr_nxt);
+
 		TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
+		cntrlr->nvmrctr_glblst = NVMR_CNTRLRLST_CONDEMNED;
 		DBGSPEW("Queued ctrlr:%p for destruction\n", cntrlr);
 	}
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
@@ -2156,7 +2186,8 @@ static void
 nvmr_register_cntrlr(nvmr_cntrlr_t cntrlr)
 {
 	mtx_lock(&nvmr_cntrlrs_lstslock);
-	TAILQ_INSERT_HEAD(&nvmr_cntrlrs, cntrlr, nvmrctr_nxt);
+	TAILQ_INSERT_HEAD(&nvmr_cntrlrs_active, cntrlr, nvmrctr_nxt);
+	cntrlr->nvmrctr_glblst = NVMR_CNTRLRLST_ACTIVE;
 	nvmr_cntrlrs_count++;
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 }
@@ -2227,13 +2258,20 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof(cntrlr->nvmrctr_ipv4));
 	cntrlr->nvmrctr_port = port;
 	cntrlr->nvmrctr_prof = prof;
-	cntrlr->nvmrctr_subnqn = addr->nvmra_subnqn;
+	strncpy(cntrlr->nvmrctr_ipv4str, addr->nvmra_ipaddr,
+	    sizeof(cntrlr->nvmrctr_ipv4str));
+	strncpy(cntrlr->nvmrctr_subnqn, addr->nvmra_subnqn,
+	    sizeof(cntrlr->nvmrctr_subnqn));
 	cntrlr->nvmrctr_state = NVMRC_PRE_INIT;
 	cntrlr->nvmrctr_nvmereg = FALSE;
 	strncpy(cntrlr->very_first_field, NVMR_STRING, NVME_VFFSTRSZ);
 	mtx_init(&cntrlr->nvmrctr_nvmec.lockc, "nvme ctrlr lock", NULL,
 	    MTX_DEF);
 
+	/*
+	 * After the following call the cntrlr can only be destroyed via
+	 * nvmr_cntrlr_condemn_enqueue() by this routine
+	 */
 	nvmr_register_cntrlr(cntrlr);
 
 	/**********
@@ -2605,55 +2643,132 @@ out:
 }
 
 
-#define NVMR_CONNECT_CMD "attach"
-#define NVMR_DISCONNECT_CMD "detach"
+#define NVMR_CMD_ATT "attach"
+#define NVMR_CMD_DET "detach"
+#define NVMR_CMD_LST "list"
+#define NVMR_CNTRLRS_LIST_INIT_SZ 10
 
-static int
-nvmr_sysctl_veladdr_conn(SYSCTL_HANDLER_ARGS)
+char nvmr_cmd0[] = "";
+
+int nvmr_sysctl_attach_cntrlr(struct sysctl_req *req, char *buf);
+int
+nvmr_sysctl_attach_cntrlr(struct sysctl_req *req, char *buf)
 {
+	char *ptr;
 	int error;
-	char buf[40], *src;
+	char obuf[20];
+	nvmr_addr_t addr;
+	nvmr_cntrlr_t cntrlr;
 
-	if (glbl_cntrlr == NULL) {
-		src = "unconnected";
-	} else {
-		src = "connected";
-	}
-	strlcpy(buf, src, sizeof(buf));
-	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
-	if ((error == 0) && (req->newptr != NULL)) {
-		if (strncmp(buf, NVMR_CONNECT_CMD,
-		    sizeof(NVMR_CONNECT_CMD)) == 0) {
-			if (glbl_cntrlr != NULL) {
-				goto out;
-			}
-			veladdr_connect();
-		} else if (strncmp(buf, NVMR_DISCONNECT_CMD,
-		    sizeof(NVMR_DISCONNECT_CMD)) == 0) {
-			if (glbl_cntrlr == NULL) {
-				goto out;
-			}
-			veladdr_disconnect();
-		} else {
-			goto out;
-		}
+	ptr = buf;
+
+	strsep(&ptr, ":");
+	addr.nvmra_ipaddr = strsep(&ptr, ",");
+	addr.nvmra_port   = strsep(&ptr, ",");
+	addr.nvmra_subnqn = ptr;
+
+	DBGSPEW("addr is %s,%s,%s\n", addr.nvmra_ipaddr, addr.nvmra_port,
+	    addr.nvmra_subnqn);
+	error = nvmr_cntrlr_create(&addr, &nvmr_regularprof, &cntrlr);
+	if (error != 0) {
+		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\", \"%s\") failed "
+		    "with %d\n", addr.nvmra_ipaddr, addr.nvmra_port,
+		    addr.nvmra_subnqn, error);
+		error = SYSCTL_OUT(req, nvmr_cmd0, sizeof(nvmr_cmd0));
+		goto out;
 	}
 
-	if (glbl_cntrlr == NULL) {
-		src = "unconnected";
-	} else {
-		src = "connected";
-	}
-	strlcpy(buf, src, sizeof(buf));
-	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	snprintf(obuf, sizeof(obuf), "%d", cntrlr->nvmrctr_nvmec.nvmec_unit);
+	error = SYSCTL_OUT(req, obuf, strlen(obuf));
 
 out:
 	return error;
 }
+
+int nvmr_sysctl_detach_cntrlr(struct sysctl_req *req, char *buf);
+int
+nvmr_sysctl_detach_cntrlr(struct sysctl_req *req, char *buf)
+{
+	return EINVAL;
+}
+
+int nvmr_sysctl_list_cntrlrs(struct sysctl_req *req, char *buf);
+int
+nvmr_sysctl_list_cntrlrs(struct sysctl_req *req, char *buf)
+{
+	int error;
+	struct sbuf *sb;
+	nvmr_cntrlr_t cntrlr;
+
+	error = sysctl_wire_old_buffer(req, 0);
+	if (error != 0) {
+		goto out;
+	}
+
+	sb = sbuf_new_for_sysctl(NULL, NULL, NVMR_CNTRLRS_LIST_INIT_SZ, req);
+	if (sb == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+	sbuf_printf(sb, "\n");
+
+	mtx_lock(&nvmr_cntrlrs_lstslock);
+	TAILQ_FOREACH(cntrlr, &nvmr_cntrlrs_active, nvmrctr_nxt) {
+		sbuf_printf(sb, "%d %s,%hu,%s\n",
+		    cntrlr->nvmrctr_nvmec.nvmec_unit, cntrlr->nvmrctr_ipv4str,
+		    ntohs(cntrlr->nvmrctr_port), cntrlr->nvmrctr_subnqn);
+	}
+	mtx_unlock(&nvmr_cntrlrs_lstslock);
+
+	error = sbuf_finish(sb);
+	sbuf_delete(sb);
+
+out:
+	return error;
+}
+
+
+static int
+nvmr_sysctl_command(SYSCTL_HANDLER_ARGS)
+{
+	int error;
+	char buf[256];
+
+	if (req->newptr == NULL) {
+		error = nvmr_sysctl_list_cntrlrs(req, buf);
+		goto out;
+	}
+
+	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	if (error == 0) {
+		if (!strncmp(buf, NVMR_CMD_LST, strlen(NVMR_CMD_LST))) {
+			error = nvmr_sysctl_list_cntrlrs(req, buf);
+			goto out;
+		} else if (!strncmp(buf, NVMR_CMD_ATT, strlen(NVMR_CMD_ATT))) {
+			error = nvmr_sysctl_attach_cntrlr(req, buf);
+			goto out;
+		} else if (!strncmp(buf, NVMR_CMD_DET, strlen(NVMR_CMD_DET))) {
+			error = nvmr_sysctl_detach_cntrlr(req, buf);
+			goto out;
+		} else {
+			error = SYSCTL_OUT(req, nvmr_cmd0, sizeof(nvmr_cmd0));
+			goto out;
+		}
+	}
+
+out:
+	return error;
+}
+
+char nvmr_cmdusage[] = "Usage:\n"
+	"\tlist (lists the NVMr controllers and their unit-numbers)\n"
+	"\tattach:IP-address,port-number,sub-NQN (connects to a controller)\n"
+	"\tdetach:unit-number (disconnects from a controller)\n";
+
 static SYSCTL_NODE(_hw, OID_AUTO, nvmrdma, CTLFLAG_RD, 0, "NVMeoRDMA");
-SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, veladdr_conn,
+SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, command,
 	    CTLTYPE_STRING | CTLFLAG_RW,
-	    NULL, 0, nvmr_sysctl_veladdr_conn, "A", NULL);
+	    NULL, 0, nvmr_sysctl_command, "A", nvmr_cmdusage);
 
 
 static void
@@ -2694,6 +2809,8 @@ nvmr_uninit(void)
 		    "cdrain", HZ*2);
 	}
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
+
+	taskqueue_drain_all(taskqueue_nvmr_cntrlrs_reaper);
 
 	ib_unregister_client(&nvmr_ib_client);
 }
