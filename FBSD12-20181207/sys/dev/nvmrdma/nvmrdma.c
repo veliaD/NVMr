@@ -786,6 +786,7 @@ nvmr_cntrlr_mark_condemned(nvmr_cntrlr_t cntrlr)
 		switch (cntrlr->nvmrctr_state) {
 		case NVMRC_PRE_INIT:
 			retval = NVMRCD_SKIP_ENQUEUE;
+			break;
 		default:
 			retval = NVMRCD_ENQUEUE;
 			break;
@@ -794,6 +795,7 @@ nvmr_cntrlr_mark_condemned(nvmr_cntrlr_t cntrlr)
 
 	case NVMRC_CONDEMNED:
 		retval = NVMRCD_SKIP_ENQUEUE;
+		break;
 	}
 
 	return retval;
