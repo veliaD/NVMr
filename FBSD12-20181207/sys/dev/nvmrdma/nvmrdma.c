@@ -890,21 +890,29 @@ nvmr_cntrlr_inited(nvmr_cntrlr_t cntrlr)
 	mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
 }
 
+#define NVMR_ALLUNITNUMS 0
 
 /*
- * This routine runs through the controllers that have not been condemned
- * and queues them for destruction if they are not in the process of being
- * initialized.
+ * Run through the list of active controllers searching for the controller
+ * with the unitnum passed in.  When/if found the controller is marked
+ * condemned and optionally queued for destruction to the reaper taskqueue
+ *
+ * The routine can be invoked with NVMR_ALLUNITNUMS to do the above for all
+ * active controllers.
  */
-void nvmr_all_cntrlrs_condemn_init(void);
+void nvmr_cntrlrs_condemn_init(int unitnum);
 void
-nvmr_all_cntrlrs_condemn_init(void)
+nvmr_cntrlrs_condemn_init(int unitnum)
 {
 	nvmr_cntrlr_t cntrlr, tcntrlr;
 	nvmr_condemned_disposition_t retval;
 
 	mtx_lock(&nvmr_cntrlrs_lstslock);
 	TAILQ_FOREACH_SAFE(cntrlr, &nvmr_cntrlrs_active, nvmrctr_nxt, tcntrlr) {
+		if ((unitnum != NVMR_ALLUNITNUMS) && (unitnum !=
+		    cntrlr->nvmrctr_nvmec.nvmec_unit)) {
+			continue;
+		}
 		mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);
 		retval = nvmr_cntrlr_mark_condemned(cntrlr);
 		mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
@@ -927,6 +935,13 @@ nvmr_all_cntrlrs_condemn_init(void)
 
 	taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
 	    &nvmr_destroy_cntrlrs_task);
+}
+
+void nvmr_all_cntrlrs_condemn_init(void);
+void
+nvmr_all_cntrlrs_condemn_init(void)
+{
+	nvmr_cntrlrs_condemn_init(NVMR_ALLUNITNUMS);
 }
 
 
@@ -2650,13 +2665,15 @@ out:
 
 char nvmr_cmd0[] = "";
 
+#define NVMR_SYSCTL_RETNULL \
+     error = SYSCTL_OUT(req, nvmr_cmd0, sizeof(nvmr_cmd0))
+
 int nvmr_sysctl_attach_cntrlr(struct sysctl_req *req, char *buf);
 int
 nvmr_sysctl_attach_cntrlr(struct sysctl_req *req, char *buf)
 {
 	char *ptr;
 	int error;
-	char obuf[20];
 	nvmr_addr_t addr;
 	nvmr_cntrlr_t cntrlr;
 
@@ -2674,14 +2691,9 @@ nvmr_sysctl_attach_cntrlr(struct sysctl_req *req, char *buf)
 		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\", \"%s\") failed "
 		    "with %d\n", addr.nvmra_ipaddr, addr.nvmra_port,
 		    addr.nvmra_subnqn, error);
-		error = SYSCTL_OUT(req, nvmr_cmd0, sizeof(nvmr_cmd0));
-		goto out;
 	}
 
-	snprintf(obuf, sizeof(obuf), "%d", cntrlr->nvmrctr_nvmec.nvmec_unit);
-	error = SYSCTL_OUT(req, obuf, strlen(obuf));
-
-out:
+	NVMR_SYSCTL_RETNULL;
 	return error;
 }
 
@@ -2689,7 +2701,19 @@ int nvmr_sysctl_detach_cntrlr(struct sysctl_req *req, char *buf);
 int
 nvmr_sysctl_detach_cntrlr(struct sysctl_req *req, char *buf)
 {
-	return EINVAL;
+	char *ptr;
+	int unitnum, error;
+
+	ptr = buf;
+
+	strsep(&ptr, ":");
+	unitnum = (int)strtol(ptr, NULL, 0);
+
+	nvmr_cntrlrs_condemn_init(unitnum);
+
+	NVMR_SYSCTL_RETNULL;
+
+	return error;
 }
 
 int nvmr_sysctl_list_cntrlrs(struct sysctl_req *req, char *buf);
@@ -2751,7 +2775,7 @@ nvmr_sysctl_command(SYSCTL_HANDLER_ARGS)
 			error = nvmr_sysctl_detach_cntrlr(req, buf);
 			goto out;
 		} else {
-			error = SYSCTL_OUT(req, nvmr_cmd0, sizeof(nvmr_cmd0));
+			NVMR_SYSCTL_RETNULL;
 			goto out;
 		}
 	}
