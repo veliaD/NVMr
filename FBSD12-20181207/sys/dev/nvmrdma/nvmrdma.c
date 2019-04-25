@@ -890,7 +890,7 @@ nvmr_cntrlr_inited(nvmr_cntrlr_t cntrlr)
 	mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
 }
 
-#define NVMR_ALLUNITNUMS 0
+#define NVMR_ALLUNITNUMS (-1)
 
 /*
  * Run through the list of active controllers searching for the controller
@@ -2709,7 +2709,9 @@ nvmr_sysctl_detach_cntrlr(struct sysctl_req *req, char *buf)
 	strsep(&ptr, ":");
 	unitnum = (int)strtol(ptr, NULL, 0);
 
-	nvmr_cntrlrs_condemn_init(unitnum);
+	if (unitnum != 0) {
+		nvmr_cntrlrs_condemn_init(unitnum);
+	}
 
 	NVMR_SYSCTL_RETNULL;
 
@@ -2753,7 +2755,7 @@ out:
 
 
 static int
-nvmr_sysctl_command(SYSCTL_HANDLER_ARGS)
+nvmr_sysctl_conrollers(SYSCTL_HANDLER_ARGS)
 {
 	int error;
 	char buf[256];
@@ -2787,12 +2789,12 @@ out:
 char nvmr_cmdusage[] = "Usage:\n"
 	"\tlist (lists the NVMr controllers and their unit-numbers)\n"
 	"\tattach:IP-address,port-number,sub-NQN (connects to a controller)\n"
-	"\tdetach:unit-number (disconnects from a controller)\n";
+	"\tdetach:unit-number (disconnects from a controller.  -1 means all controllers)\n";
 
 static SYSCTL_NODE(_hw, OID_AUTO, nvmrdma, CTLFLAG_RD, 0, "NVMeoRDMA");
-SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, command,
+SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, controllers,
 	    CTLTYPE_STRING | CTLFLAG_RW,
-	    NULL, 0, nvmr_sysctl_command, "A", nvmr_cmdusage);
+	    NULL, 0, nvmr_sysctl_conrollers, "A", nvmr_cmdusage);
 
 
 static void
