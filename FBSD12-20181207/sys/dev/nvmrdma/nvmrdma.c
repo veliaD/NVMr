@@ -3,7 +3,6 @@
  1) Use the command cid array to track the allocated containers and use the
     STAILQ field to implement a queue of free containers.  Right now the
     STAILQ field tracks all allocated containers.
- 2) !!!Remove field nvmrq_next2use whose only use is testing MR lifecycle!!!
  3) We should be able to remove ib_mr,s or their containing command-containers
     from circulation if they cannot be invalidated correctly
  **********/
@@ -119,6 +118,14 @@ struct nvmr_ncmplcont {
 };
 typedef struct nvmr_ncmplcont nvmr_ncmplcon_t;
 
+typedef enum {
+	NVMRSND_FREE = 0x58F29A,
+	NVMRSND_IOQD = 0xA6DA4B,
+	NVMRSND_CMPL = 0x8D908E
+} nvmr_snd_state_t;
+
+struct nvmr_qpair_tag;
+
 struct nvmr_ncommcont {
 	struct ib_cqe		     nvmrsnd_cqe;
 	struct ib_cqe		     nvmrsnd_regcqe;
@@ -128,6 +135,9 @@ struct nvmr_ncommcont {
 	u64			     nvmrsnd_dmaddr;
 	uint16_t                     nvmrsnd_cid;
 	struct nvme_request         *nvmrsnd_req;
+	struct callout               nvmrsnd_to;
+	volatile nvmr_snd_state_t    nvmrsnd_state;
+	struct nvmr_qpair_tag       *nvmrsnd_q;
 	bool                         nvmrsnd_rspndd;
 	bool                         nvmrsnd_rkeyvalid;
 };
@@ -274,7 +284,7 @@ typedef enum {
 	NVMRQ_CONNECT_SUCCEEDED,
 } nvmr_queue_state_t;
 
-typedef struct {
+typedef struct nvmr_qpair_tag {
 	struct rdma_cm_id             *nvmrq_cmid;
 	struct nvmr_cntrlr_tag        *nvmrq_cntrlr; /* Owning Controller     */
 	struct ib_pd                  *nvmrq_ibpd;
@@ -294,7 +304,6 @@ typedef struct {
 	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
 
 	struct nvme_qpair              nvmrq_gqp;
-	nvmr_ncommcon_t               *nvmrq_next2use; /* !! REMOVE THIS !!   */
 } *nvmr_qpair_t;
 
 
@@ -392,7 +401,9 @@ nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp)
 
 	mtx_lock(&q->nvmrq_gqp.qlock);
 
+	atomic_store_rel_int(&commp->nvmrsnd_state, NVMRSND_FREE);
 	STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree);
+	q->nvmrq_numFsndqe++;
 
 	retval = EDOOFUS;
 	while (retval != 0) {
@@ -572,6 +583,8 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 	}
 
 	commp = q->nvmrq_commcid[c->cid];
+	atomic_store_rel_int(&commp->nvmrsnd_state, NVMRSND_CMPL);
+	callout_stop(&commp->nvmrsnd_to);
 	nvme_completion_swapbytes(c);
 
 	KASSERT(commp->nvmrsnd_req != NULL, ("%s@%d c:%p r:%p", __func__,
@@ -718,6 +731,9 @@ nvmr_queue_destroy(nvmr_qpair_t q)
 
 	count = 0;
 	STAILQ_FOREACH_SAFE(commp, &q->nvmrq_comms, nvmrsnd_nextfree, tcommp) {
+		STAILQ_REMOVE(&q->nvmrq_comms, commp, nvmr_ncommcont,
+		    nvmrsnd_nextfree);
+		q->nvmrq_numFsndqe--;
 		if (commp->nvmrsnd_mr != NULL) {
 			ib_dereg_mr(commp->nvmrsnd_mr);
 		}
@@ -793,6 +809,7 @@ nvmr_cntrlr_mark_condemned(nvmr_cntrlr_t cntrlr)
 
 	mtx_assert(&cntrlr->nvmrctr_nvmec.lockc, MA_OWNED);
 
+	atomic_store_rel_int(&cntrlr->nvmrctr_nvmec.is_failed, TRUE);
 	switch(cntrlr->nvmrctr_state) {
 	case NVMRC_PRE_INIT:
 	case NVMRC_INITED:
@@ -850,9 +867,9 @@ nvmr_cntrlr_condemn_enqueue(nvmr_cntrlr_t cntrlr)
  * controller and it needs to be destroyed.  It might enqueue for immediate
  * destruction or not based on the current state.
  */
-void nvmr_cntrlr_destroy_init(nvmr_cntrlr_t cntrlr);
+void nvmr_cntrlr_condemn_init(nvmr_cntrlr_t cntrlr);
 void
-nvmr_cntrlr_destroy_init(nvmr_cntrlr_t cntrlr)
+nvmr_cntrlr_condemn_init(nvmr_cntrlr_t cntrlr)
 {
 	nvmr_condemned_disposition_t retval;
 
@@ -1082,7 +1099,7 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 		break;
 	case RDMA_CM_EVENT_DISCONNECTED:
 	case RDMA_CM_EVENT_DEVICE_REMOVAL:
-		nvmr_cntrlr_destroy_init(q->nvmrq_cntrlr);
+		nvmr_cntrlr_condemn_init(q->nvmrq_cntrlr);
 		break;
 
 	default:
@@ -1415,6 +1432,36 @@ out:
 }
 
 
+void nvmr_timeout(void *arg);
+void
+nvmr_timeout(void *arg)
+{
+	nvmr_qpair_t q;
+	struct nvme_qpair *gq;
+	nvmr_ncommcon_t *commp;
+	nvmr_cntrlr_t cntrlr;
+	struct nvme_request *req;
+
+	commp = (nvmr_ncommcon_t *)arg;
+	req = commp->nvmrsnd_req;
+	ERRSPEW("c:%p r:%p timed out!\n", commp, req);
+
+	q = commp->nvmrsnd_q;
+	cntrlr = q->nvmrq_cntrlr;
+
+	nvmr_ctrlr_post_failed_request(cntrlr, req);
+
+	gq = &q->nvmrq_gqp;
+	mtx_lock(&gq->qlock);
+	STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp, nvmrsnd_nextfree);
+	q->nvmrq_numFsndqe++;
+	mtx_unlock(&gq->qlock);
+
+	ERRSPEW("Failing controller c:%p of q:%p!\n", cntrlr, q);
+	nvmr_cntrlr_condemn_init(cntrlr);
+}
+
+
 int
 nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 {
@@ -1441,6 +1488,7 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 	case NVME_REQUEST_NULL:
 		break;
 	default:
+		commp = NULL;
 		error = ENOTSUP;
 		goto out;
 	}
@@ -1458,6 +1506,7 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 		goto out;
 	}
 	STAILQ_REMOVE(&q->nvmrq_comms, commp, nvmr_ncommcont, nvmrsnd_nextfree);
+	q->nvmrq_numFsndqe--;
 
 	cp = (nvmr_stub_t *)&req->cmd;
 	ibd = q->nvmrq_cmid->device;
@@ -1538,6 +1587,20 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 
 	error = 0;
 out:
+	if (commp != NULL) {
+		if (error != 0) {
+			STAILQ_INSERT_HEAD(&q->nvmrq_comms, commp,
+			    nvmrsnd_nextfree);
+			q->nvmrq_numFsndqe++;
+		} else {
+			callout_reset_curcpu(&commp->nvmrsnd_to,
+			    cntrlr->nvmrctr_nvmec.timeout_period * hz,
+			    nvmr_timeout, commp);
+			atomic_store_rel_int(&commp->nvmrsnd_state,
+			NVMRSND_IOQD);
+		}
+	}
+
 	return error;
 }
 
@@ -1745,13 +1808,14 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	for (count = 1; count < (q->nvmrq_numsndqe + 1); count++) {
 		commparrp[count] = commp;
 		commp->nvmrsnd_cid = count;
+		commp->nvmrsnd_q = q;
+		callout_init(&commp->nvmrsnd_to, 1);
+		atomic_store_rel_int(&commp->nvmrsnd_state, NVMRSND_FREE);
 		commp = STAILQ_NEXT(commp, nvmrsnd_nextfree);
 	}
 	KASSERT(commp == NULL, ("%s@%d commp:%p, q:%p\n", __func__, __LINE__,
 	    commp, q));
 	q->nvmrq_commcid = commparrp;
-	q->nvmrq_next2use = STAILQ_LAST(&q->nvmrq_comms, nvmr_ncommcont,
-	    nvmrsnd_nextfree);
 
 	/*
 	 * Allocate containers for the Recv Q elements which are always
@@ -2221,7 +2285,7 @@ int
 nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
     nvmr_cntrlr_t *retcntrlrp)
 {
-	int error, retval, count;
+	int error, retval, count, timeout_period;
 	struct make_dev_args md_args;
 	nvmr_cntrlr_t cntrlr;
 	nvmr_qpair_t *qarr;
@@ -2301,6 +2365,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	    nvme_ctrlr_fail_req_task, &cntrlr->nvmrctr_nvmec);
 	STAILQ_INIT(&cntrlr->nvmrctr_nvmec.fail_req);
 	cntrlr->nvmrctr_nvmec.is_failed = FALSE;
+
+	timeout_period = NVME_DEFAULT_TIMEOUT_PERIOD;
+	TUNABLE_INT_FETCH("hw.nvme.timeout_period", &timeout_period);
+	timeout_period = min(timeout_period, NVME_MAX_TIMEOUT_PERIOD);
+	timeout_period = max(timeout_period, NVME_MIN_TIMEOUT_PERIOD);
+	cntrlr->nvmrctr_nvmec.timeout_period = timeout_period;
 
 	cntrlr->nvmrctr_nvmec.timeout_period = NVME_DEFAULT_TIMEOUT_PERIOD;
 	cntrlr->nvmrctr_nvmec.max_xfer_size = NVME_MAX_XFER_SIZE;
@@ -2607,57 +2677,6 @@ static struct ib_client nvmr_ib_client = {
 	.remove = nvmr_remove_ibif
 };
 
-#define VELTESTSUBNQN "FromGUS"
-
-nvmr_addr_t r640gent07eno1 = {
-	.nvmra_ipaddr = "10.1.87.194",
-	.nvmra_port =   "4420",
-	.nvmra_subnqn = VELTESTSUBNQN,
-};
-
-nvmr_addr_t r640gent07enp94s0f1 = {
-	.nvmra_ipaddr = "11.10.10.200",
-	.nvmra_port =   "4420",
-	.nvmra_subnqn = VELTESTSUBNQN,
-};
-
-#define VELADDR r640gent07eno1
-
-static nvmr_cntrlr_t glbl_cntrlr;
-
-static void
-veladdr_connect(void)
-{
-	int retval;
-	nvmr_cntrlrprof_t cntrlrprof = {};
-
-	cntrlrprof = nvmr_regularprof;
-	retval = nvmr_cntrlr_create(&VELADDR, &cntrlrprof, &glbl_cntrlr);
-	if (retval != 0) {
-		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\", \"%s\") failed "
-		    "with %d\n", VELADDR.nvmra_ipaddr, VELADDR.nvmra_port,
-		    VELADDR.nvmra_subnqn, retval);
-	}
-
-	return;
-}
-
-
-static void
-veladdr_disconnect(void)
-{
-	if (glbl_cntrlr == NULL) {
-		goto out;
-	}
-
-	nvmr_cntrlr_destroy_init(glbl_cntrlr);
-	glbl_cntrlr = NULL;
-
-out:
-	return;
-}
-
-
 #define NVMR_CMD_ATT "attach"
 #define NVMR_CMD_DET "detach"
 #define NVMR_CMD_LST "list"
@@ -2823,8 +2842,6 @@ static void
 nvmr_uninit(void)
 {
 	DBGSPEW("Uninit invoked\n");
-
-	veladdr_disconnect();
 
 	nvmr_all_cntrlrs_condemn_init();
 
