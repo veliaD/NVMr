@@ -430,7 +430,7 @@ nvme_notify(struct nvme_consumer *cons,
 	else
 		ctrlr_cookie = NULL;
 	ctrlr->ccons_cookie[cons->id] = ctrlr_cookie;
-	if (ctrlr->is_failed) {
+	if (NVME_IS_CTRLR_FAILED(ctrlr)) {
 		if (cons->fail_fn != NULL)
 			(*cons->fail_fn)(ctrlr_cookie);
 		/*

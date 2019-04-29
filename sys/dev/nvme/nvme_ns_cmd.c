@@ -57,19 +57,36 @@ nvme_ns_cmd_read_bio(struct nvme_namespace *ns, struct bio *bp,
 	struct nvme_request	*req;
 	uint64_t		lba;
 	uint64_t		lba_count;
+	int			error;
 
 	req = nvme_allocate_request_bio(bp, cb_fn, cb_arg);
 
-	if (req == NULL)
-		return (ENOMEM);
+	if (req == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	epoch_enter(global_epoch);
+	if (NVME_IS_CTRLR_FAILED(ns->nvmes_ctrlr)) {
+		error = ESHUTDOWN;
+		epoch_exit(global_epoch);
+		goto out;
+	}
 
 	lba = bp->bio_offset / nvme_ns_get_sector_size(ns);
 	lba_count = bp->bio_bcount / nvme_ns_get_sector_size(ns);
 	nvme_ns_read_cmd(&req->cmd, ns->id, lba, lba_count);
 
 	nvme_ctrlr_submit_io_request(ns->nvmes_ctrlr, req);
+	error = 0;
 
-	return (0);
+out:
+	KASSERT(!in_epoch(global_epoch), ("%s@%d Exiting while in epoch!",
+	    __func__, __LINE__));
+	if (error != 0) {
+		nvme_free_request(req);
+	}
+	return (error);
 }
 
 int
@@ -98,18 +115,37 @@ nvme_ns_cmd_write_bio(struct nvme_namespace *ns, struct bio *bp,
 	struct nvme_request	*req;
 	uint64_t		lba;
 	uint64_t		lba_count;
+	int			error;
 
 	req = nvme_allocate_request_bio(bp, cb_fn, cb_arg);
 
-	if (req == NULL)
-		return (ENOMEM);
+	if (req == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	epoch_enter(global_epoch);
+	if (NVME_IS_CTRLR_FAILED(ns->nvmes_ctrlr)) {
+		error = ESHUTDOWN;
+		epoch_exit(global_epoch);
+		goto out;
+	}
+
 	lba = bp->bio_offset / nvme_ns_get_sector_size(ns);
 	lba_count = bp->bio_bcount / nvme_ns_get_sector_size(ns);
 	nvme_ns_write_cmd(&req->cmd, ns->id, lba, lba_count);
 
 	nvme_ctrlr_submit_io_request(ns->nvmes_ctrlr, req);
 
-	return (0);
+	error = 0;
+
+out:
+	KASSERT(!in_epoch(global_epoch), ("%s@%d Exiting while in epoch!",
+	    __func__, __LINE__));
+	if (error != 0) {
+		nvme_free_request(req);
+	}
+	return (error);
 }
 
 int
@@ -118,12 +154,22 @@ nvme_ns_cmd_deallocate(struct nvme_namespace *ns, void *payload,
 {
 	struct nvme_request	*req;
 	struct nvme_command	*cmd;
+	int			error;
 
 	req = nvme_allocate_request_vaddr(payload,
 	    num_ranges * sizeof(struct nvme_dsm_range), cb_fn, cb_arg);
 
-	if (req == NULL)
-		return (ENOMEM);
+	if (req == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	epoch_enter(global_epoch);
+	if (NVME_IS_CTRLR_FAILED(ns->nvmes_ctrlr)) {
+		error = ESHUTDOWN;
+		epoch_exit(global_epoch);
+		goto out;
+	}
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_DATASET_MANAGEMENT;
@@ -135,23 +181,48 @@ nvme_ns_cmd_deallocate(struct nvme_namespace *ns, void *payload,
 
 	nvme_ctrlr_submit_io_request(ns->nvmes_ctrlr, req);
 
-	return (0);
+	error = 0;
+
+out:
+	KASSERT(!in_epoch(global_epoch), ("%s@%d Exiting while in epoch!",
+	    __func__, __LINE__));
+	if (error != 0) {
+		nvme_free_request(req);
+	}
+	return (error);
 }
 
 int
 nvme_ns_cmd_flush(struct nvme_namespace *ns, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request	*req;
+	int			error;
 
 	req = nvme_allocate_request_null(cb_fn, cb_arg);
 
-	if (req == NULL)
-		return (ENOMEM);
+	if (req == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+
+	epoch_enter(global_epoch);
+	if (NVME_IS_CTRLR_FAILED(ns->nvmes_ctrlr)) {
+		epoch_exit(global_epoch);
+		goto out;
+	}
 
 	nvme_ns_flush_cmd(&req->cmd, ns->id);
 	nvme_ctrlr_submit_io_request(ns->nvmes_ctrlr, req);
 
-	return (0);
+	error = 0;
+
+out:
+	KASSERT(!in_epoch(global_epoch), ("%s@%d Exiting while in epoch!",
+	    __func__, __LINE__));
+	if (error != 0) {
+		nvme_free_request(req);
+	}
+	return (error);
 }
 
 /* Timeout = 1 sec */

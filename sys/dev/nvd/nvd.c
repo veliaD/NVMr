@@ -179,6 +179,8 @@ nvd_bio_submit(struct nvd_disk *ndisk, struct bio *bp)
 	int err;
 
 	bp->bio_driver1 = NULL;
+
+	/* veliath: The increment below won't scale...*/
 	atomic_add_int(&ndisk->cur_depth, 1);
 	err = nvme_ns_bio_process(ndisk->ns, bp, nvd_done);
 	if (err) {

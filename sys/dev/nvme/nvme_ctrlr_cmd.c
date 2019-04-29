@@ -51,6 +51,7 @@ nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *pay
 	 */
 	cmd->cdw10 = htole32(1);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -72,6 +73,7 @@ nvme_ctrlr_cmd_identify_namespace(struct nvme_controller *ctrlr, uint32_t nsid,
 	 */
 	cmd->nsid = htole32(nsid);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(ctrlr, req);
 }
 
@@ -98,6 +100,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
 	cmd->cdw11 = htole32((vector << 16) | 0x3);
 	cmd->prp1 = htole64(io_que->cpl_bus_addr);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -123,6 +126,7 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
 	cmd->cdw11 = htole32((io_que->gqpair.qid << 16) | 0x1);
 	cmd->prp1 = htole64(io_que->cmd_bus_addr);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -145,6 +149,7 @@ nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
 	 */
 	cmd->cdw10 = htole32(io_que->gqpair.qid);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -167,6 +172,7 @@ nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
 	 */
 	cmd->cdw10 = htole32(io_que->gqpair.qid);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -186,6 +192,7 @@ nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	cmd->cdw10 = htole32(feature);
 	cmd->cdw11 = htole32(cdw11);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -205,6 +212,7 @@ nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	cmd->cdw10 = htole32(feature);
 	cmd->cdw11 = htole32(cdw11);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -277,6 +285,7 @@ nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr, uint8_t log_page
 	cmd->cdw10 |= log_page;
 	cmd->cdw10 = htole32(cmd->cdw10);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }
 
@@ -338,5 +347,6 @@ nvme_ctrlr_cmd_abort(struct nvme_pci_controller *pctrlr, uint16_t cid,
 	cmd->opc = NVME_OPC_ABORT;
 	cmd->cdw10 = htole32((cid << 16) | sqid);
 
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
 }

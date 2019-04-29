@@ -357,7 +357,13 @@ static void
 nvme_sim_controller_fail(void *ctrlr_arg)
 {
 	struct nvme_sim_softc *sc = ctrlr_arg;
-	struct nvme_pci_controller *pctrlr = sc->s_ctrlr;
+	struct nvme_pci_controller *pctrlr;
+
+	if (sc == NULL) {
+		goto out;
+	}
+
+	pctrlr = sc->s_ctrlr;
 
 	CONFIRMPCIECONTROLLER;
 	mtx_lock(&pctrlr->ctrlr.lockc);
@@ -367,6 +373,9 @@ nvme_sim_controller_fail(void *ctrlr_arg)
 	cam_sim_free(sc->s_sim, /*free_devq*/TRUE);
 	mtx_unlock(&pctrlr->ctrlr.lockc);
 	free(sc, M_NVME);
+
+out:
+	return;
 }
 
 struct nvme_consumer *consumer_cookie;

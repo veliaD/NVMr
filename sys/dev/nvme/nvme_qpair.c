@@ -922,7 +922,7 @@ _nvme_qpair_submit_request(struct nvme_pci_qpair *qpair, struct nvme_request *re
 		 *  failure.
 		 */
 
-		if (qpair->qpctrlr->ctrlr.is_failed) {
+		if (NVME_IS_CTRLR_FAILED(&qpair->qpctrlr->ctrlr)) {
 			/*
 			 * The controller has failed.  Post the request to a
 			 *  task where it will be aborted, so that we do not

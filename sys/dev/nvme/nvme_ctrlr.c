@@ -210,7 +210,7 @@ nvme_ctrlr_fail(struct nvme_pci_controller *pctrlr)
 	int i;
 
 	CONFIRMPCIECONTROLLER;
-	pctrlr->ctrlr.is_failed = TRUE;
+	NVME_SET_CTRLR_FAILED(&pctrlr->ctrlr);
 	nvmp_qpair_fail(&pctrlr->adminq);
 	if (pctrlr->ioq != NULL) {
 		for (i = 0; i < pctrlr->ctrlr.num_io_queues; i++)
@@ -419,7 +419,7 @@ nvme_ctrlr_reset(struct nvme_pci_controller *pctrlr)
 	CONFIRMPCIECONTROLLER;
 	cmpset = atomic_cmpset_32(&pctrlr->ctrlr.is_resetting, 0, 1);
 
-	if (cmpset == 0 || pctrlr->ctrlr.is_failed)
+	if (cmpset == 0 || NVME_IS_CTRLR_FAILED(&pctrlr->ctrlr))
 		/*
 		 * Controller is already resetting or has failed.  Return
 		 *  immediately since there is no need to kick off another
@@ -809,6 +809,7 @@ nvme_ctrlr_construct_and_submit_aer(struct nvme_pci_controller *pctrlr,
 	 */
 	req->timeout = FALSE;
 	req->cmd.opc = NVME_OPC_ASYNC_EVENT_REQUEST;
+	epoch_enter(global_epoch);
 	nvme_ctrlr_submit_admin_request(aer->nvmea_ctrlrp, req);
 }
 
@@ -1447,6 +1448,7 @@ nvmp_submit_adm_request(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
 	struct nvme_pci_controller *pctrlr;
 
+	epoch_exit(global_epoch);
 	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;
@@ -1459,6 +1461,7 @@ nvmp_submit_io_request(struct nvme_controller *ctrlr, struct nvme_request *req)
 	struct nvme_pci_qpair       *qpair;
 	struct nvme_pci_controller *pctrlr;
 
+	epoch_exit(global_epoch);
 	KASSERT_NVMP_CNTRLR(ctrlr);
 	pctrlr = ctrlr->nvmec_tsp;
 	CONFIRMPCIECONTROLLER;

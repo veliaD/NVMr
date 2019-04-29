@@ -27,6 +27,8 @@
 
 #include <dev/nvme/nvme_shared.h>
 
+#include <sys/epoch.h>
+
 #define MAX_NVME_RDMA_SEGMENTS 256
 
 typedef struct {
@@ -302,6 +304,7 @@ typedef struct nvmr_qpair_tag {
 	uint16_t                       nvmrq_numFsndqe;/* nvmrq_comms count   */
 	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls count   */
 	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
+	volatile uint32_t              nvmrq_usecnt;
 
 	struct nvme_qpair              nvmrq_gqp;
 } *nvmr_qpair_t;
@@ -396,9 +399,6 @@ nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp)
 	int retval;
 	struct nvme_request *req;
 
-	nvme_free_request(commp->nvmrsnd_req);
-	commp->nvmrsnd_req = NULL;
-
 	mtx_lock(&q->nvmrq_gqp.qlock);
 
 	atomic_store_rel_int(&commp->nvmrsnd_state, NVMRSND_FREE);
@@ -445,6 +445,28 @@ nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 
+#define NVMR_INCR_Q_USECNT(q)                                            \
+    /* DBGSPEW("q:%p o:%u\n", q, q->nvmrq_usecnt), */                    \
+    atomic_fetchadd_int(&(q)->nvmrq_usecnt, 1)
+
+#define NVMR_DECR_Q_USECNT(q)                                            \
+    /* DBGSPEW("q:%p o:%u\n", q, q->nvmrq_usecnt), */                    \
+    atomic_fetchadd_int(&(q)->nvmrq_usecnt, -1)
+
+#define NVMR_IS_CNTRLR_FAILED(c)                                         \
+    NVME_IS_CTRLR_FAILED(&(c)->nvmrctr_nvmec)
+
+static inline void
+nvmr_drop_q_usecount(nvmr_qpair_t q)
+{
+	uint32_t		ousecnt;
+
+	ousecnt = NVMR_DECR_Q_USECNT(q);
+	if (NVMR_IS_CNTRLR_FAILED(q->nvmrq_cntrlr) && (ousecnt == 1)) {
+		wakeup(__DEVOLATILE(void *, &q->nvmrq_usecnt));
+	}
+}
+
 void nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c);
 /**********
  TODO:
@@ -474,6 +496,15 @@ nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_comple
 	if (req->cb_fn) {
 		req->cb_fn(req->cb_arg, c);
 	}
+
+	commp->nvmrsnd_req = NULL;
+	nvme_free_request(req);
+
+	/*
+	 * The assumption is that at this point the consumer layer has no more
+	 * state associated with this IO
+	 */
+	nvmr_drop_q_usecount(q);
 }
 
 void nvmr_qfail_freecmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp);
@@ -699,6 +730,13 @@ nvmr_queue_destroy(nvmr_qpair_t q)
 		q->nvmrq_ibcq = NULL;
 	}
 
+	while (q->nvmrq_usecnt != 0) {
+		ERRSPEW("Waiting for q:%p usecount to drop to 0, %d\n", q,
+		    q->nvmrq_usecnt);
+		tsleep(__DEVOLATILE(void *, &q->nvmrq_usecnt), 0, "qpzero",
+		    2 * HZ);
+	}
+
 	nvmr_qfail_drain(q, &q->nvmrq_numFrcvqe, q->nvmrq_numrcvqe);
 	KASSERT(q->nvmrq_numFrcvqe == q->nvmrq_numrcvqe, ("%s@%d q:%p\n",
 	    __func__, __LINE__, q));
@@ -809,7 +847,13 @@ nvmr_cntrlr_mark_condemned(nvmr_cntrlr_t cntrlr)
 
 	mtx_assert(&cntrlr->nvmrctr_nvmec.lockc, MA_OWNED);
 
-	atomic_store_rel_int(&cntrlr->nvmrctr_nvmec.is_failed, TRUE);
+	/*
+	 * Mark early so IOs can be failed out early.  The necessary location
+	 * for this invocation is just before queueing onto the condemned
+	 * queue
+	 */
+	NVME_SET_CTRLR_FAILED(&cntrlr->nvmrctr_nvmec);
+
 	switch(cntrlr->nvmrctr_state) {
 	case NVMRC_PRE_INIT:
 	case NVMRC_INITED:
@@ -840,25 +884,37 @@ void nvmr_cntrlr_condemn_enqueue(nvmr_cntrlr_t cntrlr);
 void
 nvmr_cntrlr_condemn_enqueue(nvmr_cntrlr_t cntrlr)
 {
+	boolean_t queue_task;
 	DBGSPEW("Queueing controller:%p for destruction\n", cntrlr);
-	mtx_lock(&nvmr_cntrlrs_lstslock);
 
+	queue_task = FALSE;
+
+	mtx_lock(&nvmr_cntrlrs_lstslock);
 	if (cntrlr->nvmrctr_glblst != NVMR_CNTRLRLST_CONDEMNED) {
 		KASSERT(cntrlr->nvmrctr_glblst == NVMR_CNTRLRLST_ACTIVE,
 		    ("%s@%d c:%p type:%d\n", __func__, __LINE__, cntrlr,
 		    cntrlr->nvmrctr_glblst));
 		TAILQ_REMOVE(&nvmr_cntrlrs_active, cntrlr, nvmrctr_nxt);
 
+		NVME_SET_CTRLR_FAILED(&cntrlr->nvmrctr_nvmec);
+		/*
+		 * Wait for IOs to have either 1) Seen that the controller
+		 * is failed OR 2) Bumped up a reference count on a queue-pair
+		 */
+		epoch_wait(global_epoch);
+
 		TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
 		cntrlr->nvmrctr_glblst = NVMR_CNTRLRLST_CONDEMNED;
+		queue_task = TRUE;
 
 		DBGSPEW("ctrlr:%p queued for destruction\n", cntrlr);
 	}
-
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 
-	taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
-	    &nvmr_destroy_cntrlrs_task);
+	if (queue_task == TRUE) {
+		taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
+		    &nvmr_destroy_cntrlrs_task);
+	}
 }
 
 
@@ -921,8 +977,11 @@ void nvmr_cntrlrs_condemn_init(int unitnum);
 void
 nvmr_cntrlrs_condemn_init(int unitnum)
 {
+	boolean_t queue_task;
 	nvmr_cntrlr_t cntrlr, tcntrlr;
 	nvmr_condemned_disposition_t retval;
+
+	queue_task = FALSE;
 
 	mtx_lock(&nvmr_cntrlrs_lstslock);
 	TAILQ_FOREACH_SAFE(cntrlr, &nvmr_cntrlrs_active, nvmrctr_nxt, tcntrlr) {
@@ -944,14 +1003,24 @@ nvmr_cntrlrs_condemn_init(int unitnum)
 		    cntrlr->nvmrctr_glblst));
 		TAILQ_REMOVE(&nvmr_cntrlrs_active, cntrlr, nvmrctr_nxt);
 
+		NVME_SET_CTRLR_FAILED(&cntrlr->nvmrctr_nvmec);
+		/*
+		 * Wait for IOs to have either 1) Seen that the controller
+		 * is failed OR 2) Bumped up a reference count on a queue-pair
+		 */
+		epoch_wait(global_epoch);
+
 		TAILQ_INSERT_TAIL(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
 		cntrlr->nvmrctr_glblst = NVMR_CNTRLRLST_CONDEMNED;
 		DBGSPEW("Queued ctrlr:%p for destruction\n", cntrlr);
+		queue_task = TRUE;
 	}
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 
-	taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
-	    &nvmr_destroy_cntrlrs_task);
+	if (queue_task == TRUE) {
+		taskqueue_enqueue(taskqueue_nvmr_cntrlrs_reaper,
+		    &nvmr_destroy_cntrlrs_task);
+	}
 }
 
 void nvmr_all_cntrlrs_condemn_init(void);
@@ -969,13 +1038,10 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 
 	DBGSPEW("Controller:%p being destroyed\n", cntrlr);
 
-	atomic_store_rel_int(&cntrlr->nvmrctr_nvmec.is_failed, TRUE);
 
 	if (cntrlr->nvmrctr_nvmereg) {
 		nvme_unregister_controller(&cntrlr->nvmrctr_nvmec);
 	}
-
-	nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
 
 	for (count = 0; count < NVME_MAX_NAMESPACES; count++) {
 		nvme_ns_destruct(&cntrlr->nvmrctr_nvmec.cns[count]);
@@ -983,10 +1049,6 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 
 	if (cntrlr->nvmrctr_nvmec.ccdev) {
 		destroy_dev(cntrlr->nvmrctr_nvmec.ccdev);
-	}
-
-	if (cntrlr->nvmrctr_nvmec.taskqueue) {
-		taskqueue_free(cntrlr->nvmrctr_nvmec.taskqueue);
 	}
 
 	if (cntrlr->nvmrctr_ioqarr != NULL) {
@@ -999,7 +1061,14 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 	}
 	nvmr_queue_destroy(cntrlr->nvmrctr_adminqp);
 
-	DBGSPEW("Controller:%p destroyed, but not freed\n", cntrlr);
+	if (cntrlr->nvmrctr_nvmec.taskqueue) {
+		taskqueue_drain_all(cntrlr->nvmrctr_nvmec.taskqueue);
+		taskqueue_free(cntrlr->nvmrctr_nvmec.taskqueue);
+	}
+
+	nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
+
+	DBGSPEW("NVMr controller:%p wiped\n", cntrlr);
 
 	return;
 }
@@ -1495,7 +1564,7 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 
 	commp = STAILQ_FIRST(&q->nvmrq_comms);
 	if (commp == NULL) {
-		if (cntrlr->nvmrctr_nvmec.is_failed) {
+		if (NVMR_IS_CNTRLR_FAILED(cntrlr)) {
 			ERRSPEW("Controller:%p:%p has failed\n", cntrlr,
 			    &cntrlr->nvmrctr_nvmec);
 			error = ESHUTDOWN;
@@ -1615,39 +1684,48 @@ nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
 	int retval;
 
 	cntrlr = q->nvmrq_cntrlr;
-
 	gqp = &q->nvmrq_gqp;
 	req->rqpair = gqp;
 
-	mtx_lock(&gqp->qlock);
-	if (Q_IS_FAILED(q)) {
+	if (NVMR_IS_CNTRLR_FAILED(cntrlr)) {
 		retval = ESHUTDOWN;
 	} else {
+		mtx_lock(&gqp->qlock);
 		retval = nvmr_command_async(q, req);
+		mtx_unlock(&gqp->qlock);
 	}
-	mtx_unlock(&gqp->qlock);
 
 	if (retval != 0) {
-		ERRSPEW("Failing req: %d\n", retval);
+		ERRSPEW("Failing req:%p %d\n", req, retval);
 		nvmr_ctrlr_post_failed_request(cntrlr, req);
 	}
+
+	return;
 }
 
+#define NVMR_SUBMIT_BEGIN                                                \
+	nvmr_cntrlr_t cntrlr;                                            \
+	nvmr_qpair_t q;                                                  \
+                                                                         \
+	KASSERT_NVMR_CNTRLR(ctrlr);                                      \
+	cntrlr = ctrlr->nvmec_tsp;                                       \
+	CONFIRMRDMACONTROLLER;                                           \
+                                                                         \
+
+
+#define NVMR_SUBMIT_END                                                  \
+	NVMR_INCR_Q_USECNT(q);                                           \
+	epoch_exit(global_epoch);                                        \
+	nvmr_submit_req(q, req)
 
 void
 nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req);
 void
 nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
-	nvmr_cntrlr_t cntrlr;
-	nvmr_qpair_t q;
-
-	KASSERT_NVMR_CNTRLR(ctrlr);
-	cntrlr = ctrlr->nvmec_tsp;
-	CONFIRMRDMACONTROLLER;
-
+	NVMR_SUBMIT_BEGIN;
 	q = cntrlr->nvmrctr_adminqp;
-	nvmr_submit_req(q, req);
+	NVMR_SUBMIT_END;
 }
 
 
@@ -1656,15 +1734,9 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req);
 void
 nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
-	nvmr_cntrlr_t cntrlr;
-	nvmr_qpair_t q;
-
-	KASSERT_NVMR_CNTRLR(ctrlr);
-	cntrlr = ctrlr->nvmec_tsp;
-	CONFIRMRDMACONTROLLER;
-
-	q = cntrlr->nvmrctr_ioqarr[0]; /* Single Q until I/O queues are up */
-	nvmr_submit_req(q, req);
+	NVMR_SUBMIT_BEGIN;
+	q = cntrlr->nvmrctr_ioqarr[0]; /* 1 Q until IO qpairs are up */
+	NVMR_SUBMIT_END;
 }
 
 
@@ -1703,12 +1775,20 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 		goto out;                                                  \
 	}                                                                  \
 
-#define ISSUE_WAIT_CHECK_REQ                                          \
-	status.done = 0;                                              \
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req); \
-	while (!atomic_load_acq_int(&status.done)) {                  \
-		pause("nvmr", HZ > 100 ? (HZ/100) : 1);               \
-	}                                                             \
+#define ISSUE_WAIT_CHECK_REQ                                                  \
+	status.done = 0;                                                      \
+	epoch_enter(global_epoch);                                            \
+	if (!NVMR_IS_CNTRLR_FAILED(cntrlr)) {                                 \
+		nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req); \
+		while (!atomic_load_acq_int(&status.done)) {                  \
+			pause("nvmr", HZ > 100 ? (HZ/100) : 1);               \
+		}                                                             \
+	} else {                                                              \
+		status.cpl.status =                                           \
+		    (NVME_SCT_GENERIC << NVME_STATUS_SCT_SHIFT) |             \
+		    (NVME_SC_ABORTED_BY_REQUEST << NVME_STATUS_SC_SHIFT);     \
+		epoch_exit(global_epoch);                                     \
+	}                                                                     \
 	if (nvme_completion_is_error(&status.cpl))
 
 
@@ -2067,6 +2147,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	cmd->nvmrcu_conn.nvmrcn_kato = htole32(prof->nvmrqp_kato);
 
 	status.done = 0;
+	NVMR_INCR_Q_USECNT(q);
 	nvmr_submit_req(q, req);
 	while (!atomic_load_acq_int(&status.done)) {
 		pause("nvmr", HZ > 100 ? (HZ/100) : 1);
@@ -2271,6 +2352,66 @@ nvmr_register_cntrlr(nvmr_cntrlr_t cntrlr)
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 }
 
+void
+nvmr_qpair_manual_complete_request(struct nvme_qpair *qpair,
+    struct nvme_request *req, uint32_t sct, uint32_t sc,
+    boolean_t print_on_error);
+void
+nvmr_qpair_manual_complete_request(struct nvme_qpair *qpair,
+    struct nvme_request *req, uint32_t sct, uint32_t sc,
+    boolean_t print_on_error)
+{
+	struct nvme_completion	cpl;
+	boolean_t		error;
+	nvmr_qpair_t		q;
+
+	memset(&cpl, 0, sizeof(cpl));
+	cpl.sqid = qpair->qid;
+	cpl.status |= (sct & NVME_STATUS_SCT_MASK) << NVME_STATUS_SCT_SHIFT;
+	cpl.status |= (sc & NVME_STATUS_SC_MASK) << NVME_STATUS_SC_SHIFT;
+
+	error = nvme_completion_is_error(&cpl);
+
+	if (error && print_on_error) {
+		nvme_qpair_print_command(qpair, &req->cmd);
+		nvme_qpair_print_completion(qpair, &cpl);
+	}
+
+	if (req->cb_fn)
+		req->cb_fn(req->cb_arg, &cpl);
+
+	nvme_free_request(req);
+	
+	/*
+	 * The assumption is that at this point the consumer layer has no more
+	 * state associated with this IO
+	 */
+	q = __containerof(qpair, struct nvmr_qpair_tag, nvmrq_gqp);
+	nvmr_drop_q_usecount(q);
+}
+
+void
+nvmr_ctrlr_fail_req_task(void *arg, int pending);
+void
+nvmr_ctrlr_fail_req_task(void *arg, int pending)
+{
+	struct nvme_controller	*ctrlr = arg;
+	struct nvme_request	*req;
+
+	KASSERT(ctrlr->nvmec_ttype == NVMET_RDMA,
+	    ("Non NVMr transport c:%p t:%d", ctrlr, ctrlr->nvmec_ttype));
+
+	mtx_lock(&ctrlr->lockc);
+	while ((req = STAILQ_FIRST(&ctrlr->fail_req)) != NULL) {
+		STAILQ_REMOVE_HEAD(&ctrlr->fail_req, stailq);
+		mtx_unlock(&ctrlr->lockc);
+		nvmr_qpair_manual_complete_request(req->rqpair, req,
+		    NVME_SCT_GENERIC, NVME_SC_ABORTED_BY_REQUEST, TRUE);
+		mtx_lock(&ctrlr->lockc);
+	}
+	mtx_unlock(&ctrlr->lockc);
+}
+
 #define BAIL_IF_CNTRLR_CONDEMNED(c)                                        \
 	if (atomic_load_acq_int(&(c)->nvmrctr_state) == NVMRC_CONDEMNED) { \
 		error = ESHUTDOWN;                                         \
@@ -2362,7 +2503,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	TASK_INIT(&cntrlr->nvmrctr_nvmec.reset_task, 0,
 	    nvmr_ctrlr_reset_task, cntrlr);
 	TASK_INIT(&cntrlr->nvmrctr_nvmec.fail_req_task, 0,
-	    nvme_ctrlr_fail_req_task, &cntrlr->nvmrctr_nvmec);
+	    nvmr_ctrlr_fail_req_task, &cntrlr->nvmrctr_nvmec);
 	STAILQ_INIT(&cntrlr->nvmrctr_nvmec.fail_req);
 	cntrlr->nvmrctr_nvmec.is_failed = FALSE;
 

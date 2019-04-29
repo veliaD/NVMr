@@ -41,6 +41,8 @@
 
 #include <vm/uma.h>
 
+#include <sys/epoch.h>
+
 #define SPEWCMN(prefix, format, ...) printf(prefix "%s@%d> " format, \
     __func__, __LINE__, ## __VA_ARGS__)
 #define SPEW(format, ...) SPEWCMN("", format, ## __VA_ARGS__)
@@ -500,6 +502,9 @@ enum nvme_transport {
 	NVMET_RDMA = 0x92A3317C,
 };
 
+#define NVME_IS_CTRLR_FAILED(c) atomic_load_acq_int(&(c)->is_failed)
+#define NVME_SET_CTRLR_FAILED(c) atomic_store_rel_int(&(c)->is_failed, TRUE)
+
 struct nvme_controller {
 	struct mtx		lockc;
 
@@ -711,5 +716,57 @@ void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 
 void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
 void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
+void	nvme_notify_mark_failing_consumers(struct nvme_controller *ctrlr);
+
+/* status code types */
+enum nvme_status_code_type {
+	NVME_SCT_GENERIC		= 0x0,
+	NVME_SCT_COMMAND_SPECIFIC	= 0x1,
+	NVME_SCT_MEDIA_ERROR		= 0x2,
+	/* 0x3-0x6 - reserved */
+	NVME_SCT_VENDOR_SPECIFIC	= 0x7,
+};
+
+/* generic command status codes */
+enum nvme_generic_command_status_code {
+	NVME_SC_SUCCESS				= 0x00,
+	NVME_SC_INVALID_OPCODE			= 0x01,
+	NVME_SC_INVALID_FIELD			= 0x02,
+	NVME_SC_COMMAND_ID_CONFLICT		= 0x03,
+	NVME_SC_DATA_TRANSFER_ERROR		= 0x04,
+	NVME_SC_ABORTED_POWER_LOSS		= 0x05,
+	NVME_SC_INTERNAL_DEVICE_ERROR		= 0x06,
+	NVME_SC_ABORTED_BY_REQUEST		= 0x07,
+	NVME_SC_ABORTED_SQ_DELETION		= 0x08,
+	NVME_SC_ABORTED_FAILED_FUSED		= 0x09,
+	NVME_SC_ABORTED_MISSING_FUSED		= 0x0a,
+	NVME_SC_INVALID_NAMESPACE_OR_FORMAT	= 0x0b,
+	NVME_SC_COMMAND_SEQUENCE_ERROR		= 0x0c,
+	NVME_SC_INVALID_SGL_SEGMENT_DESCR	= 0x0d,
+	NVME_SC_INVALID_NUMBER_OF_SGL_DESCR	= 0x0e,
+	NVME_SC_DATA_SGL_LENGTH_INVALID		= 0x0f,
+	NVME_SC_METADATA_SGL_LENGTH_INVALID	= 0x10,
+	NVME_SC_SGL_DESCRIPTOR_TYPE_INVALID	= 0x11,
+	NVME_SC_INVALID_USE_OF_CMB		= 0x12,
+	NVME_SC_PRP_OFFET_INVALID		= 0x13,
+	NVME_SC_ATOMIC_WRITE_UNIT_EXCEEDED	= 0x14,
+	NVME_SC_OPERATION_DENIED		= 0x15,
+	NVME_SC_SGL_OFFSET_INVALID		= 0x16,
+	/* 0x17 - reserved */
+	NVME_SC_HOST_ID_INCONSISTENT_FORMAT	= 0x18,
+	NVME_SC_KEEP_ALIVE_TIMEOUT_EXPIRED	= 0x19,
+	NVME_SC_KEEP_ALIVE_TIMEOUT_INVALID	= 0x1a,
+	NVME_SC_ABORTED_DUE_TO_PREEMPT		= 0x1b,
+	NVME_SC_SANITIZE_FAILED			= 0x1c,
+	NVME_SC_SANITIZE_IN_PROGRESS		= 0x1d,
+	NVME_SC_SGL_DATA_BLOCK_GRAN_INVALID	= 0x1e,
+	NVME_SC_NOT_SUPPORTED_IN_CMB		= 0x1f,
+
+	NVME_SC_LBA_OUT_OF_RANGE		= 0x80,
+	NVME_SC_CAPACITY_EXCEEDED		= 0x81,
+	NVME_SC_NAMESPACE_NOT_READY		= 0x82,
+	NVME_SC_RESERVATION_CONFLICT		= 0x83,
+	NVME_SC_FORMAT_IN_PROGRESS		= 0x84,
+};
 
 #endif /* __NVME_SHARED_H__ */
