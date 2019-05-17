@@ -2949,7 +2949,7 @@ out:
 char nvmr_cmdusage[] = "Usage:\n"
 	"\tlist (lists the NVMr controllers and their unit-numbers)\n"
 	"\tattach:IP-address,port-number,sub-NQN (connects to a controller)\n"
-	"\tdetach:unit-number (disconnects from a controller.  -1 means all controllers)\n";
+	"\tdetach:unit-number (disconnects from a controller.  -1 means all)\n";
 
 static SYSCTL_NODE(_hw, OID_AUTO, nvmrdma, CTLFLAG_RD, 0, "NVMeoRDMA");
 SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, controllers,
