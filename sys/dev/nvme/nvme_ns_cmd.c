@@ -208,6 +208,7 @@ nvme_ns_cmd_flush(struct nvme_namespace *ns, nvme_cb_fn_t cb_fn, void *cb_arg)
 	epoch_enter(global_epoch);
 	if (NVME_IS_CTRLR_FAILED(ns->nvmes_ctrlr)) {
 		epoch_exit(global_epoch);
+		error = ESHUTDOWN;
 		goto out;
 	}
 

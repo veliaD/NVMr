@@ -3,7 +3,7 @@
 source `dirname ${0}`/Krnl.include
 
 ( ( cd ${HEAD}/sys/amd64/conf && config -d ${KERNBUILDDIR} $KERN_CONFIG ) && \
-  ((cd ${VELPATHTOKRNSRCS}/sys && make -j36  -m ${VELMK} clean cleandepend \
+  ((cd ${VELPATHTOKRNSRCS}/sys && make -j24  -m ${VELMK} clean cleandepend \
      depend) && \
   (cd ${VELPATHTOKRNSRCS} && make -j36 buildkernel )) \
      > ${BLDERROUT} 2>&1 || (less '+error: ' ${BLDERROUT} 2>&1; \
