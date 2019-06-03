@@ -5,7 +5,7 @@ source `dirname ${0}`/Krnl.include
 ( ( cd ${HEAD}/sys/amd64/conf && config -d ${KERNBUILDDIR} $KERN_CONFIG ) && \
   ((cd ${VELPATHTOKRNSRCS}/sys && make -j24  -m ${VELMK} clean cleandepend \
      depend) && \
-  (cd ${VELPATHTOKRNSRCS} && make -j36 buildkernel )) \
-     > ${BLDERROUT} 2>&1 || (less '+error: ' ${BLDERROUT} 2>&1; \
+  (cd ${VELPATHTOKRNSRCS} && make -j24 buildkernel )) \
+     > ${BLDERROUT} 2>&1 || (less '+/error: ' ${BLDERROUT} 2>&1; \
          exit 1) && tail -n 20 $BLDERROUT )
 
