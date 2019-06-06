@@ -1,164 +1,9 @@
-/**********
- TODO:
- 1) Use the command cid array to track the allocated containers and use the
-    STAILQ field to implement a queue of free containers.  Right now the
-    STAILQ field tracks all allocated containers.
- 3) We should be able to remove ib_mr,s or their containing command-containers
-    from circulation if they cannot be invalidated correctly
- **********/
+/*
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
+ */
 
-#include <sys/cdefs.h>
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/kernel.h>
-#include <sys/bus.h>
-#include <sys/uuid.h>
-#include <sys/conf.h>
-#include <sys/systm.h>
-#include <sys/module.h>
-
-#include <netinet/in.h>
-
-#include <linux/kernel.h>
-#include <linux/netdevice.h>
-
-#include <rdma/rdma_cm.h>
-#include <rdma/ib_verbs.h>
-
-#include <dev/nvme/nvme_shared.h>
-
-#include <sys/epoch.h>
-
-#define MAX_NVME_RDMA_SEGMENTS 256
-
-typedef struct {
-	uint64_t nvmrk_address;
-	uint8_t  nvmrk_length[3];
-	uint32_t nvmrk_key;
-	uint8_t  nvmrk_sgl_identifier;
-} __packed nvmr_ksgl_t;
-
-
-typedef struct {
-	uint8_t     nvmf_opc;
-	uint8_t     nvmf_sgl_fuse;
-	uint16_t    nvmf_cid;
-	union {
-		struct {
-			uint8_t     nvmf_fctype;
-			uint8_t     nvmf_resvf1[19];
-		};
-		struct {
-			uint32_t    nvmf_nsid;
-			uint8_t     nvmf_resvn1[16];
-		};
-	};
-	nvmr_ksgl_t nvmf_ksgl;
-} __packed nvmf_prfx_t;
-
-typedef struct {
-	nvmf_prfx_t nvmrsb_nvmf;
-	uint8_t     nvmrsb_resv1[24];
-} __packed nvmr_stub_t;
-CTASSERT(sizeof(nvmr_stub_t) == sizeof(struct nvme_command));
-
-typedef struct {
-	nvmf_prfx_t nvmrcn_nvmf;
-	uint16_t    nvmrcn_recfmt;
-	uint16_t    nvmrcn_qid;
-	uint16_t    nvmrcn_sqsize;
-	uint8_t     nvmrcn_cattr;
-	uint8_t     nvmrcn_resv2;
-	uint32_t    nvmrcn_kato;
-	uint8_t     nvmrcn_resv3[12];
-} __packed nvmr_connect_t;
-CTASSERT(sizeof(nvmr_connect_t) == sizeof(struct nvme_command));
-
-typedef struct {
-	nvmf_prfx_t nvmrpg_nvmf;
-	uint8_t     nvmrpg_attrib;
-	uint8_t     nvmrpg_resv1[3];
-	uint32_t    nvmrpg_ofst;
-	uint8_t     nvmrpg_resv2[16];
-} __packed nvmr_propget_t;
-CTASSERT(sizeof(nvmr_propget_t) == sizeof(struct nvme_command));
-
-typedef struct {
-	nvmf_prfx_t nvmrps_nvmf;
-	uint8_t     nvmrps_attrib;
-	uint8_t     nvmrps_resv1[3];
-	uint32_t    nvmrps_ofst;
-	uint64_t    nvmrps_value;
-	uint8_t     nvmrps_resv2[8];
-} __packed nvmr_propset_t;
-CTASSERT(sizeof(nvmr_propset_t) == sizeof(struct nvme_command));
-
-typedef struct {
-	nvmf_prfx_t nvmrid_nvmf;
-	uint8_t     nvmrid_cns;
-	uint8_t     nvmrid_resv1;
-	uint16_t    nvmrid_cntid;
-	uint8_t     nvmrid_resv2[20];
-} __packed nvmr_identify_t;
-CTASSERT(sizeof(nvmr_identify_t) == sizeof(struct nvme_command));
-
-typedef union {
-	struct nvme_command nvmrcu_nvme;
-	nvmr_connect_t      nvmrcu_conn;
-	nvmr_propget_t      nvmrcu_prgt;
-	nvmr_propset_t      nvmrcu_prst;
-	nvmr_identify_t     nvmrcu_idnt;
-	nvmr_stub_t         nvmrcu_stub;
-} nvmr_communion_t;
-CTASSERT(sizeof(nvmr_communion_t) == sizeof(struct nvme_command));
-
-struct nvmr_ncmplcont {
-	struct ib_cqe			nvmrsp_cqe;
-	STAILQ_ENTRY(nvmr_ncmplcont)	nvmrsp_next;
-	struct nvme_completion	        nvmrsp_nvmecmpl;
-	u64				nvmrsp_dmaddr;
-};
-typedef struct nvmr_ncmplcont nvmr_ncmplcon_t;
-
-typedef enum {
-	NVMRSND_FREE = 0x58F29A,
-	NVMRSND_IOQD = 0xA6DA4B,
-	NVMRSND_CMPL = 0x8D908E
-} nvmr_snd_state_t;
-
-struct nvmr_qpair_tag;
-
-struct nvmr_ncommcont {
-	struct ib_cqe		     nvmrsnd_cqe;
-	struct ib_cqe		     nvmrsnd_regcqe;
-	STAILQ_ENTRY(nvmr_ncommcont) nvmrsnd_nextfree;
-	nvmr_stub_t                 *nvmrsnd_nvmecomm;
-	struct ib_mr                *nvmrsnd_mr;
-	u64			     nvmrsnd_dmaddr;
-	uint16_t                     nvmrsnd_cid;
-	struct nvme_request         *nvmrsnd_req;
-	struct callout               nvmrsnd_to;
-	volatile nvmr_snd_state_t    nvmrsnd_state;
-	struct nvmr_qpair_tag       *nvmrsnd_q;
-	bool                         nvmrsnd_rspndd;
-	bool                         nvmrsnd_rkeyvalid;
-};
-typedef struct nvmr_ncommcont nvmr_ncommcon_t;
-
-typedef struct {
-	uint16_t nvmrcr_recfmt;
-	uint16_t nvmrcr_qid;
-	uint16_t nvmrcr_hrqsize;
-	uint16_t nvmrcr_hsqsize;
-	uint8_t  nvmrcr_resv0[24];
-} __packed nvmr_rdma_cm_request_t;
-CTASSERT(sizeof(nvmr_rdma_cm_request_t) == 32);
-
-typedef struct {
-	uint16_t nvmrcrj_recfmt;
-	uint16_t nvmrcrj_sts;
-} __packed nvmr_rdma_cm_reject_t;
-CTASSERT(sizeof(nvmr_rdma_cm_reject_t) == 4);
+#include <dev/nvmrdma/nvmr_spec.h>
+#include <dev/nvmrdma/nvmrdma.h>
 
 static void
 nvmr_qphndlr(struct ib_event *ev, void *ctx)
@@ -169,39 +14,6 @@ nvmr_qphndlr(struct ib_event *ev, void *ctx)
 
 char nvrdma_host_uuid_string[80];
 struct uuid nvrdma_host_uuid;
-
-#define MAX_SGS	2
-#define CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(data_structure) \
-    CTASSERT(MAX_SGS >= ((sizeof(data_structure)/PAGE_SIZE)+1))
-
-#define MAX_NQN_LEN 255
-struct nvmrdma_connect_data {
-	struct uuid nvmrcd_hostid;
-	uint16_t    nvmrcd_cntlid;
-	uint8_t     nvmrcd_resv0[238];
-	uint8_t     nvmrcd_subnqn[MAX_NQN_LEN+1];
-	uint8_t     nvmrcd_hostnqn[MAX_NQN_LEN+1];
-	uint8_t     nvmrcd_resv1[256];
-} __packed;
-CTASSERT(sizeof(struct nvmrdma_connect_data) == 1024);
-CTASSERT_MAX_SGS_LARGE_ENOUGH_FOR(struct nvmrdma_connect_data);
-
-#define NVMR_FOURK (4096)
-#define NVMR_DYNANYCNTLID 0xFFFF
-
-#define HOSTNQN_TEMPLATE "nqn.2014-08.org.nvmexpress:uuid:%s"
-#define DISCOVERY_SUBNQN "nqn.2014-08.org.nvmexpress.discovery"
-
-#define NVMR_DEFAULT_KATO 0x1D4C0000
-#define NVMR_DISCOVERY_KATO 0x0 /* DISCOVERY KATO has to be 0 */
-#define NVMF_FCTYPE_PROPSET 0x0
-#define NVMF_FCTYPE_CONNECT 0x1
-#define NVMF_FCTYPE_PROPGET 0x4
-#define NVMR_PSDT_SHIFT 6
-#define NVMF_SINGLE_BUF_SGL (0x1 << NVMR_PSDT_SHIFT)
-#define NVMF_MULT_SEG_SGL   (0x2 << NVMR_PSDT_SHIFT)
-#define NVMF_KEYED_SGL_NO_INVALIDATE 0x40
-#define NVMF_KEYED_SGL_INVALIDATE    0x4F
 
 static void
 nvmr_rg_done(struct ib_cq *cq, struct ib_wc *wc)
@@ -229,34 +41,6 @@ nvmr_snd_done(struct ib_cq *cq, struct ib_wc *wc)
 	 */
 }
 
-
-
-
-#define NUMIPV4OCTETS 4
-typedef uint8_t nvmripv4_t[NUMIPV4OCTETS];
-
-#define NUMSUBNQNBYTES 256
-typedef char nvmrsubnqn_t[NUMSUBNQNBYTES+1];
-
-#define NUMIPV4STRNGSZ 15
-typedef char nvmripv4str_t[NUMIPV4STRNGSZ+1];
-
-struct nvmr_cntrlr_tag;
-typedef void (*nvmr_crtcntrlrcb_t)(struct nvmr_cntrlr_tag *cntrlr);
-
-typedef struct {
-	uint32_t nvmrqp_numqueues;
-	uint32_t nvmrqp_numsndqe;
-	uint32_t nvmrqp_numrcvqe;
-	uint32_t nvmrqp_kato;
-} nvmr_qprof_t;
-
-typedef enum {
-	NVMR_QTYPE_ADMIN = 0,
-	NVMR_QTYPE_IO,
-	NVMR_NUM_QTYPES
-} nvmr_qndx_t;
-
 static char *nvmr_qndxnames[NVMR_NUM_QTYPES] = {
 	[NVMR_QTYPE_ADMIN] = "Admin Q",
 	[NVMR_QTYPE_IO] = "I/O Q",
@@ -268,122 +52,6 @@ nvmr_qndx2name(nvmr_qndx_t qndx)
 	KASSERT(qndx < NVMR_NUM_QTYPES, ("qndx:%d", qndx));
 	return nvmr_qndxnames[qndx];
 }
-
-typedef struct {
-	nvmr_qprof_t	   nvmrp_qprofs[NVMR_NUM_QTYPES];
-} nvmr_cntrlrprof_t;
-
-typedef enum {
-	NVMRQ_PRE_INIT = 0,
-	NVMRQ_PRE_ADDR_RESOLV,
-	NVMRQ_ADDR_RESOLV_FAILED,
-	NVMRQ_ADDR_RESOLV_SUCCEEDED,
-	NVMRQ_PRE_ROUTE_RESOLV,
-	NVMRQ_ROUTE_RESOLV_FAILED,
-	NVMRQ_ROUTE_RESOLV_SUCCEEDED,
-	NVMRQ_PRE_CONNECT,
-	NVMRQ_CONNECT_FAILED,
-	NVMRQ_CONNECT_SUCCEEDED,
-} nvmr_qpair_state_t;
-
-typedef struct nvmr_qpair_tag {
-	struct rdma_cm_id             *nvmrq_cmid;
-	struct nvmr_cntrlr_tag        *nvmrq_cntrlr; /* Owning Controller     */
-	struct ib_pd                  *nvmrq_ibpd;
-	struct ib_cq                  *nvmrq_ibcq;
-	struct ib_qp                  *nvmrq_ibqp;
-	nvmr_ncommcon_t              **nvmrq_commcid; /* CID > nvmr_ncommcont */
-	STAILQ_HEAD(, nvmr_ncommcont)  nvmrq_comms;
-	STAILQ_HEAD(, nvmr_ncmplcont)  nvmrq_cmpls;
-	STAILQ_HEAD(, nvme_request)    nvmrq_defreqs;
-	volatile nvmr_qpair_state_t    nvmrq_state;  /* nvmrctr_nvmec.lockc */
-	int                            nvmrq_last_cm_status;
-	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count    */
-	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count    */
-	uint16_t                       nvmrq_numFsndqe;/* nvmrq_comms count   */
-	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls count   */
-	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
-	volatile uint32_t              nvmrq_usecnt;
-
-	struct nvme_qpair              nvmrq_gqp;
-} *nvmr_qpair_t;
-
-
-/*
- * An NVMr controller requires multiple memory allocations and n/w
- * interactions to be fully setup.  An initial admin QP is created which
- * is used to interrogate the properties of the remote NVMr controller.
- * Thereafter additional IO QPs are created. As soon as the admin QP is even
- * partly setup it can receive async events from the RDMA stack about
- * disconnects or RNIC device removals.  These removals should trigger a
- * teardown of the controller that could still be initializing.
- *
- * The same events can be generated once the controller has initialized.
- *
- * To deal with all the resulting scenarios a state variable has been introduced
- *
- * A taskqueue has been introduced to handle destroying a controller.
- * Controllers will not be tossed into this queue on a destruction event
- * if it is determined that it is still being initialized (NVMRC_PRE_INIT).
- * However they will be moved to the NVMRC_CONDEMNED state.
- * The NVMRC_CONDEMNED serves two purposes:
- * 1) Destruction/condemn events can work out that a previous condemn event has
- *    happened on a controller and that nothing more has to be done to
- *    condemn it.
- * 2) The initialization logic in nvmr_cntrlr_create() monitors the state to
- *    check if a condemn event has happened on a controller it is initializing.
- *    If so the initialization is aborted and the initialization logic
- *    tosses the controller onto the condemned taskqueue for destruction
- */
-typedef enum {
-	NVMRC_PRE_INIT = 0,
-	NVMRC_INITED,
-	NVMRC_CONDEMNED
-} nvmr_cntrlr_state_t;
-
-typedef enum {
-	NVMR_CNTRLRLST_INVALID = 0,
-	NVMR_CNTRLRLST_ACTIVE = 0x45FE129,
-	NVMR_CNTRLRLST_CONDEMNED = 0xB9388F
-} nvmr_cntrlr_lst_t;
-
-typedef struct nvmr_cntrlr_tag {
-	char			very_first_field[NVME_VFFSTRSZ+1];
-	nvmrsubnqn_t       nvmrctr_subnqn;
-	nvmripv4str_t      nvmrctr_ipv4str;
-	nvmr_qpair_t       nvmrctr_adminqp;
-	nvmr_qpair_t      *nvmrctr_ioqarr;  /* Array size determined by prof */
-	nvmr_cntrlrprof_t *nvmrctr_prof;
-	nvmripv4_t         nvmrctr_ipv4;
-	int                nvmrctr_numioqs; /* count not always fixed in prof */
-	uint16_t           nvmrctr_port;
-	struct nvme_controller nvmrctr_nvmec;
-	volatile nvmr_cntrlr_state_t nvmrctr_state;  /* nvmrctr_nvmec.lockc */
-	nvmr_cntrlr_lst_t  nvmrctr_glblst;  /* nvmrctr_nvmec.lockc */
-	TAILQ_ENTRY(nvmr_cntrlr_tag) nvmrctr_nxt;
-	boolean_t          nvmrctr_nvmereg;
-} *nvmr_cntrlr_t;
-
-#define NVMR_NUMSNDSGE (1 + 1) /* NVMe Command  + Inline data */
-#define NVMR_NUMRCVSGE 1       /* NVMe Completion */
-
-#define MAX_ADMINQ_ELEMENTS 32
-#define MAX_IOQ_ELEMENTS 32
-
-nvmr_cntrlrprof_t nvmr_regularprof = {
-	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
-		.nvmrqp_numqueues = 1,
-		.nvmrqp_numsndqe = MAX_ADMINQ_ELEMENTS - 1,
-		.nvmrqp_numrcvqe = MAX_ADMINQ_ELEMENTS,
-		.nvmrqp_kato = NVMR_DEFAULT_KATO,
-	},
-	.nvmrp_qprofs[NVMR_QTYPE_IO] = {
-		.nvmrqp_numqueues = 1,
-		.nvmrqp_numsndqe = MAX_IOQ_ELEMENTS - 1,
-		.nvmrqp_numrcvqe = MAX_IOQ_ELEMENTS,
-		.nvmrqp_kato = NVMR_DEFAULT_KATO,
-	},
-};
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
@@ -470,8 +138,7 @@ void nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_c
 /**********
  TODO:
  1) Retry logic
- 2) Time out and its cancellation
- 3) Track in-use comm
+ 2) Track in-use comm
  **********/
 void
 nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c)
@@ -519,8 +186,6 @@ nvmr_qfail_freecmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp)
 	mtx_unlock(&q->nvmrq_gqp.qlock);
 }
 
-
-#define Q_IS_FAILED(q) (atomic_load_acq_int(&q->nvmrq_gqp.qis_enabled) == FALSE)
 
 static void
 nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc);
@@ -829,11 +494,6 @@ MTX_SYSINIT(nvmr_cntrlrs_lstslock, &nvmr_cntrlrs_lstslock,
     "NVMr Lists of Controllers Lock", MTX_DEF);
 
 
-typedef enum {
-	NVMRCD_ENQUEUE = 0,
-	NVMRCD_SKIP_ENQUEUE
-}nvmr_condemned_disposition_t;
-
 /*
  * Atomically, looks at the state of the controller and switches it to the
  * condemned state while deciding to enqueue right away or later
@@ -961,8 +621,6 @@ nvmr_cntrlr_inited(nvmr_cntrlr_t cntrlr)
 	}
 	mtx_unlock(&cntrlr->nvmrctr_nvmec.lockc);
 }
-
-#define NVMR_ALLUNITNUMS (-1)
 
 /*
  * Run through the list of active controllers searching for the controller
@@ -1182,27 +840,6 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 
 	return 0;
 }
-
-typedef struct {
-	char *nvmra_ipaddr;
-	char *nvmra_port;
-	char *nvmra_subnqn;
-} nvmr_addr_t;
-
-typedef enum {
-	NVMR_QCMD_INVALID = 0,
-	NVMR_QCMD_RO,
-	NVMR_QCMD_WO,
-}  nvmr_ksgl_perm_t;
-
-#define NVMRTO 3000
-
-#define NVMR_STRING "NVMe over RDMA"
-#define CONFIRMRDMACONTROLLER KASSERT(strncmp(cntrlr->very_first_field, \
-    NVMR_STRING, sizeof(cntrlr->very_first_field)) == 0, \
-    ("%s@%d NOT an RDMA controller!\n", __func__, __LINE__))
-#define KASSERT_NVMR_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_RDMA, \
-    ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
 
 /*
  * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
@@ -2168,15 +1805,6 @@ out:
 	return error;
 }
 
-typedef enum {
-	NVMR_PROPLEN_4BYTES = 0,
-	NVMR_PROPLEN_8BYTES = 1,
-	NVMR_PROPLEN_MAX
-} nvmr_proplent_t;
-
-#define MAX_NVMR_PROP_GET 0x12FFU
-#define IDENTIFYLEN 4096
-
 int
 nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
     uint8_t cns, void *datap, int datalen);
@@ -2260,23 +1888,6 @@ out:
 }
 
 
-typedef struct {
-	uint64_t nvmrcc_mqes  :16;
-	uint64_t nvmrcc_cqr   : 1;
-	uint64_t nvmrcc_ams   : 2;
-	uint64_t nvmrcc_resv1 : 5;
-	uint64_t nvmrcc_to    : 8;
-	uint64_t nvmrcc_dstrd : 4;
-	uint64_t nvmrcc_nssrs : 1;
-	uint64_t nvmrcc_css   : 8;
-	uint64_t nvmrcc_bps   : 1;
-	uint64_t nvmrcc_resv2 : 2;
-	uint64_t nvmrcc_mpsmin: 4;
-	uint64_t nvmrcc_mpsmax: 4;
-	uint64_t nvmrcc_resv3 : 8;
-} nvmr_cntrlcap_t;
-CTASSERT(sizeof(nvmr_cntrlcap_t) == sizeof(uint64_t));
-
 static void
 nvmr_ctrlr_reset_task(void *arg, int pending)
 {
@@ -2336,9 +1947,6 @@ out:
 	return error;
 }
 
-
-#define NVMR_IOQID_ADDEND 1 /* Only a single AdminQ */
-#define NVMR_PAYLOAD_UNIT 16U
 
 static void
 nvmr_register_cntrlr(nvmr_cntrlr_t cntrlr)
@@ -2816,6 +2424,23 @@ static struct ib_client nvmr_ib_client = {
 	.name   = "nvmrdma",
 	.add    = nvmr_add_ibif,
 	.remove = nvmr_remove_ibif
+};
+
+#define MAX_IOQ_ELEMENTS 32
+
+nvmr_cntrlrprof_t nvmr_regularprof = {
+	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
+		.nvmrqp_numqueues = 1,
+		.nvmrqp_numsndqe = MAX_ADMINQ_ELEMENTS - 1,
+		.nvmrqp_numrcvqe = MAX_ADMINQ_ELEMENTS,
+		.nvmrqp_kato = NVMR_DEFAULT_KATO,
+	},
+	.nvmrp_qprofs[NVMR_QTYPE_IO] = {
+		.nvmrqp_numqueues = 1,
+		.nvmrqp_numsndqe = MAX_IOQ_ELEMENTS - 1,
+		.nvmrqp_numrcvqe = MAX_IOQ_ELEMENTS,
+		.nvmrqp_kato = NVMR_DEFAULT_KATO,
+	},
 };
 
 #define NVMR_CMD_ATT "attach"
