@@ -1,0 +1,12 @@
+#! /bin/sh
+
+VELPATHTOSRCS=`dirname ${0}`/../FBSD12-20181207/./
+
+export BLDNSTLERROUT="$TEMP/buildinstall.errout"
+export KERNCONF=VEL01-DEBUG
+export MODULES_OVERRIDE="rdma ibcore linuxkpi mlx5 mlx5ib mlx5en"
+
+( (cd ${VELPATHTOSRCS} && make -j36 buildkernel && make -j36 installkernel) \
+     > ${BLDNSTLERROUT} 2>&1 || (less '+error: ' ${BLDNSTLERROUT} 2>&1; \
+         exit 1) && tail -n 20 $BLDNSTLERROUT )
+

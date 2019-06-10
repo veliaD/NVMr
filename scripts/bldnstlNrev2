@@ -1,0 +1,25 @@
+#! /bin/sh
+
+VELPATHTOKRNSRCS=$(cd `dirname ${0}`/../FBSD12-20181207/./; echo $PWD)
+VELPATHTONRV2SRCS=$(cd ${VELPATHTOKRNSRCS}/../nvmeorocev2; echo $PWD)
+
+export BLDNSTLERROUT="$TEMP/buildinstallNVMeoFRoCEv2.errout"
+export KERNCONF=VEL01
+export MODULES_OVERRIDE="rdma ibcore linuxkpi mlx5 mlx5ib mlx5en"
+
+export HEAD=${VELPATHTOKRNSRCS}
+export KERN_CONFIG=$(uname -i)
+export KERNBUILDDIR=$(cd ${VELPATHTOKRNSRCS}/../../obj/./; echo $PWD)
+export SYSDIR=$HEAD/sys
+export VELMK=$HEAD/share/mk
+
+( ( \
+    ( cd ${HEAD}/sys/amd64/conf && config -d ${KERNBUILDDIR} $KERN_CONFIG ) && \
+    cd ${VELPATHTONRV2SRCS} && make -j36 -m ${VELMK} clean cleandepend depend \
+    all && make -j36 -m ${VELMK} KMODDIR=/boot/kernel install && \
+    make -j36 -m ${VELMK} clean cleandepend
+  ) \
+     > ${BLDNSTLERROUT} 2>&1 || (less '+/error: ' ${BLDNSTLERROUT} 2>&1; \
+                                    exit 1) && tail -n 20 $BLDNSTLERROUT
+)
+
