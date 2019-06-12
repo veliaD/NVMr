@@ -71,8 +71,7 @@ typedef void (*nvmr_crtcntrlrcb_t)(struct nvmr_cntrlr_tag *cntrlr);
 
 typedef struct {
 	uint32_t nvmrqp_numqueues;
-	uint32_t nvmrqp_numsndqe;
-	uint32_t nvmrqp_numrcvqe;
+	uint32_t nvmrqp_numqe;
 	uint32_t nvmrqp_kato;
 } nvmr_qprof_t;
 

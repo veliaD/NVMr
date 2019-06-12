@@ -2038,11 +2038,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	nvmr_qpair_t *qarr;
 	unsigned long tmp;
 	nvmr_cntrlcap_t cntrlrcap;
-	uint64_t cntrlrconf;
-	uint32_t unitnum;
+	/* uint64_t cntrlrconf; */
+	uint32_t unitnum, cc;
 	nvmripv4_t ipv4;
 	nvmr_qprof_t *pf;
 	uint16_t port;
+	uint16_t io_numsndqe, io_numrcvqe;
 	/* uint8_t *identp; */
 	char *retp;
 	struct nvme_controller_data *cd;
@@ -2135,8 +2136,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 
 	retval = nvmr_qpair_create(cntrlr, &cntrlr->nvmrctr_adminqp, 0,
 	    NVMR_DYNANYCNTLID,
-	    prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN].nvmrqp_numsndqe,
-	    prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN].nvmrqp_numrcvqe,
+	    prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN].nvmrqp_numqe - 1,
+	    prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN].nvmrqp_numqe,
 	    prof->nvmrp_qprofs[NVMR_QTYPE_ADMIN].nvmrqp_kato);
 	if (retval != 0) {
 		ERRSPEW("%s creation failed with %d\n",
@@ -2145,6 +2146,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
+	/*
 	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
 	    NVMR_PROPLEN_8BYTES);
 	if (retval != 0) {
@@ -2197,27 +2199,18 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	} else {
 		DBGSPEW("Reg 8 is 0x%08lX\n", cntrlrconf);
 	}
+	 */
 
-	cntrlrconf = 0;
-	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
-	    NVMR_PROPLEN_8BYTES);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
-		    NVMR_PROPLEN_8BYTES, retval);
-		goto out;
-	}
+	/* Initialization values for Controller Configuration */
+	cc = 0;
+	cc |= 1 << NVME_CC_REG_EN_SHIFT;
+	cc |= 0 << NVME_CC_REG_CSS_SHIFT;
+	cc |= 0 << NVME_CC_REG_AMS_SHIFT;
+	cc |= 0 << NVME_CC_REG_SHN_SHIFT;
+	cc |= 6 << NVME_CC_REG_IOSQES_SHIFT; /* SQ entry size == 64 == 2^6 */
+	cc |= 4 << NVME_CC_REG_IOCQES_SHIFT; /* CQ entry size == 16 == 2^4 */
 
-	DBGSPEW("PROPGET CAP:\n\t"
-	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
-	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
-	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
-	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
-	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
-	    cntrlrcap.nvmrcc_mpsmax);
-
-	retval = nvmr_admin_propset(cntrlr, 0x14, 0x460001,
-	    NVMR_PROPLEN_4BYTES);
+	retval = nvmr_admin_propset(cntrlr, NVMFPD_CC_OFF, cc, NVMFPD_CC_SZ);
 	if (retval != 0) {
 		error = retval;
 		ERRSPEW("nvmr_admin_propset(o:0x%X l:%d) failed:%d\n", 0x14,
@@ -2278,6 +2271,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
+	/* Setup the min_page_size and ready_timeout_in_ms fields per NVMp */
 	cntrlr->nvmrctr_nvmec.min_page_size =
 	    1 << (12 + cntrlrcap.nvmrcc_mpsmin);
 	cntrlr->nvmrctr_nvmec.ready_timeout_in_ms = cntrlrcap.nvmrcc_to *
@@ -2324,6 +2318,32 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	/**********
 	 Now set up the IO Qs
 	 **********/
+
+	/* Retrieve the Maximum number of Queue Elements Supported */
+	bzero(&cntrlrcap, sizeof(cntrlrcap));
+	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
+	    NVMR_PROPLEN_8BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
+		    NVMR_PROPLEN_8BYTES, retval);
+		goto out;
+	}
+	DBGSPEW("PROPGET CAP:\n\t"
+	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
+	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
+	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
+	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
+	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
+	    cntrlrcap.nvmrcc_mpsmax);
+
+	if (prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe != 0) {
+		io_numsndqe = prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe;
+	} else {
+		io_numsndqe = cntrlrcap.nvmrcc_mqes;
+	}
+	io_numrcvqe = io_numsndqe + 1;
+
 	pf = &prof->nvmrp_qprofs[NVMR_QTYPE_IO];
 
 	/* Get smarter about this */
@@ -2349,8 +2369,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 			retval = nvmr_qpair_create(cntrlr, &qarr[count],
 			    NVMR_IOQID_ADDEND + count,
 			    cntrlr->nvmrctr_nvmec.cdata.ctrlr_id,
-			    prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numsndqe,
-			    prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numrcvqe,
+			    io_numsndqe, io_numrcvqe,
 			    prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_kato);
 			if (retval != 0) {
 				ERRSPEW("%s#%d creation failed with %d\n",
@@ -2426,19 +2445,17 @@ static struct ib_client nvmr_ib_client = {
 	.remove = nvmr_remove_ibif
 };
 
-#define MAX_IOQ_ELEMENTS 32
+#define MAX_IOQ_ELEMENTS 0
 
 nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
 		.nvmrqp_numqueues = 1,
-		.nvmrqp_numsndqe = MAX_ADMINQ_ELEMENTS - 1,
-		.nvmrqp_numrcvqe = MAX_ADMINQ_ELEMENTS,
+		.nvmrqp_numqe = MAX_ADMINQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
 	},
 	.nvmrp_qprofs[NVMR_QTYPE_IO] = {
 		.nvmrqp_numqueues = 1,
-		.nvmrqp_numsndqe = MAX_IOQ_ELEMENTS - 1,
-		.nvmrqp_numrcvqe = MAX_IOQ_ELEMENTS,
+		.nvmrqp_numqe = MAX_IOQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
 	},
 };
@@ -2586,15 +2603,10 @@ SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numqueues, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqueues, 1,
     "Number of IO queues to allocate a controller. 0 means query controller.");
 
-SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numsndqe, CTLFLAG_RW,
-    &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numsndqe,
-    MAX_IOQ_ELEMENTS - 1,
-    "Number of IO queue send elements to allocate. 0 means query controller.");
-
-SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numrcvqe, CTLFLAG_RW,
-    &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numrcvqe,
+SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numqe, CTLFLAG_RW,
+    &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe,
     MAX_IOQ_ELEMENTS,
-    "Number of IO queue recv elements to allocate. 0 means query controller.");
+    "Number of IO queue elements to allocate. 0 means query controller.");
 
 static void
 nvmr_init(void)

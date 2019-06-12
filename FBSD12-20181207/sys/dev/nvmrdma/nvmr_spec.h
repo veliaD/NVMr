@@ -177,6 +177,10 @@ CTASSERT(sizeof(nvmr_cntrlcap_t) == sizeof(uint64_t));
 #define NVMR_IOQID_ADDEND 1 /* Only a single AdminQ */
 #define NVMR_PAYLOAD_UNIT 16U
 
-#define MAX_ADMINQ_ELEMENTS 32
+#define MAX_ADMINQ_ELEMENTS 31
+
+/* NVMe Fabric Property Definitions */
+#define NVMFPD_CC_OFF 0x14
+#define NVMFPD_CC_SZ  NVMR_PROPLEN_4BYTES
 
 #endif /* _NVMR_SPEC_H */
