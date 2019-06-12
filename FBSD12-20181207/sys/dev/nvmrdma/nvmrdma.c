@@ -2264,6 +2264,24 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		    (cd->nidf_ioccsz*NVMR_PAYLOAD_UNIT) - sizeof(nvmr_stub_t));
 	}
 
+	/* Retrieve the Maximum number of Queue Elements Supported */
+	bzero(&cntrlrcap, sizeof(cntrlrcap));
+	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
+	    NVMR_PROPLEN_8BYTES);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
+		    NVMR_PROPLEN_8BYTES, retval);
+		goto out;
+	}
+	DBGSPEW("PROPGET CAP:\n\t"
+	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
+	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
+	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
+	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
+	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
+	    cntrlrcap.nvmrcc_mpsmax);
+
 	if (cntrlrcap.nvmrcc_dstrd != 0) {
 		ERRSPEW("Non-zero Doorbell stride (%lu) unsupported\n",
 		    cntrlrcap.nvmrcc_dstrd);
@@ -2318,24 +2336,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	/**********
 	 Now set up the IO Qs
 	 **********/
-
-	/* Retrieve the Maximum number of Queue Elements Supported */
-	bzero(&cntrlrcap, sizeof(cntrlrcap));
-	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
-	    NVMR_PROPLEN_8BYTES);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
-		    NVMR_PROPLEN_8BYTES, retval);
-		goto out;
-	}
-	DBGSPEW("PROPGET CAP:\n\t"
-	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
-	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
-	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
-	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
-	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
-	    cntrlrcap.nvmrcc_mpsmax);
 
 	if (prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe != 0) {
 		io_numsndqe = prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe;
