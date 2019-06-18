@@ -324,8 +324,6 @@ nvmr_recv_cmplhndlr(struct ib_cq *cq, struct ib_wc *wc)
 			    commp, c->cid);
 			/* Bail for now, wake waiters */
 		} else {
-			DBGSPEW("Not waking so as to invalidate %p %d\n",
-			    commp, c->cid);
 			/* Continue in nvmr_localinv_done() */
 			goto out;
 		}
