@@ -41,8 +41,8 @@ typedef struct {
 } __packed nvmf_prfx_t;
 
 typedef struct {
-	nvmf_prfx_t nvmrsb_nvmf;
-	uint8_t     nvmrsb_resv1[24];
+	nvmf_prfx_t nvmrsb_nvmf;      /* dword 0 - 9 */
+	uint8_t     nvmrsb_resv1[24]; /* dword 10-15 */
 } __packed nvmr_stub_t;
 CTASSERT(sizeof(nvmr_stub_t) == sizeof(struct nvme_command));
 
@@ -86,12 +86,24 @@ typedef struct {
 } __packed nvmr_identify_t;
 CTASSERT(sizeof(nvmr_identify_t) == sizeof(struct nvme_command));
 
+typedef struct {
+	nvmf_prfx_t nvmrsf_nvmf;
+	uint32_t    nvmrsf_fid;
+	uint32_t    nvmrsf_cmdw11;
+	uint32_t    nvmrsf_cmdw12;
+	uint32_t    nvmrsf_cmdw13;
+	uint32_t    nvmrsf_cmdw14;
+	uint32_t    nvmrsf_cmdw15;
+} __packed nvmr_set_features_t;
+CTASSERT(sizeof(nvmr_set_features_t) == sizeof(struct nvme_command));
+
 typedef union {
 	struct nvme_command nvmrcu_nvme;
 	nvmr_connect_t      nvmrcu_conn;
 	nvmr_propget_t      nvmrcu_prgt;
 	nvmr_propset_t      nvmrcu_prst;
 	nvmr_identify_t     nvmrcu_idnt;
+	nvmr_set_features_t nvmrcu_stft;
 	nvmr_stub_t         nvmrcu_stub;
 } nvmr_communion_t;
 CTASSERT(sizeof(nvmr_communion_t) == sizeof(struct nvme_command));
@@ -183,4 +195,7 @@ CTASSERT(sizeof(nvmr_cntrlcap_t) == sizeof(uint64_t));
 #define NVMFPD_CC_OFF 0x14
 #define NVMFPD_CC_SZ  NVMR_PROPLEN_4BYTES
 
+#define NSQR_MAX  UINT16_MAX
+#define NSQR_MASK UINT16_MAX
+#define NCQ_SHIFT 16 /* NCQR and NCQA shift */
 #endif /* _NVMR_SPEC_H */

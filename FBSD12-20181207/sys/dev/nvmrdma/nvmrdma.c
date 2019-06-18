@@ -1904,6 +1904,49 @@ nvmr_delist_cb(struct nvme_controller *ctrlrp)
 	panic("%s() invoked for ctrlr:%p\n", __func__, ctrlrp);
 }
 
+uint32_t
+nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced);
+uint32_t
+nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced)
+{
+	int error;
+	uint32_t qcount;
+	nvmr_communion_t *cmd;
+	struct nvme_request *req;
+	struct nvme_completion_poll_status status;
+
+	if ((cntrlr == NULL) || (nioqs < 1)) {
+		ERRSPEW("INVALID! cntrlr:%p nioqs:%u\n", cntrlr, nioqs);
+		error = EINVAL;
+		goto out;
+	}
+
+	qcount = nioqs - 1; /* 0 based */
+
+	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status);
+	cmd = (nvmr_communion_t *)&req->cmd;
+	cmd->nvmrcu_stft.nvmrsf_nvmf.nvmf_opc = NVME_OPC_SET_FEATURES;
+	cmd->nvmrcu_stft.nvmrsf_fid = htole32(NVME_FEAT_NUMBER_OF_QUEUES);
+	cmd->nvmrcu_stft.nvmrsf_cmdw11  = htole32(qcount); /* NSQR */
+	cmd->nvmrcu_stft.nvmrsf_cmdw11 |= htole32(qcount) << NCQ_SHIFT;
+
+	ISSUE_WAIT_CHECK_REQ {
+		ERRSPEW("Set IOQ count NVMe command failed!\n");
+		error = ENXIO;
+		goto out;
+	}
+
+	*nalloced = MIN(status.cpl.cdw0 & NSQR_MASK,
+	    status.cpl.cdw0 >> NCQ_SHIFT);
+	(*nalloced)++;                     /* Response is 0 based */
+	*nalloced = MIN(*nalloced, nioqs); /* Don't use more than we can */
+	error = 0;
+
+out:
+	return error;
+}
+
+
 int
 nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
     nvmr_proplent_t len);
@@ -2040,10 +2083,11 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	uint32_t unitnum, cc;
 	nvmripv4_t ipv4;
 	nvmr_qprof_t *pf;
-	uint16_t port;
+	uint16_t port, ioqcount, reqioqcount;
 	uint16_t io_numsndqe, io_numrcvqe;
 	/* uint8_t *identp; */
 	char *retp;
+	struct ib_device *ibd;
 	struct nvme_controller_data *cd;
 
 	retval = -1;
@@ -2334,18 +2378,35 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	/**********
 	 Now set up the IO Qs
 	 **********/
+	ibd = cntrlr->nvmrctr_adminqp->nvmrq_cmid->device;
+	reqioqcount = MIN(mp_ncpus, ibd->num_comp_vectors);
+	if (reqioqcount > 1) {
+		reqioqcount--; /* Decrement one vector/CPU for admin Q */
+	}
+	retval = nvmr_req_ioq_count(cntrlr, reqioqcount, &ioqcount);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvmr_req_ioq_count(count:%hu):%d\n", reqioqcount,
+		    retval);
+		goto out;
+	}
+	DBGSPEW("Controller allocated IOQ count is %hu, requested is %hu\n",
+	    ioqcount, reqioqcount);
 
-	if (prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe != 0) {
-		io_numsndqe = prof->nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe;
+	pf = &prof->nvmrp_qprofs[NVMR_QTYPE_IO];
+	if (pf->nvmrqp_numqe != 0) {
+		io_numsndqe = pf->nvmrqp_numqe;
 	} else {
 		io_numsndqe = cntrlrcap.nvmrcc_mqes;
 	}
 	io_numrcvqe = io_numsndqe + 1;
 
-	pf = &prof->nvmrp_qprofs[NVMR_QTYPE_IO];
 
-	/* Get smarter about this */
-	cntrlr->nvmrctr_numioqs = pf->nvmrqp_numqueues;
+	if (pf->nvmrqp_numqueues != 0) {
+		cntrlr->nvmrctr_numioqs = pf->nvmrqp_numqueues;
+	} else {
+		cntrlr->nvmrctr_numioqs = ioqcount;
+	}
 
 	BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
 
@@ -2443,7 +2504,7 @@ static struct ib_client nvmr_ib_client = {
 	.remove = nvmr_remove_ibif
 };
 
-#define MAX_IOQ_ELEMENTS 0
+#define MAX_IOQ_ELEMENTS 32
 
 nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
