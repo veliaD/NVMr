@@ -374,20 +374,16 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 	ibd = q->nvmrq_cmid->device;
 
 	if (q->nvmrq_state >= NVMRQ_CONNECT_SUCCEEDED) {
-		DBGSPEW("Invoking rdma_disconnect(%p)...\n", q->nvmrq_cmid);
 		rdma_disconnect(q->nvmrq_cmid);
 	}
 	if (q->nvmrq_ibqp != NULL) {
-		DBGSPEW("Invoking ib_drain_qp(%p)...\n", q->nvmrq_ibqp);
 		ib_drain_qp(q->nvmrq_ibqp);
 
-		DBGSPEW("Invoking rdma_destroy_qp(%p)..\n", q->nvmrq_cmid);
 		rdma_destroy_qp(q->nvmrq_cmid);
 		q->nvmrq_ibqp = NULL;
 	}
 
 	if (q->nvmrq_ibcq != NULL) {
-		DBGSPEW("Invoking ib_free_cq(%p)...\n", q->nvmrq_ibcq);
 		ib_free_cq(q->nvmrq_ibcq);
 		q->nvmrq_ibcq = NULL;
 	}
@@ -421,7 +417,6 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 	}
 	KASSERT(count == q->nvmrq_numrcvqe, ("%s@%d count:%d numrcvqe:%d",
 	    __func__, __LINE__, count, q->nvmrq_numrcvqe));
-	DBGSPEW("Freed %d completion containers\n", q->nvmrq_numrcvqe);
 
 	free(q->nvmrq_commcid, M_NVMR);
 
@@ -448,16 +443,13 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 	}
 	KASSERT(count == q->nvmrq_numsndqe, ("%s@%d count:%d numsndqe:%d",
 	    __func__, __LINE__, count, q->nvmrq_numsndqe));
-	DBGSPEW("Freed %d command containers\n", q->nvmrq_numsndqe);
 
 	if (q->nvmrq_ibpd != NULL) {
-		DBGSPEW("ib_dealloc_pd(%p)...\n", q->nvmrq_ibpd);
 		ib_dealloc_pd(q->nvmrq_ibpd);
 		q->nvmrq_ibpd = NULL;
 	}
 
 	if (q->nvmrq_cmid != NULL) {
-		DBGSPEW("rdma_destroy_id(%p)...\n", q->nvmrq_cmid);
 		rdma_destroy_id(q->nvmrq_cmid);
 		q->nvmrq_cmid = NULL;
 	}
@@ -707,7 +699,8 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 	}
 
 	if (cntrlr->nvmrctr_ioqarr != NULL) {
-		for (count = 0; count < cntrlr->nvmrctr_numioqs; count++) {
+		for (count = 0; count < cntrlr->nvmrctr_nvmec.num_io_queues;
+		    count++) {
 			nvmr_qpair_destroy(cntrlr->nvmrctr_ioqarr[count]);
 			cntrlr->nvmrctr_ioqarr[count] = NULL;
 		}
@@ -807,13 +800,15 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 		case RDMA_CM_EVENT_REJECTED:
 			ps = (const nvmr_rdma_cm_reject_t *)
 			    event->param.conn.private_data;
-			DBGSPEW("Reject reason recfmt:%hu sts:%hu\n",
+			ERRSPEW("Reject reason recfmt:%hu sts:%hu\n",
 			    ps->nvmrcrj_recfmt, ps->nvmrcrj_sts);
 			qstate = NVMRQ_CONNECT_FAILED;
 			break;
 		default:
-			panic("%s@%d: Unhandled Conn Manager event Q:%p e:%d\n",
-			    __func__, __LINE__, q, event->event);
+			panic("%s@%d: Unhandled Conn Manager event Q:%p e:%d\n"
+			    "Event \"%s\" returned status \"%d\" for cmid:%p\n",
+			    __func__, __LINE__, q, event->event,
+			    rdma_event_msg(event->event), event->status, cmid);
 		}
 		mtx_lock(&q->nvmrq_cntrlr->nvmrctr_nvmec.lockc);
 		q->nvmrq_state = qstate;
@@ -827,6 +822,8 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 		break;
 
 	default:
+		DBGSPEW("Event \"%s\" returned status \"%d\" for cmid:%p\n",
+		    rdma_event_msg(event->event), event->status, cmid);
 		dump_stack();
 		break;
 	}
@@ -1368,8 +1365,17 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req);
 void
 nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 {
+	size_t idx;
+
+	idx = curcpu / ctrlr->num_cpus_per_ioq;
+	if (unlikely(idx >= ctrlr->num_io_queues)) {
+		DBGSPEW("idx:%zu larger than IOQ-count:%u!\n", idx,
+		    ctrlr->num_io_queues);
+		idx = curcpu % ctrlr->num_io_queues;
+	}
+
 	NVMR_SUBMIT_BEGIN;
-	q = cntrlr->nvmrctr_ioqarr[0]; /* 1 Q until IO qpairs are up */
+	q = cntrlr->nvmrctr_ioqarr[idx];
 	NVMR_SUBMIT_END;
 }
 
@@ -1383,7 +1389,6 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 		error = retval;                                            \
 		goto out;                                                  \
 	}                                                                  \
-	/* DBGSPEW("Successfully invoked %s()\n", routine); */             \
 	mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);                            \
 	if (q->nvmrq_state == (pre_state)) {                               \
 		DBGSPEW("Sleeping with message \"%s\"\n",                  \
@@ -1679,7 +1684,8 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	 * the pair.
 	 */
 	ibcq = ib_alloc_cq(ibd, q, init_attr.cap.max_send_wr +
-	    init_attr.cap.max_recv_wr, 0 /* hard-coded! completion vector */,
+	    init_attr.cap.max_recv_wr,
+	    (qid % ibd->num_comp_vectors) /* completion vector */,
 	    IB_POLL_WORKQUEUE);
 	if (IS_ERR(ibcq)) {
 		ERRSPEW("ib_alloc_cq() failed with 0x%lX\n", PTR_ERR(ibcq));
@@ -1904,6 +1910,10 @@ nvmr_delist_cb(struct nvme_controller *ctrlrp)
 	panic("%s() invoked for ctrlr:%p\n", __func__, ctrlrp);
 }
 
+/*
+ * Ask the remote controller for nioqs IOQs.  It's response can be higher than
+ * asked for, so return the smaller of the two
+ */
 uint32_t
 nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced);
 uint32_t
@@ -1939,7 +1949,7 @@ nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced)
 	*nalloced = MIN(status.cpl.cdw0 & NSQR_MASK,
 	    status.cpl.cdw0 >> NCQ_SHIFT);
 	(*nalloced)++;                     /* Response is 0 based */
-	*nalloced = MIN(*nalloced, nioqs); /* Don't use more than we can */
+	*nalloced = MIN(*nalloced, nioqs); /* Use only what we can/should */
 	error = 0;
 
 out:
@@ -2083,7 +2093,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	uint32_t unitnum, cc;
 	nvmripv4_t ipv4;
 	nvmr_qprof_t *pf;
-	uint16_t port, ioqcount, reqioqcount;
+	uint16_t port, ioqcount, reqioqcount, nioq;
 	uint16_t io_numsndqe, io_numrcvqe;
 	/* uint8_t *identp; */
 	char *retp;
@@ -2380,9 +2390,13 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	 **********/
 	ibd = cntrlr->nvmrctr_adminqp->nvmrq_cmid->device;
 	reqioqcount = MIN(mp_ncpus, ibd->num_comp_vectors);
-	if (reqioqcount > 1) {
-		reqioqcount--; /* Decrement one vector/CPU for admin Q */
+	if (reqioqcount == 0) {
+		error = ENOSPC;
+		ERRSPEW("Failed to get sane value for IOQ count, mp_ncpus:%d "
+		    "vector-count:%u\n", mp_ncpus, ibd->num_comp_vectors);
+		goto out;
 	}
+
 	retval = nvmr_req_ioq_count(cntrlr, reqioqcount, &ioqcount);
 	if (retval != 0) {
 		error = retval;
@@ -2403,28 +2417,32 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 
 
 	if (pf->nvmrqp_numqueues != 0) {
-		cntrlr->nvmrctr_numioqs = pf->nvmrqp_numqueues;
+		nioq = pf->nvmrqp_numqueues;
 	} else {
-		cntrlr->nvmrctr_numioqs = ioqcount;
+		cntrlr->nvmrctr_nvmec.num_io_queues = ioqcount;
+		nioq = ioqcount;
 	}
+	cntrlr->nvmrctr_nvmec.num_io_queues = nioq;
+	cntrlr->nvmrctr_nvmec.num_cpus_per_ioq = howmany(mp_ncpus, nioq);
 
 	BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
 
-	if (cntrlr->nvmrctr_numioqs != 0) {
-		qarr = malloc(cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t),
+	if (nioq != 0) {
+		qarr = malloc(nioq * sizeof(nvmr_qpair_t),
 		    M_NVMR, M_WAITOK|M_ZERO);
 		if (qarr == NULL) {
 			ERRSPEW("IO Q array allocation sized \"%zu\" failed\n",
-			    cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t));
+			    nioq *
+			    sizeof(nvmr_qpair_t));
 			error = ENOMEM;
 			goto out;
 		}
 		DBGSPEW("IO Q array allocation of size \"%zu\"\n",
-		    cntrlr->nvmrctr_numioqs * sizeof(nvmr_qpair_t));
+		    nioq * sizeof(nvmr_qpair_t));
 		cntrlr->nvmrctr_ioqarr = qarr;
 
 		/* Allocate IO queues and store pointers to them in the qarr */
-		for (count = 0; count < cntrlr->nvmrctr_numioqs; count++) {
+		for (count = 0; count < nioq; count++) {
 			retval = nvmr_qpair_create(cntrlr, &qarr[count],
 			    NVMR_IOQID_ADDEND + count,
 			    cntrlr->nvmrctr_nvmec.cdata.ctrlr_id,
@@ -2440,8 +2458,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 
 			BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
 		}
-		KASSERT(count == cntrlr->nvmrctr_numioqs,
-		    ("count:%d numqs:%d", count, cntrlr->nvmrctr_numioqs));
+		KASSERT(count == nioq, ("count:%d numqs:%d", count, nioq));
+		DBGSPEW("%hu IOQs allocated\n", nioq);
 	} else {
 		cntrlr->nvmrctr_ioqarr = NULL;
 	}
@@ -2658,11 +2676,11 @@ SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, controllers,
 	    CTLTYPE_STRING | CTLFLAG_RW,
 	    NULL, 0, nvmr_sysctl_conrollers, "A", nvmr_cmdusage);
 
-SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numqueues, CTLFLAG_RW,
+SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQs, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqueues, 1,
     "Number of IO queues to allocate a controller. 0 means query controller.");
 
-SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numqe, CTLFLAG_RW,
+SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQEs, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe,
     MAX_IOQ_ELEMENTS,
     "Number of IO queue elements to allocate. 0 means query controller.");

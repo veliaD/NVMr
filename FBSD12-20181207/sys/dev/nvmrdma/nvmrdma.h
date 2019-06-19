@@ -167,7 +167,6 @@ typedef struct nvmr_cntrlr_tag {
 	nvmr_qpair_t      *nvmrctr_ioqarr;  /* Array size determined by prof */
 	nvmr_cntrlrprof_t *nvmrctr_prof;
 	nvmripv4_t         nvmrctr_ipv4;
-	int                nvmrctr_numioqs; /* count not always fixed in prof */
 	uint16_t           nvmrctr_port;
 	struct nvme_controller nvmrctr_nvmec;
 	volatile nvmr_cntrlr_state_t nvmrctr_state;  /* nvmrctr_nvmec.lockc */
