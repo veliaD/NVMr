@@ -116,6 +116,7 @@ typedef struct nvmr_qpair_tag {
 	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls count   */
 	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
 	volatile uint32_t              nvmrq_usecnt;
+	volatile uint64_t              nvmrq_stat_cmdcnt;
 
 	struct nvme_qpair              nvmrq_gqp;
 } *nvmr_qpair_t;

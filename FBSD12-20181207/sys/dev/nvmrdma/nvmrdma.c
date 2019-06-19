@@ -454,7 +454,8 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 		q->nvmrq_cmid = NULL;
 	}
 
-	DBGSPEW("free(%p)ing Q\n", q);
+	DBGSPEW("free(%p)ing qid:%u cmdcnt:%lu\n", q, q->nvmrq_gqp.qid,
+	    q->nvmrq_stat_cmdcnt);
 	free(q, M_NVMR);
 
 out:
@@ -757,8 +758,10 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 	nvmr_qpair_state_t qstate;
 	const nvmr_rdma_cm_reject_t *ps;
 
+	/*
 	DBGSPEW("Event \"%s\" returned status \"%d\" for cmid:%p\n",
 	    rdma_event_msg(event->event), event->status, cmid);
+	 */
 
 	/* Every cmid is associated with a controller or a queue? */
 	q = cmid->context;
@@ -1347,6 +1350,7 @@ nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
 #define NVMR_SUBMIT_END                                                  \
 	NVMR_INCR_Q_USECNT(q);                                           \
 	epoch_exit(global_epoch);                                        \
+	atomic_add_64(&q->nvmrq_stat_cmdcnt, 1);                         \
 	nvmr_submit_req(q, req)
 
 void
@@ -1391,8 +1395,8 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 	}                                                                  \
 	mtx_lock(&cntrlr->nvmrctr_nvmec.lockc);                            \
 	if (q->nvmrq_state == (pre_state)) {                               \
-		DBGSPEW("Sleeping with message \"%s\"\n",                  \
-		    __stringify(__LINE__));                                \
+		/* DBGSPEW("Sleeping with message \"%s\"\n",               \
+		    __stringify(__LINE__)); */                             \
 		retval = mtx_sleep(&q->nvmrq_cmid,                         \
 		    &cntrlr->nvmrctr_nvmec.lockc,                          \
 		    0, __stringify(__LINE__), NVMRTO+1000);                \
@@ -1467,11 +1471,12 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 		error = ENOMEM;
 		goto out;
 	}
-	DBGSPEW("NVMr Q allocation of size \"%zu\"\n", msz);
+	/* DBGSPEW("NVMr Q allocation of size \"%zu\"\n", msz); */
 	q->nvmrq_cntrlr = cntrlr;
 	q->nvmrq_state = NVMRQ_PRE_INIT;
 	q->nvmrq_gqp.qttype = NVMET_RDMA;
 	q->nvmrq_gqp.gqctrlr = &cntrlr->nvmrctr_nvmec;
+	q->nvmrq_gqp.qid = qid;
 	atomic_store_rel_int(&q->nvmrq_gqp.qis_enabled, FALSE);
 	mtx_init(&q->nvmrq_gqp.qlock, "nvme qpair lock", NULL, MTX_DEF);
 	STAILQ_INIT(&q->nvmrq_defreqs);
@@ -1504,7 +1509,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 		q->nvmrq_numFsndqe++;
 		q->nvmrq_numsndqe++;
 	}
-	DBGSPEW("Alloced %d command Q containers\n", q->nvmrq_numsndqe);
+	/* DBGSPEW("Alloced %d command Q containers\n", q->nvmrq_numsndqe); */
 	q->nvmrq_gqp.num_qentries = q->nvmrq_numsndqe;
 
 	/*
@@ -1520,7 +1525,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 		error = ENOMEM;
 		goto out;
 	}
-	DBGSPEW("NVMr allocation of %zu bytes for mapping array\n", msz);
+	/* DBGSPEW("NVMr allocation of %zu bytes for mapping array\n", msz); */
 	commp = STAILQ_FIRST(&q->nvmrq_comms);
 	commparrp[0] = (nvmr_ncommcon_t *)(0xDEADD00D8BADBEEFull);
 	for (count = 1; count < (q->nvmrq_numsndqe + 1); count++) {
@@ -1948,7 +1953,9 @@ nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced)
 
 	*nalloced = MIN(status.cpl.cdw0 & NSQR_MASK,
 	    status.cpl.cdw0 >> NCQ_SHIFT);
-	(*nalloced)++;                     /* Response is 0 based */
+	(*nalloced)++; /* Response is 0 based */
+	DBGSPEW("Controller supports %hu IOQs\n", *nalloced);
+
 	*nalloced = MIN(*nalloced, nioqs); /* Use only what we can/should */
 	error = 0;
 
@@ -2373,7 +2380,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		error = retval;
 		goto out;
 	}
-	DBGSPEW("NVMe device with unitnum:%d\n",
+	DBGSPEW("NVMe controller with unitnum:%d\n",
 	    cntrlr->nvmrctr_nvmec.nvmec_unit);
 
 	retval = nvme_ctrlr_construct_namespaces(&cntrlr->nvmrctr_nvmec);
@@ -2404,8 +2411,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		    retval);
 		goto out;
 	}
-	DBGSPEW("Controller allocated IOQ count is %hu, requested is %hu\n",
-	    ioqcount, reqioqcount);
+	DBGSPEW("Allocating %hu IOQ, requested %hu\n", ioqcount, reqioqcount);
 
 	pf = &prof->nvmrp_qprofs[NVMR_QTYPE_IO];
 	if (pf->nvmrqp_numqe != 0) {
@@ -2424,6 +2430,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	}
 	cntrlr->nvmrctr_nvmec.num_io_queues = nioq;
 	cntrlr->nvmrctr_nvmec.num_cpus_per_ioq = howmany(mp_ncpus, nioq);
+	DBGSPEW("%u cores will share an IOQ\n",
+	    cntrlr->nvmrctr_nvmec.num_cpus_per_ioq);
 
 	BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
 
@@ -2437,8 +2445,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 			error = ENOMEM;
 			goto out;
 		}
-		DBGSPEW("IO Q array allocation of size \"%zu\"\n",
-		    nioq * sizeof(nvmr_qpair_t));
 		cntrlr->nvmrctr_ioqarr = qarr;
 
 		/* Allocate IO queues and store pointers to them in the qarr */
@@ -2455,7 +2461,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 				error = retval;
 				goto out;
 			}
-
+			DBGSPEW("IOQ#%d successfully allocated\n", count + 1);
 			BAIL_IF_CNTRLR_CONDEMNED(cntrlr);
 		}
 		KASSERT(count == nioq, ("count:%d numqs:%d", count, nioq));
