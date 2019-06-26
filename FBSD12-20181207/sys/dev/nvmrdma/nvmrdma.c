@@ -55,6 +55,12 @@ nvmr_qndx2name(nvmr_qndx_t qndx)
 
 static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
+#define NVMR_INCR_DEFIOCNT(q)                                            \
+    atomic_fetchadd_int(&(q)->nvmrq_defiocnt, 1)
+
+#define NVMR_DECR_DEFIOCNT(q)                                            \
+    atomic_fetchadd_int(&(q)->nvmrq_defiocnt, -1)
+
 int nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req);
 void
 nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
@@ -79,6 +85,7 @@ nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp)
 			break;
 		}
 
+		NVMR_DECR_DEFIOCNT(q);
 		STAILQ_REMOVE(&q->nvmrq_defreqs, req, nvme_request, stailq);
 		retval = nvmr_command_async(q, req);
 		if (retval != 0) {
@@ -112,13 +119,11 @@ nvmr_localinv_done(struct ib_cq *cq, struct ib_wc *wc)
 }
 
 
-#define NVMR_INCR_Q_USECNT(q)                                            \
-    /* DBGSPEW("q:%p o:%u\n", q, q->nvmrq_usecnt), */                    \
-    atomic_fetchadd_int(&(q)->nvmrq_usecnt, 1)
+#define NVMR_INCR_QEDIOCNT(q)                                            \
+    atomic_fetchadd_int(&(q)->nvmrq_qediocnt, 1)
 
-#define NVMR_DECR_Q_USECNT(q)                                            \
-    /* DBGSPEW("q:%p o:%u\n", q, q->nvmrq_usecnt), */                    \
-    atomic_fetchadd_int(&(q)->nvmrq_usecnt, -1)
+#define NVMR_DECR_QEDIOCNT(q)                                            \
+    atomic_fetchadd_int(&(q)->nvmrq_qediocnt, -1)
 
 #define NVMR_IS_CNTRLR_FAILED(c)                                         \
     NVME_IS_CTRLR_FAILED(&(c)->nvmrctr_nvmec)
@@ -128,9 +133,9 @@ nvmr_drop_q_usecount(nvmr_qpair_t q)
 {
 	uint32_t		ousecnt;
 
-	ousecnt = NVMR_DECR_Q_USECNT(q);
+	ousecnt = NVMR_DECR_QEDIOCNT(q);
 	if (NVMR_IS_CNTRLR_FAILED(q->nvmrq_cntrlr) && (ousecnt == 1)) {
-		wakeup(__DEVOLATILE(void *, &q->nvmrq_usecnt));
+		wakeup(__DEVOLATILE(void *, &q->nvmrq_qediocnt));
 	}
 }
 
@@ -338,6 +343,9 @@ out_no_repost:
 	return;
 }
 
+#define NVMR_MAX_DEALLOC_LOOP 15 /* Max times to loop waiting for draw down */
+#define NVMR_DEALLOC_PRINT_TP  2 /* seconds between draw down messages */
+
 void nvmr_qfail_drain(nvmr_qpair_t q, uint16_t *counter, uint16_t count);
 void
 nvmr_qfail_drain(nvmr_qpair_t q, uint16_t *counter, uint16_t count)
@@ -388,11 +396,18 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 		q->nvmrq_ibcq = NULL;
 	}
 
-	while (q->nvmrq_usecnt != 0) {
+	/* Wait for the queued IOs to be timed-out and returned */
+	count = 0;
+	while (q->nvmrq_qediocnt != 0) {
 		ERRSPEW("Waiting for q:%p usecount to drop to 0, %d\n", q,
-		    q->nvmrq_usecnt);
-		tsleep(__DEVOLATILE(void *, &q->nvmrq_usecnt), 0, "qpzero",
-		    2 * HZ);
+		    q->nvmrq_qediocnt);
+		tsleep(__DEVOLATILE(void *, &q->nvmrq_qediocnt), 0, "qpzero",
+		    NVMR_DEALLOC_PRINT_TP * HZ);
+		count++;
+		if (count > NVMR_MAX_DEALLOC_LOOP) {
+			panic("Waited more than %d seconds\n",
+			    NVMR_DEALLOC_PRINT_TP * NVMR_MAX_DEALLOC_LOOP);
+		}
 	}
 
 	nvmr_qfail_drain(q, &q->nvmrq_numFrcvqe, q->nvmrq_numrcvqe);
@@ -840,6 +855,7 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
 }
 
 /*
+ * Queues an NVMe request for failure to the controller's taskqueue.
  * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
  */
 void
@@ -1203,6 +1219,7 @@ nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req)
 			    &cntrlr->nvmrctr_nvmec);
 			error = ESHUTDOWN;
 		} else {
+			NVMR_INCR_DEFIOCNT(q);
 			STAILQ_INSERT_TAIL(&q->nvmrq_defreqs, req, stailq);
 			error = 0;
 		}
@@ -1348,7 +1365,7 @@ nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
 
 
 #define NVMR_SUBMIT_END                                                  \
-	NVMR_INCR_Q_USECNT(q);                                           \
+	NVMR_INCR_QEDIOCNT(q);                                           \
 	epoch_exit(global_epoch);                                        \
 	atomic_add_64(&q->nvmrq_stat_cmdcnt, 1);                         \
 	nvmr_submit_req(q, req)
@@ -1791,7 +1808,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	cmd->nvmrcu_conn.nvmrcn_kato = htole32(kato);
 
 	status.done = 0;
-	NVMR_INCR_Q_USECNT(q);
+	NVMR_INCR_QEDIOCNT(q);
 	nvmr_submit_req(q, req);
 	while (!atomic_load_acq_int(&status.done)) {
 		pause("nvmr", HZ > 100 ? (HZ/100) : 1);
@@ -2016,6 +2033,12 @@ nvmr_register_cntrlr(nvmr_cntrlr_t cntrlr)
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 }
 
+
+/*
+ * Invoked within a taskqueue by nvmr_ctrlr_fail_req_task() to fail a
+ * given NVMe request.  It invokes the NVMe requests callback routine,
+ * updates the completion status and frees the NVMe request itself.
+ */
 void
 nvmr_qpair_manual_complete_request(struct nvme_qpair *qpair,
     struct nvme_request *req, uint32_t sct, uint32_t sc,
@@ -2054,6 +2077,11 @@ nvmr_qpair_manual_complete_request(struct nvme_qpair *qpair,
 	nvmr_drop_q_usecount(q);
 }
 
+
+/*
+ * Routine invoked within a taskqueue to fail back to the NVMe stack the
+ * NVMe requests that have been marked for failure.
+ */
 void
 nvmr_ctrlr_fail_req_task(void *arg, int pending);
 void
@@ -2732,6 +2760,29 @@ nvmr_uninit(void)
 
 	ib_unregister_client(&nvmr_ib_client);
 }
+
+
+#ifdef DDB
+DB_SHOW_COMMAND(nvmr_qpair, db_show_qpair_dump)
+{
+	nvmr_qpair_t qp;
+
+	if (have_addr == 0) {
+		db_printf("usage: show nvmr_qpair <address of qpair>\n");
+		goto out;
+	}
+
+	qp = (nvmr_qpair_t)addr;
+	db_printf("cntrlr:%p, cmid:%p, ibpd:%p\n"
+	    "ibcq:%p, ibqp:%p\n", qp->nvmrq_cntrlr, qp->nvmrq_cmid,
+	    qp->nvmrq_ibpd, qp->nvmrq_ibcq, qp->nvmrq_ibqp);
+	db_printf("nsndqe:%hu/%hu, nrcvqe:%hu/%hu, DeferredIO:%u/%u\n",
+	    qp->nvmrq_numsndqe, qp->nvmrq_numFrcvqe, qp->nvmrq_numrcvqe,
+	    qp->nvmrq_numFrcvqe, qp->nvmrq_defiocnt, qp->nvmrq_qediocnt);
+out:
+	return;
+}
+#endif /* DDB */
 
 
 SYSINIT(nvmr, SI_SUB_DRIVERS, SI_ORDER_ANY, nvmr_init, NULL);

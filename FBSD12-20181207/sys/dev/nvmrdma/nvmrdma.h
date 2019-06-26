@@ -16,6 +16,13 @@
 
 #include <netinet/in.h>
 
+#include "opt_ddb.h"
+
+#ifdef DDB
+#include <sys/queue.h>
+#include <ddb/ddb.h>
+#endif /* DDB */
+
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 
@@ -115,7 +122,8 @@ typedef struct nvmr_qpair_tag {
 	uint16_t                       nvmrq_numFsndqe;/* nvmrq_comms count   */
 	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls count   */
 	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
-	volatile uint32_t              nvmrq_usecnt;
+	volatile uint32_t              nvmrq_qediocnt; /*Active+Deferred IO   */
+	volatile uint32_t              nvmrq_defiocnt; /*Deferred IO          */
 	volatile uint64_t              nvmrq_stat_cmdcnt;
 
 	struct nvme_qpair              nvmrq_gqp;
