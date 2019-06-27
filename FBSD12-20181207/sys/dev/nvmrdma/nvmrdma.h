@@ -117,10 +117,10 @@ typedef struct nvmr_qpair_tag {
 	STAILQ_HEAD(, nvme_request)    nvmrq_defreqs;
 	volatile nvmr_qpair_state_t    nvmrq_state;  /* nvmrctr_nvmec.lockc */
 	int                            nvmrq_last_cm_status;
-	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms count    */
-	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls count    */
-	uint16_t                       nvmrq_numFsndqe;/* nvmrq_comms count   */
-	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls count   */
+	uint16_t                       nvmrq_numsndqe;/* nvmrq_comms alloced  */
+	uint16_t                       nvmrq_numrcvqe;/* nvmrq_cmpls alloced  */
+	uint16_t                       nvmrq_numFsndqe;/* nvmrq_comms unused  */
+	uint16_t                       nvmrq_numFrcvqe;/* nvmrq_cmpls unused  */
 	struct scatterlist             nvmrq_scl[MAX_NVME_RDMA_SEGMENTS];
 	volatile uint32_t              nvmrq_qediocnt; /*Active+Deferred IO   */
 	volatile uint32_t              nvmrq_defiocnt; /*Deferred IO          */

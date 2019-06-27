@@ -139,12 +139,15 @@ nvmr_drop_q_usecount(nvmr_qpair_t q)
 	}
 }
 
+
 void nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c);
-/**********
- TODO:
- 1) Retry logic
- 2) Track in-use comm
- **********/
+/*
+ * This routine is on the path taken when a response is received from the remote
+ * controller for an NVMe request
+ * TODO:
+ * 1) Retry logic
+ * 2) Track in-use comm
+ */
 void
 nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_completion *c)
 {
@@ -177,6 +180,7 @@ nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_comple
 	 */
 	nvmr_drop_q_usecount(q);
 }
+
 
 void nvmr_qfail_freecmpl(nvmr_qpair_t q, struct nvmr_ncmplcont *cmplp);
 void
@@ -370,6 +374,7 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 {
 	nvmr_ncmplcon_t *cmplp, *tcmplp;
 	nvmr_ncommcon_t *commp, *tcommp;
+	struct nvme_request *req;
 	struct ib_device *ibd;
 	int count;
 
@@ -395,6 +400,17 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 		ib_free_cq(q->nvmrq_ibcq);
 		q->nvmrq_ibcq = NULL;
 	}
+
+	/* Clean out any queued IO that has been Deferred */
+	mtx_lock(&q->nvmrq_gqp.qlock);
+	while (req = STAILQ_FIRST(&q->nvmrq_defreqs), req != NULL) {
+		NVMR_DECR_DEFIOCNT(q);
+		STAILQ_REMOVE(&q->nvmrq_defreqs, req, nvme_request, stailq);
+		mtx_unlock(&q->nvmrq_gqp.qlock);
+		nvmr_ctrlr_post_failed_request(q->nvmrq_cntrlr, req);
+		mtx_lock(&q->nvmrq_gqp.qlock);
+	}
+	mtx_unlock(&q->nvmrq_gqp.qlock);
 
 	/* Wait for the queued IOs to be timed-out and returned */
 	count = 0;
@@ -2036,8 +2052,9 @@ nvmr_register_cntrlr(nvmr_cntrlr_t cntrlr)
 
 /*
  * Invoked within a taskqueue by nvmr_ctrlr_fail_req_task() to fail a
- * given NVMe request.  It invokes the NVMe requests callback routine,
- * updates the completion status and frees the NVMe request itself.
+ * given NVMe request without a response from the remote controller.
+ * It invokes the NVMe request's callback routine, updates the completion status
+ * and frees the NVMe request itself.
  */
 void
 nvmr_qpair_manual_complete_request(struct nvme_qpair *qpair,
@@ -2773,12 +2790,38 @@ DB_SHOW_COMMAND(nvmr_qpair, db_show_qpair_dump)
 	}
 
 	qp = (nvmr_qpair_t)addr;
-	db_printf("cntrlr:%p, cmid:%p, ibpd:%p\n"
-	    "ibcq:%p, ibqp:%p\n", qp->nvmrq_cntrlr, qp->nvmrq_cmid,
-	    qp->nvmrq_ibpd, qp->nvmrq_ibcq, qp->nvmrq_ibqp);
+	db_printf("cntrlr:%p cmid:%p pd:%p\n", qp->nvmrq_cntrlr, qp->nvmrq_cmid,
+	    qp->nvmrq_ibpd);
+	db_printf("cq:%p qp:%p cid[]:%p\n", qp->nvmrq_ibcq, qp->nvmrq_ibqp,
+	    qp->nvmrq_commcid);
 	db_printf("nsndqe:%hu/%hu, nrcvqe:%hu/%hu, DeferredIO:%u/%u\n",
-	    qp->nvmrq_numsndqe, qp->nvmrq_numFrcvqe, qp->nvmrq_numrcvqe,
-	    qp->nvmrq_numFrcvqe, qp->nvmrq_defiocnt, qp->nvmrq_qediocnt);
+	    qp->nvmrq_numFsndqe, qp->nvmrq_numsndqe,
+	    qp->nvmrq_numFrcvqe, qp->nvmrq_numrcvqe,
+	    qp->nvmrq_defiocnt, qp->nvmrq_qediocnt);
+	db_printf("qid:%u qstt:%d cm:%d cnt:%lu\n", qp->nvmrq_gqp.qid,
+	    qp->nvmrq_state, qp->nvmrq_last_cm_status, qp->nvmrq_stat_cmdcnt);
+out:
+	return;
+}
+
+
+DB_SHOW_COMMAND(nvmr_cntrlr, db_show_cntrlr_dump)
+{
+	nvmr_cntrlr_t c;
+
+	if (have_addr == 0) {
+		db_printf("usage: show nvmr_cntrlr <address of cntrlr>\n");
+		goto out;
+	}
+
+	c = (nvmr_cntrlr_t)addr;
+	db_printf("snqn:%s ip:%s prt:%hu rsnqn:%s\n",
+	    c->nvmrctr_subnqn, c->nvmrctr_ipv4str, ntohs(c->nvmrctr_port),
+	    c->nvmrctr_nvmec.cdata.subnqn);
+	db_printf("admq:%p nxt:%p ioq[]:%p ioqcnt:%u lst:0x%x\n",
+	    c->nvmrctr_adminqp, c->nvmrctr_nxt.tqe_next, c->nvmrctr_ioqarr,
+	    c->nvmrctr_nvmec.num_io_queues, c->nvmrctr_glblst);
+
 out:
 	return;
 }
