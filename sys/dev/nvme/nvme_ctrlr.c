@@ -1141,6 +1141,7 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 	mtx = mtx_pool_find(mtxpool_sleep, pt);
 	pt->driver_lock = mtx;
 
+	epoch_enter(global_epoch);
 	if (is_admin_cmd)
 		nvme_ctrlr_submit_admin_request(ctrlr, req);
 	else

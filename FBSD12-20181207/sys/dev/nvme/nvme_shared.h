@@ -37,7 +37,9 @@
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#ifdef _KERNEL
 #include <sys/taskqueue.h>
+#endif /* _KERNEL */
 
 #include <vm/uma.h>
 
@@ -531,6 +533,7 @@ enum nvme_transport {
 #define NVME_IS_CTRLR_FAILED(c) atomic_load_acq_int(&(c)->is_failed)
 #define NVME_SET_CTRLR_FAILED(c) atomic_store_rel_int(&(c)->is_failed, TRUE)
 
+#ifdef _KERNEL
 struct nvme_controller {
 	struct mtx		lockc;
 
@@ -588,6 +591,7 @@ struct nvme_controller {
 	void 				(*nvmec_subadmreq)(struct nvme_controller *, struct nvme_request *);
 	void 				(*nvmec_subioreq)(struct nvme_controller *, struct nvme_request *);
 };
+#endif /* _KERNEL */
 
 
 void nvme_register_controller(struct nvme_controller *);
@@ -595,6 +599,7 @@ void nvme_unregister_controller(struct nvme_controller *);
 
 typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
 
+#ifdef _KERNEL
 struct nvme_qpair {
 	uint32_t		qid;
 	uint32_t		num_qentries;
@@ -620,6 +625,7 @@ struct nvme_request {
 	int32_t				retries;
 	STAILQ_ENTRY(nvme_request)	stailq;
 };
+#endif /* _KERNEL */
 
 int nvme_ctrlr_construct_namespaces(struct nvme_controller *ctrlr);
 
@@ -694,15 +700,14 @@ extern uma_zone_t	nvme_request_zone;
 #define nvme_completion_is_error(cpl)					\
 	(NVME_STATUS_GET_SC((cpl)->status) != 0 || NVME_STATUS_GET_SCT((cpl)->status) != 0)
 
-boolean_t
-nvme_completion_is_retry(const struct nvme_completion *cpl);
-
+#ifdef _KERNEL
+boolean_t nvme_completion_is_retry(const struct nvme_completion *cpl);
 void nvme_qpair_print_command(struct nvme_qpair *qpair, struct nvme_command
     *cmd);
 void nvme_qpair_print_completion(struct nvme_qpair *qpair,
     struct nvme_completion *cpl);
-
-void	nvme_ns_destruct(struct nvme_namespace *ns);
+void nvme_ns_destruct(struct nvme_namespace *ns);
+#endif /* _KERNEL */
 
 struct nvme_completion_poll_status {
 
@@ -710,6 +715,7 @@ struct nvme_completion_poll_status {
 	int			done;
 };
 
+#ifdef _KERNEL
 static __inline struct nvme_request *
 _nvme_allocate_request(nvme_cb_fn_t cb_fn, void *cb_arg)
 {
@@ -749,6 +755,7 @@ nvme_allocate_request_vaddr(void *payload, uint32_t payload_size,
 	}
 	return (req);
 }
+#endif /* _KERNEL */
 
 void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 
