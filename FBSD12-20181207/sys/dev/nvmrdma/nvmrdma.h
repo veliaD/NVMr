@@ -197,9 +197,8 @@ typedef enum {
 #define NVMR_ALLUNITNUMS (-1)
 
 typedef struct {
-	char *nvmra_ipaddr;
-	char *nvmra_port;
-	char *nvmra_subnqn;
+	nvmr_portip_t nvmra_pi;
+	char         *nvmra_subnqn;
 } nvmr_addr_t;
 
 typedef enum {

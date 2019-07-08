@@ -817,4 +817,16 @@ enum nvme_generic_command_status_code {
 	NVME_SC_FORMAT_IN_PROGRESS		= 0x84,
 };
 
+#define	NVME_PASSTHROUGH_CMD		_IOWR('n', 0, struct nvme_pt_command)
+#define	NVME_RESET_CONTROLLER		_IO('n', 1)
+#define	NVMR_DISCOVERY			_IOWR('n', 2, nvmr_portip_t)
+
+#define	NVME_IO_TEST			_IOWR('n', 100, struct nvme_io_test)
+#define	NVME_BIO_TEST			_IOWR('n', 101, struct nvme_io_test)
+
+typedef struct {
+	char *nvmrpi_port;
+	char *nvmrpi_ip;
+} nvmr_portip_t;
+
 #endif /* __NVME_SHARED_H__ */

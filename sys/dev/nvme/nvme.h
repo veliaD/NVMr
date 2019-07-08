@@ -40,12 +40,6 @@
 
 #include <dev/nvme/nvme_shared.h>
 
-#define	NVME_PASSTHROUGH_CMD		_IOWR('n', 0, struct nvme_pt_command)
-#define	NVME_RESET_CONTROLLER		_IO('n', 1)
-
-#define	NVME_IO_TEST			_IOWR('n', 100, struct nvme_io_test)
-#define	NVME_BIO_TEST			_IOWR('n', 101, struct nvme_io_test)
-
 /*
  * Macros to deal with NVME revisions, as defined VS register
  */

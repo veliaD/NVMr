@@ -2161,17 +2161,17 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto outret;
 	}
 
-	if (inet_pton(AF_INET, addr->nvmra_ipaddr, &ipv4) != 1) {
+	if (inet_pton(AF_INET, addr->nvmra_pi.nvmrpi_ip, &ipv4) != 1) {
 		ERRSPEW("Parsing failed for IPV4 address \"%s\"\n",
-		    addr->nvmra_ipaddr);
+		    addr->nvmra_pi.nvmrpi_ip);
 		error = EINVAL;
 		goto outret;
 	}
 
-	tmp = strtoul(addr->nvmra_port, &retp, 0);
+	tmp = strtoul(addr->nvmra_pi.nvmrpi_port, &retp, 0);
 	if ((*retp != '\0') || (tmp > UINT16_MAX)) {
 		ERRSPEW("Parsing failed with %lu for RDMA port \"%s\"\n", tmp,
-		    addr->nvmra_port);
+		    addr->nvmra_pi.nvmrpi_port);
 		error = EINVAL;
 		goto outret;
 	}
@@ -2189,7 +2189,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	memcpy(&cntrlr->nvmrctr_ipv4, ipv4, sizeof(cntrlr->nvmrctr_ipv4));
 	cntrlr->nvmrctr_port = port;
 	cntrlr->nvmrctr_prof = prof;
-	strncpy(cntrlr->nvmrctr_ipv4str, addr->nvmra_ipaddr,
+	strncpy(cntrlr->nvmrctr_ipv4str, addr->nvmra_pi.nvmrpi_ip,
 	    sizeof(cntrlr->nvmrctr_ipv4str));
 	strncpy(cntrlr->nvmrctr_subnqn, addr->nvmra_subnqn,
 	    sizeof(cntrlr->nvmrctr_subnqn));
@@ -2573,7 +2573,7 @@ static struct ib_client nvmr_ib_client = {
 	.remove = nvmr_remove_ibif
 };
 
-#define MAX_IOQ_ELEMENTS 32
+#define DEFAULT_MAX_IOQ_ELEMENTS 32
 
 nvmr_cntrlrprof_t nvmr_regularprof = {
 	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
@@ -2583,8 +2583,16 @@ nvmr_cntrlrprof_t nvmr_regularprof = {
 	},
 	.nvmrp_qprofs[NVMR_QTYPE_IO] = {
 		.nvmrqp_numqueues = 1,
-		.nvmrqp_numqe = MAX_IOQ_ELEMENTS,
+		.nvmrqp_numqe = DEFAULT_MAX_IOQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
+	},
+};
+
+nvmr_cntrlrprof_t nvmr_discoveryprof = {
+	.nvmrp_qprofs[NVMR_QTYPE_ADMIN] = {
+		.nvmrqp_numqueues = 1,
+		.nvmrqp_numqe = MAX_ADMINQ_ELEMENTS,
+		.nvmrqp_kato = NVMR_DISCOVERY_KATO,
 	},
 };
 
@@ -2610,16 +2618,16 @@ nvmr_sysctl_attach_cntrlr(struct sysctl_req *req, char *buf)
 	ptr = buf;
 
 	strsep(&ptr, ":");
-	addr.nvmra_ipaddr = strsep(&ptr, ",");
-	addr.nvmra_port   = strsep(&ptr, ",");
+	addr.nvmra_pi.nvmrpi_ip = strsep(&ptr, ",");
+	addr.nvmra_pi.nvmrpi_port   = strsep(&ptr, ",");
 	addr.nvmra_subnqn = ptr;
 
-	DBGSPEW("addr is %s,%s,%s\n", addr.nvmra_ipaddr, addr.nvmra_port,
+	DBGSPEW("addr is %s,%s,%s\n", addr.nvmra_pi.nvmrpi_ip, addr.nvmra_pi.nvmrpi_port,
 	    addr.nvmra_subnqn);
 	error = nvmr_cntrlr_create(&addr, &nvmr_regularprof, &cntrlr);
 	if (error != 0) {
 		ERRSPEW("nvmr_cntrlr_create(\"%s\", \"%s\", \"%s\") failed "
-		    "with %d\n", addr.nvmra_ipaddr, addr.nvmra_port,
+		    "with %d\n", addr.nvmra_pi.nvmrpi_ip, addr.nvmra_pi.nvmrpi_port,
 		    addr.nvmra_subnqn, error);
 	}
 
@@ -2733,13 +2741,46 @@ SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQs, CTLFLAG_RW,
 
 SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQEs, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe,
-    MAX_IOQ_ELEMENTS,
+    DEFAULT_MAX_IOQ_ELEMENTS,
     "Number of IO queue elements to allocate. 0 means query controller.");
+
+
+int
+nvmr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
+    struct thread *td);
+int
+nvmr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
+    struct thread *td)
+{
+	int error;
+	nvmr_portip_t *portip;
+
+	switch(cmd) {
+	case NVMR_DISCOVERY:
+		portip = (nvmr_portip_t *)arg;
+		error = ENOTTY;
+		break;
+	default:
+		error = ENOTTY;
+		break;
+	}
+
+	return error;
+}
+
+static struct cdevsw nvmr_cdevsw = {
+	.d_version =	D_VERSION,
+	.d_flags   =    0,
+	.d_ioctl   =    nvmr_ioctl,
+};
+
+static struct cdev *nvmrcdev = NULL;
 
 static void
 nvmr_init(void)
 {
 	int retval;
+	struct make_dev_args md_args;
 
 	retval = ib_register_client(&nvmr_ib_client);
 	if (retval != 0) {
@@ -2752,6 +2793,19 @@ nvmr_init(void)
 	snprintf_uuid(nvrdma_host_uuid_string, sizeof(nvrdma_host_uuid_string),
 	    &nvrdma_host_uuid);
 	DBGSPEW("Generated UUID is \"%s\"\n", nvrdma_host_uuid_string);
+
+	make_dev_args_init(&md_args);
+	md_args.mda_devsw = &nvmr_cdevsw;
+	md_args.mda_uid = UID_ROOT;
+	md_args.mda_gid = GID_WHEEL;
+	md_args.mda_mode = 0600;
+	md_args.mda_unit = 0;
+	md_args.mda_si_drv1 = NULL;
+	retval = make_dev_s(&md_args, &nvmrcdev, "nvmr");
+	if (retval != 0) {
+		ERRSPEW("make_dev_s() for nvmr failed:%d\n", retval);
+		goto out;
+	}
 
 out:
 	return;
@@ -2774,6 +2828,10 @@ nvmr_uninit(void)
 	mtx_unlock(&nvmr_cntrlrs_lstslock);
 
 	taskqueue_drain_all(taskqueue_nvmr_cntrlrs_reaper);
+
+	if (nvmrcdev != NULL) {
+		destroy_dev(nvmrcdev);
+	}
 
 	ib_unregister_client(&nvmr_ib_client);
 }
