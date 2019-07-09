@@ -2250,61 +2250,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
-	/*
-	retval = nvmr_admin_propget(cntrlr, 0, (uint64_t *)&cntrlrcap,
-	    NVMR_PROPLEN_8BYTES);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 0,
-		    NVMR_PROPLEN_8BYTES, retval);
-		goto out;
-	}
-
-	DBGSPEW("PROPGET CAP:\n\t"
-	    "MQES:%lu CQR:%lu CMS:%lu TO:%lu DSTRD:%lu\n\t"
-	    "NSSRS:%lu CSS:%lu BPS:%lu MPSMIN:%lu MPSMAX:%lu\n",
-	    cntrlrcap.nvmrcc_mqes, cntrlrcap.nvmrcc_cqr, cntrlrcap.nvmrcc_ams,
-	    cntrlrcap.nvmrcc_to, cntrlrcap.nvmrcc_dstrd, cntrlrcap.nvmrcc_nssrs,
-	    cntrlrcap.nvmrcc_css, cntrlrcap.nvmrcc_bps, cntrlrcap.nvmrcc_mpsmin,
-	    cntrlrcap.nvmrcc_mpsmax);
-
-	cntrlrconf = 0;
-	retval = nvmr_admin_propget(cntrlr, 20, &cntrlrconf,
-	    NVMR_PROPLEN_4BYTES);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 20,
-		    NVMR_PROPLEN_4BYTES, retval);
-		goto out;
-	} else {
-		DBGSPEW("cntrlrconf is 0x%08lX\n", cntrlrconf);
-	}
-
-	cntrlrconf = 0;
-	retval = nvmr_admin_propget(cntrlr, 28, &cntrlrconf,
-	    NVMR_PROPLEN_4BYTES);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 28,
-		    NVMR_PROPLEN_4BYTES, retval);
-		goto out;
-	} else {
-		DBGSPEW("reg 28 is 0x%08lX\n", cntrlrconf);
-	}
-
-	cntrlrconf = 0;
-	retval = nvmr_admin_propget(cntrlr, 8, &cntrlrconf,
-	    NVMR_PROPLEN_4BYTES);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvmr_admin_propget(o:0x%X l:%d) failed:%d\n", 8,
-		    NVMR_PROPLEN_4BYTES, retval);
-		goto out;
-	} else {
-		DBGSPEW("Reg 8 is 0x%08lX\n", cntrlrconf);
-	}
-	 */
-
 	/* Initialization values for Controller Configuration */
 	cc = 0;
 	cc |= 1 << NVME_CC_REG_EN_SHIFT;
