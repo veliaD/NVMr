@@ -2753,11 +2753,11 @@ nvmr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
     struct thread *td)
 {
 	int error;
-	nvmr_portip_t *portip;
+	nvmr_ioctl_t *nvmri;
 
 	switch(cmd) {
 	case NVMR_DISCOVERY:
-		portip = (nvmr_portip_t *)arg;
+		nvmri = (nvmr_ioctl_t *)arg;
 		error = ENOTTY;
 		break;
 	default:

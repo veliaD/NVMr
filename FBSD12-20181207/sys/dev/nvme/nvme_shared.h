@@ -829,4 +829,10 @@ typedef struct {
 	char *nvmrpi_ip;
 } nvmr_portip_t;
 
+typedef struct {
+	nvmr_portip_t nvmri_pi;
+	void         *nvmri_retbuf;
+	uint32_t      nvmri_retlen;
+} nvmr_ioctl_t;
+
 #endif /* __NVME_SHARED_H__ */
