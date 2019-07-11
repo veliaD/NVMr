@@ -481,35 +481,6 @@ enum nvme_activate_action {
 	NVME_AA_ACTIVATE			= 0x2,
 };
 
-enum nvme_log_page {
-
-	/* 0x00 - reserved */
-	NVME_LOG_ERROR			= 0x01,
-	NVME_LOG_HEALTH_INFORMATION	= 0x02,
-	NVME_LOG_FIRMWARE_SLOT		= 0x03,
-	NVME_LOG_CHANGED_NAMESPACE	= 0x04,
-	NVME_LOG_COMMAND_EFFECT		= 0x05,
-	/* 0x06-0x7F - reserved */
-	/* 0x80-0xBF - I/O command set specific */
-	NVME_LOG_RES_NOTIFICATION	= 0x80,
-	/* 0xC0-0xFF - vendor specific */
-
-	/*
-	 * The following are Intel Specific log pages, but they seem
-	 * to be widely implemented.
-	 */
-	INTEL_LOG_READ_LAT_LOG		= 0xc1,
-	INTEL_LOG_WRITE_LAT_LOG		= 0xc2,
-	INTEL_LOG_TEMP_STATS		= 0xc5,
-	INTEL_LOG_ADD_SMART		= 0xca,
-	INTEL_LOG_DRIVE_MKT_NAME	= 0xdd,
-
-	/*
-	 * HGST log page, with lots ofs sub pages.
-	 */
-	HGST_INFO_LOG			= 0xc1,
-};
-
 struct nvme_error_information_entry {
 
 	uint64_t		error_count;
@@ -706,10 +677,6 @@ void	nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *pctrlr,
 				   uint8_t feature, uint32_t cdw11,
 				   void *payload, uint32_t payload_size,
 				   nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr,
-				    uint8_t log_page, uint32_t nsid,
-				    void *payload, uint32_t payload_size,
-				    nvme_cb_fn_t cb_fn, void *cb_arg);
 
 /* NVM I/O functions */
 int	nvme_ns_cmd_write(struct nvme_namespace *ns, void *payload,

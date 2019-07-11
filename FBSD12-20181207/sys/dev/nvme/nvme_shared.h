@@ -767,6 +767,10 @@ void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
 void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
 void	nvme_notify_mark_failing_consumers(struct nvme_controller *ctrlr);
+void	nvme_ctrlr_cmd_get_log_page(struct nvme_controller *ctrlr,
+				    uint8_t log_page, uint32_t nsid,
+				    void *payload, uint32_t payload_size,
+				    nvme_cb_fn_t cb_fn, void *cb_arg);
 
 /* status code types */
 enum nvme_status_code_type {
@@ -817,6 +821,37 @@ enum nvme_generic_command_status_code {
 	NVME_SC_NAMESPACE_NOT_READY		= 0x82,
 	NVME_SC_RESERVATION_CONFLICT		= 0x83,
 	NVME_SC_FORMAT_IN_PROGRESS		= 0x84,
+};
+
+enum nvme_log_page {
+
+	/* 0x00 - reserved */
+	NVME_LOG_ERROR			= 0x01,
+	NVME_LOG_HEALTH_INFORMATION	= 0x02,
+	NVME_LOG_FIRMWARE_SLOT		= 0x03,
+	NVME_LOG_CHANGED_NAMESPACE	= 0x04,
+	NVME_LOG_COMMAND_EFFECT		= 0x05,
+	/* 0x06-0x6F - reserved */
+	NVME_LOG_DISCOVERY		= 0x70,
+	/* 0x71-0x7F - reserved */
+	/* 0x80-0xBF - I/O command set specific */
+	NVME_LOG_RES_NOTIFICATION	= 0x80,
+	/* 0xC0-0xFF - vendor specific */
+
+	/*
+	 * The following are Intel Specific log pages, but they seem
+	 * to be widely implemented.
+	 */
+	INTEL_LOG_READ_LAT_LOG		= 0xc1,
+	INTEL_LOG_WRITE_LAT_LOG		= 0xc2,
+	INTEL_LOG_TEMP_STATS		= 0xc5,
+	INTEL_LOG_ADD_SMART		= 0xca,
+	INTEL_LOG_DRIVE_MKT_NAME	= 0xdd,
+
+	/*
+	 * HGST log page, with lots ofs sub pages.
+	 */
+	HGST_INFO_LOG			= 0xc1,
 };
 
 #define	NVME_PASSTHROUGH_CMD		_IOWR('n', 0, struct nvme_pt_command)

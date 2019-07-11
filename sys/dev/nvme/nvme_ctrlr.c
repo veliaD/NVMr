@@ -775,7 +775,7 @@ nvme_ctrlr_async_event_cb(void *arg, const struct nvme_completion *cpl)
 		aer->log_page_size = nvme_ctrlr_get_log_page_size(pctrlr,
 		    aer->log_page_id);
 		memcpy(&aer->cpl, cpl, sizeof(*cpl));
-		nvme_ctrlr_cmd_get_log_page(pctrlr, aer->log_page_id,
+		nvme_ctrlr_cmd_get_log_page(&pctrlr->ctrlr, aer->log_page_id,
 		    NVME_GLOBAL_NAMESPACE_TAG, aer->log_page_buffer,
 		    aer->log_page_size, nvme_ctrlr_async_event_log_page_cb,
 		    aer);

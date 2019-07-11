@@ -720,10 +720,9 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 
 	if (cntrlr->nvmrctr_nvmereg) {
 		nvme_unregister_controller(&cntrlr->nvmrctr_nvmec);
-	}
-
-	for (count = 0; count < NVME_MAX_NAMESPACES; count++) {
-		nvme_ns_destruct(&cntrlr->nvmrctr_nvmec.cns[count]);
+		for (count = 0; count < NVME_MAX_NAMESPACES; count++) {
+			nvme_ns_destruct(&cntrlr->nvmrctr_nvmec.cns[count]);
+		}
 	}
 
 	if (cntrlr->nvmrctr_nvmec.ccdev) {
@@ -746,7 +745,9 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 		taskqueue_free(cntrlr->nvmrctr_nvmec.taskqueue);
 	}
 
-	nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
+	if (cntrlr->nvmrctr_nvmereg) {
+		nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
+	}
 
 	DBGSPEW("NVMr controller:%p wiped\n", cntrlr);
 
@@ -1451,11 +1452,12 @@ nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 		goto out;                                                  \
 	}                                                                  \
 
-#define ISSUE_WAIT_CHECK_REQ                                                  \
+#define ISSUE_WAIT_CHECK_REQ_START                                            \
 	status.done = 0;                                                      \
 	epoch_enter(global_epoch);                                            \
-	if (!NVMR_IS_CNTRLR_FAILED(cntrlr)) {                                 \
-		nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req); \
+	if (!NVMR_IS_CNTRLR_FAILED(cntrlr)) {
+
+#define ISSUE_WAIT_CHECK_REQ_END                                              \
 		while (!atomic_load_acq_int(&status.done)) {                  \
 			pause("nvmr", HZ > 100 ? (HZ/100) : 1);               \
 		}                                                             \
@@ -1875,7 +1877,9 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 	cmd->nvmrcu_idnt.nvmrid_cns = cns;
 	cmd->nvmrcu_idnt.nvmrid_cntid = htole16(cntid);
 
-	ISSUE_WAIT_CHECK_REQ {
+	ISSUE_WAIT_CHECK_REQ_START
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("IDENTIFY NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
 		error = ENXIO;
@@ -1916,7 +1920,9 @@ nvmr_admin_propset(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t value,
 	cmd->nvmrcu_prst.nvmrps_ofst = offset;
 	cmd->nvmrcu_prst.nvmrps_value = value;
 
-	ISSUE_WAIT_CHECK_REQ {
+	ISSUE_WAIT_CHECK_REQ_START
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("PROPSET NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
 		error = ENXIO;
@@ -1978,7 +1984,9 @@ nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced)
 	cmd->nvmrcu_stft.nvmrsf_cmdw11  = htole32(qcount); /* NSQR */
 	cmd->nvmrcu_stft.nvmrsf_cmdw11 |= htole32(qcount) << NCQ_SHIFT;
 
-	ISSUE_WAIT_CHECK_REQ {
+	ISSUE_WAIT_CHECK_REQ_START
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("Set IOQ count NVMe command failed!\n");
 		error = ENXIO;
 		goto out;
@@ -2024,7 +2032,9 @@ nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
 	cmd->nvmrcu_prgt.nvmrpg_attrib = len;
 	cmd->nvmrcu_prgt.nvmrpg_ofst = offset;
 
-	ISSUE_WAIT_CHECK_REQ {
+	ISSUE_WAIT_CHECK_REQ_START
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("PROPGET NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
 		error = ENXIO;
@@ -2419,7 +2429,7 @@ skipped_over_dev_creation:
 	io_numrcvqe = io_numsndqe + 1;
 
 
-	if (pf->nvmrqp_numqueues == 0) {
+	if (pf->nvmrqp_numqueues != 0) {
 		nioq = pf->nvmrqp_numqueues;
 	} else {
 		cntrlr->nvmrctr_nvmec.num_io_queues = ioqcount;
@@ -2654,7 +2664,7 @@ out:
 
 
 static int
-nvmr_sysctl_conrollers(SYSCTL_HANDLER_ARGS)
+nvmr_sysctl_controllers(SYSCTL_HANDLER_ARGS)
 {
 	int error;
 	char buf[256];
@@ -2694,7 +2704,7 @@ static SYSCTL_NODE(_hw, OID_AUTO, nvmrdma, CTLFLAG_RD, 0, "NVMeoRDMA");
 
 SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, controllers,
 	    CTLTYPE_STRING | CTLFLAG_RW,
-	    NULL, 0, nvmr_sysctl_conrollers, "A", nvmr_cmdusage);
+	    NULL, 0, nvmr_sysctl_controllers, "A", nvmr_cmdusage);
 
 SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQs, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqueues, 1,
@@ -2711,20 +2721,24 @@ int
 nvmr_discovery(nvmr_ioctl_t *nvmri)
 {
 	int error;
+	void *buf;
 	nvmr_addr_t addr;
 	nvmr_cntrlr_t cntrlr;
+	struct nvme_request *req;
+	struct nvme_command *cmd;
+	struct nvme_completion_poll_status status;
 
 	DBGSPEW("port:%p ip:%p ret:%p rlen:%hu plen:%hhu ilen:%hhu\n",
 	    nvmri->nvmri_pi.nvmrpi_port, nvmri->nvmri_pi.nvmrpi_ip,
 	    nvmri->nvmri_retbuf, nvmri->nvmri_retlen, nvmri->nvmri_portstrlen,
 	    nvmri->nvmri_ipstrlen);
 
+	addr.nvmra_pi.nvmrpi_ip = NULL;
+	addr.nvmra_pi.nvmrpi_port = NULL;
+	buf = NULL;
+
 	addr.nvmra_pi.nvmrpi_ip = malloc(nvmri->nvmri_ipstrlen, M_NVMR,
 	    M_WAITOK|M_ZERO);
-	if (addr.nvmra_pi.nvmrpi_ip == NULL) {
-		error = ENOMEM;
-		goto out;
-	}
 	error = copyin(nvmri->nvmri_pi.nvmrpi_ip, addr.nvmra_pi.nvmrpi_ip,
 	    nvmri->nvmri_ipstrlen);
 	if (error != 0) {
@@ -2734,10 +2748,6 @@ nvmr_discovery(nvmr_ioctl_t *nvmri)
 
 	addr.nvmra_pi.nvmrpi_port = malloc(nvmri->nvmri_portstrlen, M_NVMR,
 	    M_WAITOK|M_ZERO);
-	if (addr.nvmra_pi.nvmrpi_port == NULL) {
-		error = ENOMEM;
-		goto out;
-	}
 	error = copyin(nvmri->nvmri_pi.nvmrpi_port, addr.nvmra_pi.nvmrpi_port,
 	    nvmri->nvmri_portstrlen);
 	if (error != 0) {
@@ -2754,13 +2764,37 @@ nvmr_discovery(nvmr_ioctl_t *nvmri)
 		goto out;
 	}
 
-	error = 0;
+	buf = malloc(nvmri->nvmri_retlen, M_NVMR, M_WAITOK|M_ZERO);
+	req = nvme_allocate_request_vaddr(buf, nvmri->nvmri_retlen,
+	    nvme_completion_poll_cb, &status);
+
+	cmd = &req->cmd;
+	cmd->opc = NVME_OPC_GET_LOG_PAGE;
+	cmd->nsid = 0;
+	cmd->cdw10 = ((nvmri->nvmri_retlen/sizeof(uint32_t)) - 1) << 16;
+	cmd->cdw10 |= NVME_LOG_DISCOVERY;
+	cmd->cdw10 = htole32(cmd->cdw10);
+
+	ISSUE_WAIT_CHECK_REQ_START;
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	ISSUE_WAIT_CHECK_REQ_END {
+		ERRSPEW("Discovery command to \"%s:%s\" failed!\n",
+		    addr.nvmra_pi.nvmrpi_ip, addr.nvmra_pi.nvmrpi_port);
+		error = ENXIO;
+		goto out;
+	}
+
+	nvmr_cntrlr_condemn_enqueue(cntrlr);
+	error = copyout(buf, nvmri->nvmri_retbuf, nvmri->nvmri_retlen);
 out:
 	if (addr.nvmra_pi.nvmrpi_ip != NULL) {
 		free(addr.nvmra_pi.nvmrpi_ip, M_NVMR);
 	}
 	if (addr.nvmra_pi.nvmrpi_port != NULL) {
 		free(addr.nvmra_pi.nvmrpi_port, M_NVMR);
+	}
+	if (buf != NULL) {
+		free(buf, M_NVMR);
 	}
 	return error;
 }

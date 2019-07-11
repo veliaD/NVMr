@@ -268,14 +268,13 @@ nvme_ctrlr_cmd_set_interrupt_coalescing(struct nvme_pci_controller *pctrlr,
 }
 
 void
-nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr, uint8_t log_page,
+nvme_ctrlr_cmd_get_log_page(struct nvme_controller *ctrlr, uint8_t log_page,
     uint32_t nsid, void *payload, uint32_t payload_size, nvme_cb_fn_t cb_fn,
     void *cb_arg)
 {
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
-	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_vaddr(payload, payload_size, cb_fn, cb_arg);
 
 	cmd = &req->cmd;
@@ -286,7 +285,7 @@ nvme_ctrlr_cmd_get_log_page(struct nvme_pci_controller *pctrlr, uint8_t log_page
 	cmd->cdw10 = htole32(cmd->cdw10);
 
 	epoch_enter(global_epoch);
-	nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
+	nvme_ctrlr_submit_admin_request(ctrlr, req);
 }
 
 void
@@ -306,7 +305,7 @@ nvme_ctrlr_cmd_get_error_page(struct nvme_pci_controller *pctrlr,
 	if (num_entries > (pctrlr->ctrlr.cdata.elpe + 1))
 		num_entries = pctrlr->ctrlr.cdata.elpe + 1;
 
-	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_ERROR,
+	nvme_ctrlr_cmd_get_log_page(&pctrlr->ctrlr, NVME_LOG_ERROR,
 	    NVME_GLOBAL_NAMESPACE_TAG, payload, sizeof(*payload) * num_entries,
 	    cb_fn, cb_arg);
 }
@@ -318,7 +317,7 @@ nvme_ctrlr_cmd_get_health_information_page(struct nvme_pci_controller *pctrlr,
 {
 
 	CONFIRMPCIECONTROLLER;
-	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_HEALTH_INFORMATION,
+	nvme_ctrlr_cmd_get_log_page(&pctrlr->ctrlr, NVME_LOG_HEALTH_INFORMATION,
 	    nsid, payload, sizeof(*payload), cb_fn, cb_arg);
 }
 
@@ -328,7 +327,7 @@ nvme_ctrlr_cmd_get_firmware_page(struct nvme_pci_controller *pctrlr,
 {
 
 	CONFIRMPCIECONTROLLER;
-	nvme_ctrlr_cmd_get_log_page(pctrlr, NVME_LOG_FIRMWARE_SLOT, 
+	nvme_ctrlr_cmd_get_log_page(&pctrlr->ctrlr, NVME_LOG_FIRMWARE_SLOT, 
 	    NVME_GLOBAL_NAMESPACE_TAG, payload, sizeof(*payload), cb_fn,
 	    cb_arg);
 }

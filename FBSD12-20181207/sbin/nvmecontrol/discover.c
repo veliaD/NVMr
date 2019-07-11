@@ -104,6 +104,11 @@ discover(int argc, char *argv[])
 		err(EX_OSERR, "DISCOVERY ioctl failed");
 	}
 
+	for (opt = 1024 + 256; opt < (1024 + 256 + 50); opt++) {
+		printf("%c", ((uint8_t *)nvmr_ioctl.nvmri_retbuf)[opt]);
+	}
+	printf("\n");
+
 	close(fd);
 	exit(0);
 }
