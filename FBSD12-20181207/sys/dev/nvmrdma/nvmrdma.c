@@ -2344,6 +2344,9 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	cntrlr->nvmrctr_nvmec.ready_timeout_in_ms = cntrlrcap.nvmrcc_to *
 	    500;
 
+	if (prof->nvmrp_isdiscov) {
+		goto skipped_over_dev_creation;
+	}
 	/**********
 	 Come up with a unique unitnum that has enough room for
 	 NVME_MAX_NAMESPACES sub-unitnums.
@@ -2380,8 +2383,12 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		    &cntrlr->nvmrctr_nvmec, error);
 		goto out;
 	}
+skipped_over_dev_creation:
 
 
+	if (prof->nvmrp_isdiscov) {
+		goto skipped_over_IOQ_creation;
+	}
 	/**********
 	 Now set up the IO Qs
 	 **********/
@@ -2412,7 +2419,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	io_numrcvqe = io_numsndqe + 1;
 
 
-	if (pf->nvmrqp_numqueues != 0) {
+	if (pf->nvmrqp_numqueues == 0) {
 		nioq = pf->nvmrqp_numqueues;
 	} else {
 		cntrlr->nvmrctr_nvmec.num_io_queues = ioqcount;
@@ -2459,15 +2466,22 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	} else {
 		cntrlr->nvmrctr_ioqarr = NULL;
 	}
+skipped_over_IOQ_creation:
+
 
 	nvmr_cntrlr_inited(cntrlr);
 	BAIL_IF_CNTRLR_CONDEMNED(cntrlr); /* It's important this be here */
 
 	cntrlr->nvmrctr_nvmec.is_initialized = 1;
 
+
+	if (prof->nvmrp_isdiscov) {
+		goto skipped_over_nvme_registration;
+	}
 	nvme_register_controller(&cntrlr->nvmrctr_nvmec);
 	cntrlr->nvmrctr_nvmereg = TRUE;
 	nvme_notify_new_controller(&cntrlr->nvmrctr_nvmec);
+skipped_over_nvme_registration:
 
 	error = 0;
 	*retcntrlrp = cntrlr;
@@ -2531,6 +2545,7 @@ nvmr_cntrlrprof_t nvmr_regularprof = {
 		.nvmrqp_numqe = DEFAULT_MAX_IOQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DEFAULT_KATO,
 	},
+	.nvmrp_isdiscov = false,
 };
 
 nvmr_cntrlrprof_t nvmr_discoveryprof = {
@@ -2539,6 +2554,7 @@ nvmr_cntrlrprof_t nvmr_discoveryprof = {
 		.nvmrqp_numqe = MAX_ADMINQ_ELEMENTS,
 		.nvmrqp_kato = NVMR_DISCOVERY_KATO,
 	},
+	.nvmrp_isdiscov = true,
 };
 
 #define NVMR_CMD_ATT "attach"
@@ -2682,13 +2698,72 @@ SYSCTL_PROC(_hw_nvmrdma, OID_AUTO, controllers,
 
 SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQs, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqueues, 1,
-    "Number of IO queues to allocate a controller. 0 means query controller.");
+    "Number of IO queues to allocate a controller.  0 means query controller");
 
 SYSCTL_U32(_hw_nvmrdma, OID_AUTO, io_numQEs, CTLFLAG_RW,
     &nvmr_regularprof.nvmrp_qprofs[NVMR_QTYPE_IO].nvmrqp_numqe,
     DEFAULT_MAX_IOQ_ELEMENTS,
-    "Number of IO queue elements to allocate. 0 means query controller.");
+    "Number of IO queue elements to allocate.  0 means query controller");
 
+
+int nvmr_discovery(nvmr_ioctl_t *nvmri);
+int
+nvmr_discovery(nvmr_ioctl_t *nvmri)
+{
+	int error;
+	nvmr_addr_t addr;
+	nvmr_cntrlr_t cntrlr;
+
+	DBGSPEW("port:%p ip:%p ret:%p rlen:%hu plen:%hhu ilen:%hhu\n",
+	    nvmri->nvmri_pi.nvmrpi_port, nvmri->nvmri_pi.nvmrpi_ip,
+	    nvmri->nvmri_retbuf, nvmri->nvmri_retlen, nvmri->nvmri_portstrlen,
+	    nvmri->nvmri_ipstrlen);
+
+	addr.nvmra_pi.nvmrpi_ip = malloc(nvmri->nvmri_ipstrlen, M_NVMR,
+	    M_WAITOK|M_ZERO);
+	if (addr.nvmra_pi.nvmrpi_ip == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+	error = copyin(nvmri->nvmri_pi.nvmrpi_ip, addr.nvmra_pi.nvmrpi_ip,
+	    nvmri->nvmri_ipstrlen);
+	if (error != 0) {
+		goto out;
+	}
+	addr.nvmra_pi.nvmrpi_ip[nvmri->nvmri_ipstrlen - 1] = '\0';
+
+	addr.nvmra_pi.nvmrpi_port = malloc(nvmri->nvmri_portstrlen, M_NVMR,
+	    M_WAITOK|M_ZERO);
+	if (addr.nvmra_pi.nvmrpi_port == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+	error = copyin(nvmri->nvmri_pi.nvmrpi_port, addr.nvmra_pi.nvmrpi_port,
+	    nvmri->nvmri_portstrlen);
+	if (error != 0) {
+		goto out;
+	}
+	addr.nvmra_pi.nvmrpi_port[nvmri->nvmri_portstrlen - 1] = '\0';
+
+	addr.nvmra_subnqn = DISCOVERY_SUBNQN;
+
+	DBGSPEW("\"%s:%s\"\n", addr.nvmra_pi.nvmrpi_ip,
+	    addr.nvmra_pi.nvmrpi_port);
+	error = nvmr_cntrlr_create(&addr, &nvmr_discoveryprof, &cntrlr);
+	if (error != 0) {
+		goto out;
+	}
+
+	error = 0;
+out:
+	if (addr.nvmra_pi.nvmrpi_ip != NULL) {
+		free(addr.nvmra_pi.nvmrpi_ip, M_NVMR);
+	}
+	if (addr.nvmra_pi.nvmrpi_port != NULL) {
+		free(addr.nvmra_pi.nvmrpi_port, M_NVMR);
+	}
+	return error;
+}
 
 int
 nvmr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
@@ -2703,7 +2778,7 @@ nvmr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
 	switch(cmd) {
 	case NVMR_DISCOVERY:
 		nvmri = (nvmr_ioctl_t *)arg;
-		error = ENOTTY;
+		error = nvmr_discovery(nvmri);
 		break;
 	default:
 		error = ENOTTY;
@@ -2746,7 +2821,7 @@ nvmr_init(void)
 	md_args.mda_mode = 0600;
 	md_args.mda_unit = 0;
 	md_args.mda_si_drv1 = NULL;
-	retval = make_dev_s(&md_args, &nvmrcdev, "nvmr");
+	retval = make_dev_s(&md_args, &nvmrcdev, NVMR_DEV);
 	if (retval != 0) {
 		ERRSPEW("make_dev_s() for nvmr failed:%d\n", retval);
 		goto out;

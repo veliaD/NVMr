@@ -6,6 +6,7 @@ export TMPDIR=$(cd `dirname ${0}`/../../tmproot && echo $PWD)
 export TEMP=${TMPDIR}
 export KERNBUILDDIR="${VELPATHTOKRNSRCS}/../../obj/${KERNCONF}"
 export MAKEOBJDIRPREFIX=${KERNBUILDDIR}
+export VELNUMCPUS=`sysctl -n hw.ncpu`
 
 export VELKERNELINSTALLLOCATION="/boot/kernel/./"
 export VELDEBUGINSTALLLOCATION="/usr/lib/debug/${VELKERNELINSTALLLOCATION}"

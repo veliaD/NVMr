@@ -89,7 +89,8 @@ typedef enum {
 } nvmr_qndx_t;
 
 typedef struct {
-	nvmr_qprof_t	   nvmrp_qprofs[NVMR_NUM_QTYPES];
+	nvmr_qprof_t nvmrp_qprofs[NVMR_NUM_QTYPES];
+	bool         nvmrp_isdiscov;
 } nvmr_cntrlrprof_t;
 
 typedef enum {

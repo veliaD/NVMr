@@ -81,6 +81,8 @@ struct nvme_completion {
 
 _Static_assert(sizeof(struct nvme_completion) == 4 * 4, "bad size for nvme_completion");
 
+#define NVME_SUBNQN_MAX_LENGTH 256
+
 struct nvme_command
 {
 	/* dword 0 */
@@ -408,7 +410,7 @@ struct nvme_controller_data {
 	uint8_t			reserved7[228];
 
 	/** NVM Subsystem NVMe Qualified Name */
-	uint8_t			subnqn[256];
+	uint8_t			subnqn[NVME_SUBNQN_MAX_LENGTH];
 
 	/* bytes 1024-1791: Reserved */
 	uint8_t			reserved8[768];
@@ -819,7 +821,7 @@ enum nvme_generic_command_status_code {
 
 #define	NVME_PASSTHROUGH_CMD		_IOWR('n', 0, struct nvme_pt_command)
 #define	NVME_RESET_CONTROLLER		_IO('n', 1)
-#define	NVMR_DISCOVERY			_IOWR('n', 2, nvmr_portip_t)
+#define	NVMR_DISCOVERY			_IOWR('n', 2, nvmr_ioctl_t)
 
 #define	NVME_IO_TEST			_IOWR('n', 100, struct nvme_io_test)
 #define	NVME_BIO_TEST			_IOWR('n', 101, struct nvme_io_test)
@@ -832,7 +834,11 @@ typedef struct {
 typedef struct {
 	nvmr_portip_t nvmri_pi;
 	void         *nvmri_retbuf;
-	uint32_t      nvmri_retlen;
+	uint16_t      nvmri_retlen;
+	uint8_t       nvmri_portstrlen;
+	uint8_t       nvmri_ipstrlen;
 } nvmr_ioctl_t;
+
+#define NVMR_DEV		"nvmr"
 
 #endif /* __NVME_SHARED_H__ */

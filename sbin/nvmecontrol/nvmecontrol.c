@@ -49,6 +49,7 @@ __FBSDID("$FreeBSD$");
 
 
 static struct nvme_function funcs[] = {
+	{"discover",	discover,	DISCOVER_USAGE},
 	{"devlist",	devlist,	DEVLIST_USAGE},
 	{"identify",	identify,	IDENTIFY_USAGE},
 	{"perftest",	perftest,	PERFTEST_USAGE},

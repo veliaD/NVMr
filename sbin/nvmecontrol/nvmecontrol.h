@@ -44,6 +44,9 @@ struct nvme_function {
 #define NVME_CTRLR_PREFIX	"nvme"
 #define NVME_NS_PREFIX		"ns"
 
+#define DISCOVER_USAGE							       \
+"       nvmecontrol discover <-i IP-address> <-p port>\n"
+
 #define DEVLIST_USAGE							       \
 "       nvmecontrol devlist\n"
 
@@ -77,6 +80,7 @@ struct nvme_function {
 #define NS_USAGE								\
 "       nvmecontrol ns (create|delete|attach|detach)\n"
 
+void discover(int argc, char *argv[]);
 void devlist(int argc, char *argv[]);
 void identify(int argc, char *argv[]);
 void perftest(int argc, char *argv[]);
@@ -120,5 +124,8 @@ to128(void *p)
 
 uint64_t le48dec(const void *pp);
 char * uint128_to_str(uint128_t u, char *buf, size_t buflen);
+
+#define MAX_IP_STR_LEN   39
+#define MAX_PORT_STR_LEN 5
 
 #endif
