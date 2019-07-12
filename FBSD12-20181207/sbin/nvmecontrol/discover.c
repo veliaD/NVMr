@@ -49,13 +49,20 @@ __FBSDID("$FreeBSD$");
 #include "nvmecontrol.h"
 
 #define NVMR_DEV_PATH (_PATH_DEV NVMR_DEV)
+#define NUMDLE        62
 
 void
 discover(int argc, char *argv[])
 {
 	size_t optlen;
-	int fd, opt, retval;
 	nvmr_ioctl_t nvmr_ioctl;
+	char *traddrp, *trsvcidp;
+	int fd, opt, retval, count;
+	struct nvmr_discovery_log_entry *dlep;
+	struct {
+		struct nvmr_discovery_log_page  hdr;
+		struct nvmr_discovery_log_entry dlearr[NUMDLE];
+	} __packed logbuf;
 
 	nvmr_ioctl.nvmri_pi.nvmrpi_ip = NULL;
 	nvmr_ioctl.nvmri_pi.nvmrpi_port = NULL;
@@ -91,23 +98,28 @@ discover(int argc, char *argv[])
 		err(EX_OSERR, "Could not open \"%s\"", NVMR_DEV_PATH);
 	}
 
-	nvmr_ioctl.nvmri_retlen = PAGE_SIZE;
-	nvmr_ioctl.nvmri_retbuf = malloc(nvmr_ioctl.nvmri_retlen);
-	if (nvmr_ioctl.nvmri_retbuf == NULL) {
-		err(EX_OSERR, "malloc(%u) failed", nvmr_ioctl.nvmri_retlen);
-	}
+	nvmr_ioctl.nvmri_retlen = sizeof(logbuf);
+	nvmr_ioctl.nvmri_retbuf = &logbuf;
 
-	printf("port:%p IP:%p retbuf:%p\n", nvmr_ioctl.nvmri_pi.nvmrpi_port,
-	    nvmr_ioctl.nvmri_pi.nvmrpi_ip, nvmr_ioctl.nvmri_retbuf);
 	retval = ioctl(fd, NVMR_DISCOVERY, &nvmr_ioctl);
 	if (retval < 0) {
 		err(EX_OSERR, "DISCOVERY ioctl failed");
 	}
 
-	for (opt = 1024 + 256; opt < (1024 + 256 + 50); opt++) {
-		printf("%c", ((uint8_t *)nvmr_ioctl.nvmri_retbuf)[opt]);
+	for (count = 0; (count < NUMDLE) && ((uint64_t)count <
+	    logbuf.hdr.nvmrdlp_numrec); count++) {
+		dlep = logbuf.dlearr + count;
+		if (dlep->nvmrdle_trtype == TRTYPE_RDMA) {
+			traddrp = dlep->nvmrdle_traddr;
+			trsvcidp = dlep->nvmrdle_trsvcid;
+
+			printf("%s,%s,%s\n", strsep(&traddrp, " \n"),
+			    strsep(&trsvcidp, " \n"), dlep->nvmrdle_subnqn);
+		}
 	}
-	printf("\n");
+	if (logbuf.hdr.nvmrdlp_numrec > (uint64_t)count) {
+		warnx("More controllers available than listed\n");
+	}
 
 	close(fd);
 	exit(0);

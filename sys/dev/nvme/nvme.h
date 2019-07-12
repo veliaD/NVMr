@@ -496,6 +496,34 @@ struct nvme_error_information_entry {
 
 _Static_assert(sizeof(struct nvme_error_information_entry) == 64, "bad size for nvme_error_information_entry");
 
+#define TRTYPE_RDMA 0x1
+
+struct nvmr_discovery_log_entry {
+	uint8_t			nvmrdle_trtype;
+	uint8_t			nvmrdle_adrfam;
+	uint8_t			nvmrdle_subtype;
+	uint8_t			nvmrdle_treq;
+	uint16_t		nvmrdle_portid;
+	uint16_t		nvmrdle_cntlid;
+	uint16_t		nvmrdle_asqsz;
+	uint8_t			nvmrdle_resv0[22];
+	uint8_t			nvmrdle_trsvcid[32];
+	uint8_t			nvmrdle_resv1[192];
+	uint8_t			nvmrdle_subnqn[256];
+	uint8_t			nvmrdle_traddr[256];
+	uint8_t			nvmrdle_resv2[256];
+} __packed __aligned(4);
+_Static_assert(sizeof(struct nvmr_discovery_log_entry) == 1024, "bad size for nvmr_discovery_log_entry");
+
+struct nvmr_discovery_log_page {
+	uint64_t			nvmrdlp_genctr;
+	uint64_t			nvmrdlp_numrec;
+	uint16_t			nvmrdlp_recfmt;
+	uint8_t				nvmrdlp_resv0[1006];
+	struct nvmr_discovery_log_entry	nvmrdlp_dle[0];
+} __packed __aligned(4);
+_Static_assert(sizeof(struct nvmr_discovery_log_page) == 1024, "bad size for nvmr_discovery_log_page");
+
 struct nvme_health_information_page {
 
 	uint8_t			critical_warning;

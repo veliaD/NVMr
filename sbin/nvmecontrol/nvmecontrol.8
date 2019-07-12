@@ -50,6 +50,10 @@
 .Aq device id
 .Aq namespace id
 .Nm
+.Ic discover
+.Aq Fl i Ar IP-address
+.Aq Fl p Ar port-number
+.Nm
 .Ic perftest
 .Aq Fl n Ar num_threads
 .Aq Fl o Ar read|write
@@ -109,7 +113,7 @@
 .\" .Aq device id
 .Sh DESCRIPTION
 NVM Express (NVMe) is a storage protocol standard, for SSDs and other
-high-speed storage devices over PCI Express.
+high-speed storage devices over PCI Express and RDMA.
 .Pp
 .Ss logpage
 The logpage command knows how to print log pages of various types.
@@ -173,6 +177,11 @@ Display a human-readable summary of the nvme0 IDENTIFY_CONTROLLER data.
 .Pp
 Display an hexadecimal dump of the nvme0 IDENTIFY_NAMESPACE data for namespace
 1.
+.Pp
+.Dl nvmecontrol discover -i 2.2.2.7 -p 4420
+.Pp
+Display the list of RDMA transport NVMe controllers known to the NVMeoF
+Discovery controller behind port 4420 and IP address 2.2.2.7
 .Pp
 .Dl nvmecontrol perftest -n 32 -o read -s 512 -t 30 nvme0ns1
 .Pp
