@@ -1,6 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
  * Copyright (C) 2012-2014 Intel Corporation
  * All rights reserved.
  *

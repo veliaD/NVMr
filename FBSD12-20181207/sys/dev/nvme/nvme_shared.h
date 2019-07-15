@@ -1,6 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
  * Copyright (C) 2012-2013 Intel Corporation
  * All rights reserved.
  *
@@ -25,7 +26,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: releng/12.0/sys/dev/nvme/nvme.h 338182 2018-08-22 04:29:24Z chuck $
+ * $FreeBSD$
  */
 
 #ifndef __NVME_SHARED_H__
