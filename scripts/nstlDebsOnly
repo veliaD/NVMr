@@ -1,7 +1,0 @@
-#! /usr/local/bin/bash
-
-set -x
-
-source `dirname ${0}`/Krnl.include
-
-cp `find ${MODS_FIND_LOCATION} -type f -name '*.ko.debug' -print` ${VELDEBUGINSTALLLOCATION}; fsync ${VELDEBUGINSTALLLOCATION} ${VELDEBUGINSTALLLOCATION}/*
