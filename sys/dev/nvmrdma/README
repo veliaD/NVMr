@@ -1,0 +1,41 @@
+Refer to scripts in https://github.com/veliaD/NVMrBuild.git to build and
+install the kernel and necessary modules
+
+Set up rc.conf and loader.conf.local to load mlx5ib before mlx5en.
+
+	# kldload nvd nvmrdma
+should load the NVMe and NVMr modules.
+
+To connect to a remote controller over RDMA find its IPv4 address, RDMA
+port number & SubNQN name (see Discovery below), and pass them to the
+hw.nvmrdma.controllers sysctl's attach command e.g.
+
+	# sysctl hw.nvmrdma.controllers=attach:10.1.87.234,4420,FromGUS
+
+To list the controllers just invoke the sysctl without any assignment:
+
+	# sysctl hw.nvmrdma.controllers
+	hw.nvmrdma.controllers:
+	98099775 10.1.87.194,4420,FromGUS
+	98099753 10.1.87.234,4420,FromGUS
+
+To detach a controller pass in the unit-number with the detach command:
+
+	# sysctl hw.nvmrdma.controllers=detach:98099753
+	hw.nvmrdma.controllers:
+	98099775 10.1.87.194,4420,FromGUS
+	98099753 10.1.87.234,4420,FromGUS
+	 ->
+	98099775 10.1.87.194,4420,FromGUS
+
+To detach all controllers pass in -1:
+
+	# sysctl hw.nvmrdma.controllers=detach:-1
+	hw.nvmrdma.controllers:
+	98099775 10.1.87.194,4420,FromGUS
+	 ->
+
+
+DISCOVERY:
+~~~~~~~~~
+Rudimentary support for discovery has been added into nvmecontrol(8)
