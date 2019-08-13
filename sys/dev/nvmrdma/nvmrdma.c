@@ -946,7 +946,7 @@ nvmr_map_bio(nvmr_qpair_t q, nvmr_ncommcon_t *commp, int *np)
 	offset = bio->bio_ma_offset;
 	scl = q->nvmrq_scl;
 
-	for (n = 0; (0 < translen) && (n < MAX_NVME_RDMA_SEGMENTS); n++,
+	for (n = 0; (0 < translen) && (n < nitems(q->nvmrq_scl)); n++,
 	    translen -= len) {
 		memset(scl + n, 0, sizeof(*scl));
 		s = scl + n;
@@ -1029,7 +1029,7 @@ nvmr_map_vaddr(nvmr_qpair_t q, nvmr_ncommcon_t *commp, int *np)
 		goto out;
 	}
 
-	for (n = 0; (0 < translen) && (n < MAX_NVME_RDMA_SEGMENTS); n++,
+	for (n = 0; (0 < translen) && (n < nitems(q->nvmrq_scl)); n++,
 	    translen -= len) {
 		memset(scl + n, 0, sizeof(*scl));
 		s = scl + n;
@@ -1683,7 +1683,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	count = 0;
 	STAILQ_FOREACH(commp, &q->nvmrq_comms, nvmrsnd_nextfree) {
 		mr = ib_alloc_mr(ibpd, IB_MR_TYPE_MEM_REG,
-		    MAX_NVME_RDMA_SEGMENTS);
+		    nitems(q->nvmrq_scl));
 		if (IS_ERR(mr)) {
 			ERRSPEW("ib_alloc_mr() failed with \"%ld\" for "
 			    "count #%d\n", PTR_ERR(mr), count);
