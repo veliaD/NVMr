@@ -1972,9 +1972,36 @@ nvmr_ctrlr_reset_task(void *arg, int pending)
 }
 
 
+int
+nvmr_ctrlr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
+    struct thread *td);
+int
+nvmr_ctrlr_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
+    struct thread *td)
+{
+	struct nvme_pt_command *pt;
+	nvmr_cntrlr_t cntrlr;
+
+	cntrlr = cdev->si_drv1;
+	CONFIRMRDMACONTROLLER;
+
+	switch (cmd) {
+	case NVME_PASSTHROUGH_CMD:
+		pt = (struct nvme_pt_command *)arg;
+		return (nvme_ctrlr_passthrough_cmd(&cntrlr->nvmrctr_nvmec, pt,
+		    le32toh(pt->cmd.nsid), 1 /* is_user_buffer */,
+		    1 /* is_admin_cmd */));
+	default:
+		return (ENOTTY);
+	}
+
+	return (0);
+}
+
 static struct cdevsw nvmr_ctrlr_cdevsw = {
 	.d_version =	D_VERSION,
 	.d_flags =	0,
+	.d_ioctl   =    nvmr_ctrlr_ioctl,
 };
 
 static void

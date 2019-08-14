@@ -1077,12 +1077,6 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 	int			ret = 0;
 	vm_offset_t		addr, end;
 
-	struct nvme_pci_controller *pctrlr;
-
-	KASSERT_NVMP_CNTRLR(ctrlr);
-	pctrlr = ctrlr->nvmec_tsp;
-
-	CONFIRMPCIECONTROLLER;
 	if (pt->len > 0) {
 		/*
 		 * vmapbuf calls vm_fault_quick_hold_pages which only maps full
@@ -1096,7 +1090,7 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 			return EIO;
 
 		if (pt->len > ctrlr->max_xfer_size) {
-			nvme_printf(&(pctrlr->ctrlr), "pt->len (%d) "
+			nvme_printf(ctrlr, "pt->len (%d) "
 			    "exceeds max_xfer_size (%d)\n", pt->len,
 			    ctrlr->max_xfer_size);
 			return EIO;

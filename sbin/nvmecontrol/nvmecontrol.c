@@ -223,10 +223,10 @@ parse_ns_str(const char *ns_str, char *ctrlr_str, uint32_t *nsid)
 
 	/*
 	 * Pull the namespace id from the string. +2 skips past the "ns" part
-	 *  of the string.  Don't search past 10 characters into the string,
+	 *  of the string.  Don't search past 20 characters into the string,
 	 *  otherwise we know it is malformed.
 	 */
-	nsloc = strnstr(ns_str, NVME_NS_PREFIX, 10);
+	nsloc = strnstr(ns_str, NVME_NS_PREFIX, 20);
 	if (nsloc != NULL)
 		*nsid = strtol(nsloc + 2, NULL, 10);
 	if (nsloc == NULL || (*nsid == 0 && errno != 0))
