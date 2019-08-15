@@ -40,6 +40,8 @@ __FBSDID("$FreeBSD$");
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sysexits.h>
 
 #include "nvmecontrol.h"
 
@@ -69,10 +71,13 @@ devlist(int argc, char *argv[])
 {
 	struct nvme_controller_data	cdata;
 	struct nvme_namespace_data	nsdata;
-	char				name[64];
+	char				name[64], *eptr;
 	uint8_t				mn[64];
 	uint32_t			i;
 	int				ch, ctrlr, fd, found, ret;
+	DIR				*dirp;
+	struct dirent			*dp;
+	size_t				prfxlen;
 
 	while ((ch = getopt(argc, argv, "")) != -1) {
 		switch ((char)ch) {
@@ -83,29 +88,38 @@ devlist(int argc, char *argv[])
 
 	ctrlr = -1;
 	found = 0;
+	dirp = opendir(_PATH_DEV);
+	if (dirp == NULL) {
+		err(EX_OSFILE, "Could not open dir "_PATH_DEV);
+	}
 
-	while (1) {
-		ctrlr++;
-		sprintf(name, "%s%d", NVME_CTRLR_PREFIX, ctrlr);
+	prfxlen = strlen(NVME_CTRLR_PREFIX);
+	while (dp = readdir(dirp), dp != NULL) {
+		if (strncmp(dp->d_name, NVME_CTRLR_PREFIX, prfxlen) != 0) {
+			continue;
+		}
 
-		ret = open_dev(name, &fd, 0, 0);
-
-		if (ret != 0) {
-			if (ret == EACCES) {
-				warnx("could not open "_PATH_DEV"%s\n", name);
-				continue;
-			} else
-				break;
+		ctrlr = (int)strtol(dp->d_name + prfxlen, &eptr, 10);
+		if ((errno != 0) || (*eptr != '\0')) {
+			continue;
 		}
 
 		found++;
+
+		ret = open_dev(dp->d_name, &fd, 0, 0);
+
+		if (ret != 0) {
+			warnx("could not open "_PATH_DEV"%s\n", dp->d_name);
+				continue;
+		}
+
 		read_controller_data(fd, &cdata);
 		nvme_strvis(mn, cdata.mn, sizeof(mn), NVME_MODEL_NUMBER_LENGTH);
-		printf("%6s: %s\n", name, mn);
+		printf("%14s: %s\n", dp->d_name, mn);
 
 		for (i = 0; i < cdata.nn; i++) {
-			sprintf(name, "%s%d%s%d", NVME_CTRLR_PREFIX, ctrlr,
-			    NVME_NS_PREFIX, i+1);
+			sprintf(name, "%s%s%d", dp->d_name, NVME_NS_PREFIX,
+			    i+1);
 			read_namespace_data(fd, i+1, &nsdata);
 			if (nsdata.nsze == 0)
 				continue;
@@ -118,6 +132,8 @@ devlist(int argc, char *argv[])
 
 		close(fd);
 	}
+
+	closedir(dirp);
 
 	if (found == 0)
 		printf("No NVMe controllers found.\n");
