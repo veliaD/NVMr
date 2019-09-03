@@ -489,6 +489,143 @@ nvme_ns_bio_process(struct nvme_namespace *ns, struct bio *bp,
 	return (err);
 }
 
+static inline bool
+all_zeroes(uint8_t *ptr, size_t len)
+{
+	boolean_t retval;
+
+	retval = true;
+	while(len != 0) {
+		if (ptr[len] != 0) {
+			retval = false;
+			break;
+		}
+		len--;
+	}
+
+	return retval;
+}
+
+#define ALL_ZEROES(field) \
+	all_zeroes(field, sizeof(field))
+
+static void
+nvme_ns_find_uid(struct nvme_controller *ctrlr, uint32_t id,
+    struct nvme_namespace *ns)
+{
+	struct nvme_completion_poll_status	status;
+	uint8_t					*desclist, *crsr;
+	struct nvme_namespace_desclist		*desc;
+
+
+	ns->nns_gids.eui64_available = false;
+	ns->nns_gids.nguid_available = false;
+	ns->nns_gids.nuuid_available = false;
+
+	/* Attempt to find the globally unique IDs for namespace via CNS3 */
+
+	desclist = malloc(NVME_CNS_SZ, M_NVME, M_ZERO | M_WAITOK);
+	status.done = FALSE;
+	nvme_ctrlr_cmd_identify_nsdesclist(ctrlr, id, desclist, NVME_CNS_SZ,
+	    nvme_completion_poll_cb, &status);
+	while (status.done == FALSE) {
+		DELAY(5);
+	}
+
+	if (!nvme_completion_is_error(&status.cpl)) {
+		crsr = desclist;
+		do {
+			desc = (struct nvme_namespace_desclist *)crsr;
+			DBGSPEW("t:%hhu l:%hhu\n", desc->ndl_nidt,
+			    desc->ndl_nidl);
+			if (desc->ndl_nidl == 0) {
+				break;
+			}
+
+			switch(desc->ndl_nidt) {
+			case NSDESC_EUI64:
+				if ((desc->ndl_nid + sizeof(ns->nns_gids.
+				    eui64)) > (desclist + NVME_CNS_SZ)) {
+					ERRSPEW("Insufficient bytes in CNS3 "
+					    "response for EUI64 UID:%ld\n",
+					    crsr - desclist);
+					break;
+				}
+				ns->nns_gids.eui64_available = true;
+				memcpy(ns->nns_gids.eui64, desc->ndl_nid,
+				    sizeof(ns->nns_gids.eui64));
+				break;
+
+			case NSDESC_NGUID:
+				if ((desc->ndl_nid + sizeof(ns->nns_gids.
+				    nguid)) > (desclist + NVME_CNS_SZ)) {
+					ERRSPEW("Insufficient bytes in CNS3 "
+					    "response for NGUID UID:%ld\n",
+					    crsr - desclist);
+					break;
+				}
+				ns->nns_gids.nguid_available = true;
+				memcpy(ns->nns_gids.nguid, desc->ndl_nid,
+				    sizeof(ns->nns_gids.nguid));
+				break;
+
+			case NSDESC_NUUID:
+				if ((desc->ndl_nid + sizeof(ns->nns_gids.
+				    nuuid)) > (desclist + NVME_CNS_SZ)) {
+					ERRSPEW("Insufficient bytes in CNS3 "
+					    "response for NUUID UID:%ld\n",
+					    crsr - desclist);
+					break;
+				}
+				ns->nns_gids.nuuid_available = true;
+				memcpy(ns->nns_gids.nuuid, desc->ndl_nid,
+				    sizeof(ns->nns_gids.nuuid));
+				break;
+
+			default:
+				ERRSPEW("Unsupported Globally Unique NS ID "
+				    "t:%hhu l:%hhu\n", desc->ndl_nidt,
+				    desc->ndl_nidl);
+			}
+
+			crsr += desc->ndl_nidl +
+			    sizeof(struct nvme_namespace_desclist);
+		} while (crsr < (desclist + NVME_CNS_SZ));
+	}
+
+	free(desclist, M_NVME);
+
+	/* If the NGUID is not available through CNS3 check the CNS0 response */
+	if (!ns->nns_gids.nguid_available) {
+		if (!ALL_ZEROES(ns->nvmes_nsd.nguid)) {
+			nvme_printf(ctrlr, "Found NGUID in CNS0 for NSID:%u\n",
+			    id);
+			memcpy(ns->nns_gids.nguid, ns->nvmes_nsd.nguid,
+			    sizeof(ns->nns_gids.nguid));
+			ns->nns_gids.nguid_available = true;
+		} else {
+			nvme_printf(ctrlr, "No NGUID in CNS0 for NSID:%u\n",
+			    id);
+		}
+	}
+
+	/* If the EUI64 is not available through CNS3 check the CNS0 response */
+	if (!ns->nns_gids.eui64_available) {
+		if (!ALL_ZEROES(ns->nvmes_nsd.eui64)) {
+			nvme_printf(ctrlr, "Found EUI64 in CNS0 for NSID:%u\n",
+			    id);
+			memcpy(ns->nns_gids.eui64, ns->nvmes_nsd.eui64,
+			    sizeof(ns->nns_gids.eui64));
+			ns->nns_gids.eui64_available = true;
+		} else {
+			nvme_printf(ctrlr, "No EUI64 in CNS0 for NSID:%u\n",
+			    id);
+		}
+	}
+
+}
+
+
 int
 nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
     struct nvme_controller *ctrlr)
@@ -587,6 +724,18 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		NVME_CTRLR_DATA_VWC_PRESENT_MASK;
 	if (vwc_present)
 		ns->flags |= NVME_NS_FLUSH_SUPPORTED;
+
+	/* Check for Multi-Pathing support */
+	if (ns->nvmes_nsd.nmic & NVME_NS_DATA_NMIC_MAY_BE_SHARED_MASK) {
+		DBGSPEW("Invoking nvme_ns_find_uid(c:%p i:%u n:%p)\n", ctrlr,
+		    id, ns);
+		/* Populate the ns structure with the global IDs */
+		nvme_ns_find_uid(ctrlr, id, ns);
+		DBGSPEW("Done w/nvme_ns_find_uid()\n");
+	} else {
+		DBGSPEW("Not invoking nvme_ns_find_uid() for c:%p id:%u\n",
+		    ctrlr, id);
+	}
 
 	/*
 	 * cdev may have already been created, if we are reconstructing the

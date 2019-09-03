@@ -185,7 +185,7 @@ enum nvme_feature {
 #define NVME_MODEL_NUMBER_LENGTH	40
 #define NVME_FIRMWARE_REVISION_LENGTH	8
 
-#define NVME_MAX_NAMESPACES	(16)
+#define NVME_MAX_NAMESPACES	(48)
 
 #define NVME_MAX_CONSUMERS	(2)
 #define NVME_MAX_ASYNC_EVENTS	(8)
@@ -228,6 +228,25 @@ struct nvme_power_state {
 
 _Static_assert(sizeof(struct nvme_power_state) == 32, "bad size for nvme_power_state");
 
+
+#define NVME_CNS_SZ 4096 /* Data size returned from Identify Admin Command */
+
+struct nvme_namespace_desclist {
+	/** byte 0: Namespace Identifier Type **/
+	uint8_t			ndl_nidt;
+
+	/** byte 1: Namespace Identifier Length **/
+	uint8_t			ndl_nidl;
+
+	/** bytes 2-3: Reserved **/
+	uint16_t		ndl_resv0;
+
+	/** bytes 4 to (ndl_nidl + 3): Namespace Identifier **/
+	uint8_t			ndl_nid[0];
+
+} __packed __aligned(4);
+_Static_assert(sizeof(struct nvme_namespace_desclist) == 4,
+    "bad size for struct nvme_namespace_desclist");
 
 struct nvme_controller_data {
 
@@ -431,7 +450,16 @@ struct nvme_controller_data {
 	uint8_t			vs[1024];
 } __packed __aligned(4);
 
-_Static_assert(sizeof(struct nvme_controller_data) == 4096, "bad size for nvme_controller_data");
+_Static_assert(sizeof(struct nvme_controller_data) == NVME_CNS_SZ,
+    "bad size for nvme_controller_data");
+
+#define NSDESC_EUI64 1
+#define NSDESC_NGUID 2
+#define NSDESC_NUUID 3
+
+#define NS_EUI64SZ 8
+#define NS_NGUIDSZ 16
+#define NS_NUUIDSZ 16
 
 struct nvme_namespace_data {
 
@@ -502,10 +530,10 @@ struct nvme_namespace_data {
 	uint8_t			reserved5[40];
 
 	/** Namespace Globally Unique Identifier */
-	uint8_t			nguid[16];
+	uint8_t			nguid[NS_NGUIDSZ];
 
 	/** IEEE Extended Unique Identifier */
-	uint8_t			eui64[8];
+	uint8_t			eui64[NS_EUI64SZ];
 
 	/** lba format support */
 	uint32_t		lbaf[16];
@@ -515,7 +543,19 @@ struct nvme_namespace_data {
 	uint8_t			vendor_specific[3712];
 } __packed __aligned(4);
 
-_Static_assert(sizeof(struct nvme_namespace_data) == 4096, "bad size for nvme_namepsace_data");
+_Static_assert(sizeof(struct nvme_namespace_data) == NVME_CNS_SZ,
+    "bad size for nvme_namepsace_data");
+
+struct nvme_ns_gid {
+	boolean_t			eui64_available;
+	uint8_t				eui64[NS_EUI64SZ];
+
+	boolean_t			nguid_available;
+	uint8_t				nguid[NS_NGUIDSZ];
+
+	boolean_t			nuuid_available;
+	uint8_t				nuuid[NS_NUUIDSZ];
+};
 
 struct nvme_namespace {
 	struct nvme_controller		*nvmes_ctrlr;
@@ -526,6 +566,8 @@ struct nvme_namespace {
 	void				*cons_cookie[NVME_MAX_CONSUMERS];
 	uint32_t			stripesize;
 	struct mtx			lock;
+
+	struct nvme_ns_gid		nns_gids;
 };
 
 enum nvme_transport {
@@ -707,8 +749,15 @@ extern uma_zone_t	nvme_request_zone;
 boolean_t nvme_completion_is_retry(const struct nvme_completion *cpl);
 void nvme_qpair_print_command(struct nvme_qpair *qpair, struct nvme_command
     *cmd);
-void nvme_qpair_print_completion(struct nvme_qpair *qpair,
+void nvme_print_completion(struct nvme_controller *ctrlr,
     struct nvme_completion *cpl);
+static inline void
+nvme_qpair_print_completion(struct nvme_qpair *qpair,
+    struct nvme_completion *cpl)
+{
+	nvme_print_completion(qpair->gqctrlr, cpl);
+}
+
 void nvme_ns_destruct(struct nvme_namespace *ns);
 #endif /* _KERNEL */
 

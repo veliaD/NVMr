@@ -240,6 +240,10 @@ struct nvme_pci_controller {
 
 void	nvme_ns_test(struct nvme_namespace *ns, u_long cmd, caddr_t arg);
 
+void	nvme_ctrlr_cmd_identify_nsdesclist(struct nvme_controller *ctrlr,
+					  uint32_t nsid, void *payload,
+					  size_t payload_sz, nvme_cb_fn_t cb_fn,
+					  void *cb_arg);
 void	nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr,
 					   void *payload,
 					   nvme_cb_fn_t cb_fn, void *cb_arg);

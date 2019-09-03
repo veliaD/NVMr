@@ -33,6 +33,25 @@ __FBSDID("$FreeBSD$");
 #include "nvme_private.h"
 
 void
+nvme_ctrlr_cmd_identify_nsdesclist(struct nvme_controller *ctrlr, uint32_t nsid,
+	void *payload, size_t payload_sz, nvme_cb_fn_t cb_fn, void *cb_arg)
+{
+	struct nvme_request *req;
+	struct nvme_command *cmd;
+
+	req = nvme_allocate_request_vaddr(payload, payload_sz, cb_fn, cb_arg);
+
+	cmd = &req->cmd;
+	cmd->opc = NVME_OPC_IDENTIFY;
+	cmd->cdw10 = htole32(3);
+
+	cmd->nsid = htole32(nsid);
+
+	epoch_enter(global_epoch);
+	nvme_ctrlr_submit_admin_request(ctrlr, req);
+}
+
+void
 nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *payload,
 	nvme_cb_fn_t cb_fn, void *cb_arg)
 {
