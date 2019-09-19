@@ -92,7 +92,8 @@ static MALLOC_DEFINE(M_NVMR, "nvmr", "nvmr");
 
 int nvmr_command_async(nvmr_qpair_t q, struct nvme_request *req);
 void
-nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req);
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req,
+    bool ctrlrlckd);
 
 void nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp);
 void
@@ -120,7 +121,8 @@ nvmr_cleanup_q_next(nvmr_qpair_t q, struct nvmr_ncommcont *commp)
 		if (retval != 0) {
 			mtx_unlock(&q->nvmrq_gqp.qlock);
 			ERRSPEW("Failing req: %d\n", retval);
-			nvmr_ctrlr_post_failed_request(q->nvmrq_cntrlr, req);
+			nvmr_ctrlr_post_failed_request(q->nvmrq_cntrlr, req,
+			    false);
 			mtx_lock(&q->nvmrq_gqp.qlock);
 		}
 	}
@@ -436,7 +438,7 @@ nvmr_qpair_destroy(nvmr_qpair_t q)
 		NVMR_DECR_DEFIOCNT(q);
 		STAILQ_REMOVE(&q->nvmrq_defreqs, req, nvme_request, stailq);
 		mtx_unlock(&q->nvmrq_gqp.qlock);
-		nvmr_ctrlr_post_failed_request(q->nvmrq_cntrlr, req);
+		nvmr_ctrlr_post_failed_request(q->nvmrq_cntrlr, req, false);
 		mtx_lock(&q->nvmrq_gqp.qlock);
 	}
 	mtx_unlock(&q->nvmrq_gqp.qlock);
@@ -740,7 +742,7 @@ nvmr_all_cntrlrs_condemn_init(void)
 
 
 static void
-nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
+nvmr_cntrlr_dismantle(nvmr_cntrlr_t cntrlr)
 {
 	int count;
 
@@ -775,10 +777,12 @@ nvmr_cntrlr_destroy(nvmr_cntrlr_t cntrlr)
 	}
 
 	if (cntrlr->nvmrctr_nvmereg) {
+		DBGSPEW("Notifying NS consumers controller:%p is going away\n",
+		    cntrlr);
 		nvme_notify_fail_consumers(&cntrlr->nvmrctr_nvmec);
 	}
 
-	DBGSPEW("NVMr controller:%p wiped\n", cntrlr);
+	DBGSPEW("NVMr controller:%p dismantled\n", cntrlr);
 
 	return;
 }
@@ -794,7 +798,7 @@ nvmr_destroy_cntrlrs(void *arg, int pending)
 	count = 0;
 	while (cntrlr = TAILQ_FIRST(&nvmr_condemned_cntrlrs), cntrlr != NULL) {
 		count++;
-		nvmr_cntrlr_destroy(cntrlr);
+		nvmr_cntrlr_dismantle(cntrlr);
 
 		mtx_lock(&nvmr_cntrlrs_lstslock);
 		TAILQ_REMOVE(&nvmr_condemned_cntrlrs, cntrlr, nvmrctr_nxt);
@@ -905,16 +909,22 @@ nvmr_connmgmt_handler(struct rdma_cm_id *cmid, struct rdma_cm_event *event)
  * TODO: Unify into nvme_ctrlr_post_failed_request(): It's the same
  */
 void
-nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req)
+nvmr_ctrlr_post_failed_request(nvmr_cntrlr_t cntrlr, struct nvme_request *req,
+    bool ctrlrlckd)
 {
 	struct nvme_controller *ctrlr;
 
 	CONFIRMRDMACONTROLLER;
 	ctrlr = &cntrlr->nvmrctr_nvmec;
 
-	mtx_lock(&ctrlr->lockc);
+	if (!ctrlrlckd) {
+		mtx_lock(&ctrlr->lockc);
+	}
+	mtx_assert(&ctrlr->lockc, MA_OWNED);
 	STAILQ_INSERT_TAIL(&ctrlr->fail_req, req, stailq);
-	mtx_unlock(&ctrlr->lockc);
+	if (!ctrlrlckd) {
+		mtx_unlock(&ctrlr->lockc);
+	}
 	taskqueue_enqueue(ctrlr->taskqueue, &ctrlr->fail_req_task);
 }
 
@@ -1214,7 +1224,7 @@ nvmr_timeout(void *arg)
 	q = commp->nvmrsnd_q;
 	cntrlr = q->nvmrq_cntrlr;
 
-	nvmr_ctrlr_post_failed_request(cntrlr, req);
+	nvmr_ctrlr_post_failed_request(cntrlr, req, false);
 
 	gq = &q->nvmrq_gqp;
 	mtx_lock(&gq->qlock);
@@ -1372,9 +1382,9 @@ out:
 
 
 void
-nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req);
+nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req, bool ctrlrlckd);
 void
-nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
+nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req, bool ctrlrlckd)
 {
 	nvmr_cntrlr_t cntrlr;
 	struct nvme_qpair *gqp;
@@ -1394,7 +1404,7 @@ nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
 
 	if (retval != 0) {
 		ERRSPEW("Failing req:%p %d\n", req, retval);
-		nvmr_ctrlr_post_failed_request(cntrlr, req);
+		nvmr_ctrlr_post_failed_request(cntrlr, req, ctrlrlckd);
 	}
 
 	return;
@@ -1414,12 +1424,14 @@ nvmr_submit_req(nvmr_qpair_t q, struct nvme_request *req)
 	NVMR_INCR_QEDIOCNT(q);                                           \
 	epoch_exit(global_epoch);                                        \
 	atomic_add_64(&q->nvmrq_stat_cmdcnt, 1);                         \
-	nvmr_submit_req(q, req)
+	nvmr_submit_req(q, req, ctrlrlckd)
 
 void
-nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req);
+nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req,
+    bool ctrlrlckd);
 void
-nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req)
+nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req,
+    bool ctrlrlckd)
 {
 	NVMR_SUBMIT_BEGIN;
 	q = cntrlr->nvmrctr_adminqp;
@@ -1428,9 +1440,11 @@ nvmr_submit_adm_req(struct nvme_controller *ctrlr, struct nvme_request *req)
 
 
 void
-nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req);
+nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req,
+    bool ctrlrlckd);
 void
-nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req)
+nvmr_submit_io_req(struct nvme_controller *ctrlr, struct nvme_request *req,
+    bool ctrlrlckd)
 {
 	size_t idx;
 
@@ -1643,7 +1657,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	 * the nvmr_connmgmt_handler() contexts.  Assign the allocated q
 	 * structure into the qarr so that cleaning up the controller structure
 	 * will clean up the q as well.  nvmr_qpair_destroy() can no longer be
-	 * called except by nvmr_cntrlr_destroy()
+	 * called except by nvmr_cntrlr_dismantle()
 	 */
 	*qp = q;
 	PRE_ASYNC_CM_INVOCATION(NVMRQ_PRE_ADDR_RESOLV);
@@ -1856,7 +1870,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 
 	status.done = 0;
 	NVMR_INCR_QEDIOCNT(q);
-	nvmr_submit_req(q, req);
+	nvmr_submit_req(q, req, false);
 	while (!atomic_load_acq_int(&status.done)) {
 		pause("nvmr", HZ > 100 ? (HZ/100) : 1);
 	}                                                             \
@@ -1871,7 +1885,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 
 out:
 	if ((error != 0) && (q->nvmrq_state < NVMRQ_PRE_ADDR_RESOLV)) {
-		/* Cleanup the Q because nvmr_cntrlr_destroy() won't see it */
+		/* Cleanup the Q because nvmr_cntrlr_dismantle() won't see it */
 		nvmr_qpair_destroy(q);
 	}
 
@@ -1907,7 +1921,7 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 	cmd->nvmrcu_idnt.nvmrid_cntid = htole16(cntid);
 
 	ISSUE_WAIT_CHECK_REQ_START
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req, false);
 	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("IDENTIFY NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
@@ -1950,7 +1964,7 @@ nvmr_admin_propset(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t value,
 	cmd->nvmrcu_prst.nvmrps_value = value;
 
 	ISSUE_WAIT_CHECK_REQ_START
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req, false);
 	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("PROPSET NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
@@ -2041,7 +2055,7 @@ nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced)
 	cmd->nvmrcu_stft.nvmrsf_cmdw11 |= htole32(qcount) << NCQ_SHIFT;
 
 	ISSUE_WAIT_CHECK_REQ_START
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req, false);
 	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("Set IOQ count NVMe command failed!\n");
 		error = ENXIO;
@@ -2089,7 +2103,7 @@ nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
 	cmd->nvmrcu_prgt.nvmrpg_ofst = offset;
 
 	ISSUE_WAIT_CHECK_REQ_START
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req, false);
 	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("PROPGET NVMeoF command to subNQN \"%s\" failed!\n",
 		    cntrlr->nvmrctr_subnqn);
@@ -2333,44 +2347,18 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		goto out;
 	}
 
-	cntrlr->nvmrctr_nvmec.guard0 = cntrlr->nvmrctr_nvmec.guard1 = 
-	    0xDEADD00D8BADBEEF;
 	retval = nvmr_admin_identify(cntrlr, 0, 0, 1,
 	    &cntrlr->nvmrctr_nvmec.cdata, sizeof(cntrlr->nvmrctr_nvmec.cdata));
 	if (retval != 0) {
 		error = retval;
 		ERRSPEW("nvmr_admin_identify() failed:%d\n", retval);
 		goto out;
-	} else {
-		KASSERT((cntrlr->nvmrctr_nvmec.guard0 == 0xDEADD00D8BADBEEF) &&
-		    (cntrlr->nvmrctr_nvmec.guard1 == 0xDEADD00D8BADBEEF),
-		    ("%s@%d Guards failed! %lx %lx", __func__, __LINE__,
-		    cntrlr->nvmrctr_nvmec.guard0,
-		    cntrlr->nvmrctr_nvmec.guard1));
-		/*
-		identp = (uint8_t *)&cntrlr->nvmrctr_nvmec.cdata;
-		printf("       ");
-		for (count = 0; count < 16; count++) {
-			printf(" %02x", count);
-		}
-		printf("\n");
-		printf("       ");
-		for (count = 0; count < 16; count++) {
-			printf(" vv");
-		}
-		printf("\n");
-		for (count = 0; count < IDENTIFYLEN; count++) {
-			if ((count % 16) == 0) {
-				printf("0x%04x:", count);
-			}
-			printf(" %02hhX", identp[count]);
-			if ((count % 16) == 15) {
-				printf("\n");
-			}
-		}
-		 */
 	}
+
 	cd = &cntrlr->nvmrctr_nvmec.cdata;
+	/* Convert data to host endian */
+	nvme_controller_data_swapbytes(cd);
+
 	DBGSPEW("ioccsz:%u iorcsz:%u icdoff:%hu ctrattr:%hhu msdbd:%hhu\n",
 	     cd->nidf_ioccsz, cd->nidf_iorcsz, cd->nidf_icdoff,
 	     cd->nidf_ctrattr, cd->nidf_msdbd);
@@ -2378,6 +2366,8 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 		ERRSPEW("\n\t!!! Unimplemented inline data @%lu possible !!!\n",
 		    (cd->nidf_ioccsz*NVMR_PAYLOAD_UNIT) - sizeof(nvmr_stub_t));
 	}
+
+	cntrlr->nvmrctr_nvmec.nvme_version = cd->ver;
 
 	/* Retrieve the Maximum number of Queue Elements Supported */
 	bzero(&cntrlrcap, sizeof(cntrlrcap));
@@ -2409,47 +2399,6 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	    1 << (12 + cntrlrcap.nvmrcc_mpsmin);
 	cntrlr->nvmrctr_nvmec.ready_timeout_in_ms = cntrlrcap.nvmrcc_to *
 	    500;
-
-	if (prof->nvmrp_isdiscov) {
-		goto skipped_over_dev_creation;
-	}
-	/**********
-	 Come up with a unique unitnum that has enough room for
-	 NVME_MAX_NAMESPACES sub-unitnums.
-	 **********/
-	unitnum = (uint32_t)((uint64_t)(&cntrlr->nvmrctr_nvmec)/
-	    sizeof(cntrlr->nvmrctr_nvmec));
-	unitnum &= INT_MAX;
-	unitnum *= NVME_MAX_NAMESPACES;
-	unitnum /= NVME_MAX_NAMESPACES;
-	cntrlr->nvmrctr_nvmec.nvmec_unit = (int)(uint32_t)unitnum;
-
-	make_dev_args_init(&md_args);
-	md_args.mda_devsw = &nvmr_ctrlr_cdevsw;
-	md_args.mda_uid = UID_ROOT;
-	md_args.mda_gid = GID_WHEEL;
-	md_args.mda_mode = 0600;
-	md_args.mda_unit = cntrlr->nvmrctr_nvmec.nvmec_unit;/* Security hole? */
-	md_args.mda_si_drv1 = (void *)cntrlr;
-	retval = make_dev_s(&md_args, &cntrlr->nvmrctr_nvmec.ccdev, "nvme%d",
-	    md_args.mda_unit);
-	if (retval != 0) {
-		ERRSPEW("make_dev_s() for cntrlr:%p returned %d\n", cntrlr,
-		    retval);
-		error = retval;
-		goto out;
-	}
-	DBGSPEW("NVMe controller with unitnum:%d\n",
-	    cntrlr->nvmrctr_nvmec.nvmec_unit);
-
-	retval = nvme_ctrlr_construct_namespaces(&cntrlr->nvmrctr_nvmec);
-	if (retval != 0) {
-		error = retval;
-		ERRSPEW("nvme_ctrlr_construct_namespaces(c:%p):%d\n",
-		    &cntrlr->nvmrctr_nvmec, error);
-		goto out;
-	}
-skipped_over_dev_creation:
 
 
 	if (prof->nvmrp_isdiscov) {
@@ -2493,6 +2442,7 @@ skipped_over_dev_creation:
 	}
 	cntrlr->nvmrctr_nvmec.num_io_queues = nioq;
 	cntrlr->nvmrctr_nvmec.num_cpus_per_ioq = howmany(mp_ncpus, nioq);
+	cntrlr->nvmrctr_nvmec.max_hw_pend_io = (nioq * io_numsndqe * 3)/4;
 	DBGSPEW("%u cores will share an IOQ\n",
 	    cntrlr->nvmrctr_nvmec.num_cpus_per_ioq);
 
@@ -2534,6 +2484,45 @@ skipped_over_dev_creation:
 	}
 skipped_over_IOQ_creation:
 
+	if (prof->nvmrp_isdiscov) {
+		goto skipped_over_dev_creation;
+	}
+	/**********
+	 Come up with a unique unitnum that has enough room for
+	 NVME_MAX_NAMESPACES sub-unitnums.
+	 **********/
+	unitnum = (uint32_t)((uint64_t)(&cntrlr->nvmrctr_nvmec)/
+	    sizeof(cntrlr->nvmrctr_nvmec));
+	unitnum &= INT_MAX;
+	unitnum *= NVME_MAX_NAMESPACES;
+	unitnum /= NVME_MAX_NAMESPACES;
+	cntrlr->nvmrctr_nvmec.nvmec_unit = (int)(uint32_t)unitnum;
+
+	make_dev_args_init(&md_args);
+	md_args.mda_devsw = &nvmr_ctrlr_cdevsw;
+	md_args.mda_uid = UID_ROOT;
+	md_args.mda_gid = GID_WHEEL;
+	md_args.mda_mode = 0600;
+	md_args.mda_unit = cntrlr->nvmrctr_nvmec.nvmec_unit;/* Security hole? */
+	md_args.mda_si_drv1 = (void *)cntrlr;
+	retval = make_dev_s(&md_args, &cntrlr->nvmrctr_nvmec.ccdev, "nvme%d",
+	    md_args.mda_unit);
+	if (retval != 0) {
+		ERRSPEW("make_dev_s() for cntrlr:%p returned %d\n", cntrlr,
+		    retval);
+		error = retval;
+		goto out;
+	}
+
+	retval = nvme_ctrlr_construct_namespaces(&cntrlr->nvmrctr_nvmec);
+	if (retval != 0) {
+		error = retval;
+		ERRSPEW("nvme_ctrlr_construct_namespaces(c:%p):%d\n",
+		    &cntrlr->nvmrctr_nvmec, error);
+		goto out;
+	}
+skipped_over_dev_creation:
+
 
 	nvmr_cntrlr_inited(cntrlr);
 	BAIL_IF_CNTRLR_CONDEMNED(cntrlr); /* It's important this be here */
@@ -2547,6 +2536,10 @@ skipped_over_IOQ_creation:
 	nvme_register_controller(&cntrlr->nvmrctr_nvmec);
 	cntrlr->nvmrctr_nvmereg = TRUE;
 	nvme_notify_new_controller(&cntrlr->nvmrctr_nvmec);
+
+	printf("NVMr controller <%s,%hu,%s> %d registered\n",
+	    cntrlr->nvmrctr_ipv4str, ntohs(cntrlr->nvmrctr_port),
+	    cntrlr->nvmrctr_subnqn, cntrlr->nvmrctr_nvmec.nvmec_unit);
 skipped_over_nvme_registration:
 
 	error = 0;
@@ -2832,7 +2825,7 @@ nvmr_discovery(nvmr_ioctl_t *nvmri)
 	cmd->cdw10 = htole32(cmd->cdw10);
 
 	ISSUE_WAIT_CHECK_REQ_START;
-	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req);
+	nvme_ctrlr_submit_admin_request(&cntrlr->nvmrctr_nvmec, req, false);
 	ISSUE_WAIT_CHECK_REQ_END {
 		ERRSPEW("Discovery command to \"%s:%s\" failed!\n",
 		    addr.nvmra_pi.nvmrpi_ip, addr.nvmra_pi.nvmrpi_port);

@@ -58,7 +58,7 @@ static void	nvme_sim_poll(struct cam_sim *sim);
 
 struct nvme_sim_softc
 {
-	struct nvme_pci_controller	*s_ctrlr;
+	struct nvme_controller	*s_ctrlr;
 	struct cam_sim		*s_sim;
 	struct cam_path		*s_path;
 };
@@ -90,10 +90,9 @@ nvme_sim_nvmeio(struct cam_sim *sim, union ccb *ccb)
 	struct nvme_request	*req;
 	void			*payload;
 	uint32_t		size;
-	struct nvme_pci_controller *pctrlr;
+	struct nvme_controller *ctrlr;
 
-	pctrlr = sim2ctrlr(sim);
-	CONFIRMPCIECONTROLLER;
+	ctrlr = sim2ctrlr(sim);
 	payload = nvmeio->data_ptr;
 	size = nvmeio->dxfer_len;
 	/* SG LIST ??? */
@@ -113,14 +112,24 @@ nvme_sim_nvmeio(struct cam_sim *sim, union ccb *ccb)
 		xpt_done(ccb);
 		return;
 	}
+
 	ccb->ccb_h.status |= CAM_SIM_QUEUED;
 
 	memcpy(&req->cmd, &ccb->nvmeio.cmd, sizeof(ccb->nvmeio.cmd));
 
+	epoch_enter(global_epoch);
+	if (NVME_IS_CTRLR_FAILED(ctrlr)) {
+		epoch_exit(global_epoch);
+		nvme_free_request(req);
+		nvmeio->ccb_h.status = CAM_NO_HBA;
+		xpt_done(ccb);
+		return;
+	}
+
 	if (ccb->ccb_h.func_code == XPT_NVME_IO)
-		nvme_ctrlr_submit_io_request(&pctrlr->ctrlr, req);
+		nvme_ctrlr_submit_io_request(ctrlr, req, true);
 	else
-		nvme_ctrlr_submit_admin_request(&pctrlr->ctrlr, req);
+		nvme_ctrlr_submit_admin_request(ctrlr, req, true);
 }
 
 static uint32_t
@@ -145,16 +154,15 @@ nvme_link_kBps(struct nvme_pci_controller *pctrlr)
 static void
 nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 {
-	struct nvme_pci_controller *pctrlr;
+	struct nvme_controller *ctrlr;
 
 	CAM_DEBUG(ccb->ccb_h.path, CAM_DEBUG_TRACE,
 	    ("nvme_sim_action: func= %#x\n",
 		ccb->ccb_h.func_code));
 
-	pctrlr = sim2ctrlr(sim);
+	ctrlr = sim2ctrlr(sim);
 
-	CONFIRMPCIECONTROLLER;
-	mtx_assert(&pctrlr->ctrlr.lockc, MA_OWNED);
+	mtx_assert(&ctrlr->lockc, MA_OWNED);
 
 	switch (ccb->ccb_h.func_code) {
 	case XPT_CALC_GEOMETRY:		/* Calculate Geometry Totally nuts ? XXX */
@@ -176,7 +184,6 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 	case XPT_PATH_INQ:		/* Path routing inquiry */
 	{
 		struct ccb_pathinq	*cpi = &ccb->cpi;
-		device_t		dev = pctrlr->dev;
 
 		/*
 		 * NVMe may have multiple LUNs on the same path. Current generation
@@ -190,25 +197,39 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		cpi->hba_misc =  PIM_UNMAPPED | PIM_NOSCAN;
 		cpi->hba_eng_cnt = 0;
 		cpi->max_target = 0;
-		cpi->max_lun = pctrlr->ctrlr.cdata.nn;
-		cpi->maxio = pctrlr->ctrlr.max_xfer_size;
+		cpi->max_lun = ctrlr->cdata.nn;
+		cpi->maxio = ctrlr->max_xfer_size;
 		cpi->initiator_id = 0;
 		cpi->bus_id = cam_sim_bus(sim);
-		cpi->base_transfer_speed = nvme_link_kBps(pctrlr);
+		if (IS_NVMP_CNTRLR(ctrlr)) {
+			cpi->base_transfer_speed =
+			    nvme_link_kBps(GCNTRLR2PCI(ctrlr));
+			cpi->xport_specific.nvme.domain =
+			    pci_get_domain(GCNTRLR2PCI(ctrlr)->dev);
+			cpi->xport_specific.nvme.bus =
+			    pci_get_bus(GCNTRLR2PCI(ctrlr)->dev);
+			cpi->xport_specific.nvme.slot =
+			    pci_get_slot(GCNTRLR2PCI(ctrlr)->dev);
+			cpi->xport_specific.nvme.function =
+			    pci_get_function(GCNTRLR2PCI(ctrlr)->dev);
+			cpi->xport_specific.nvme.extra = 0;
+		} else {
+			cpi->base_transfer_speed = 1;
+			cpi->xport_specific.nvme.domain = UINT_MAX;
+			cpi->xport_specific.nvme.bus = UCHAR_MAX;
+			cpi->xport_specific.nvme.slot = UCHAR_MAX;
+			cpi->xport_specific.nvme.function = UCHAR_MAX;
+			cpi->xport_specific.nvme.extra = 0;
+		}
 		strlcpy(cpi->sim_vid, "FreeBSD", SIM_IDLEN);
 		strlcpy(cpi->hba_vid, "NVMe", HBA_IDLEN);
 		strlcpy(cpi->dev_name, cam_sim_name(sim), DEV_IDLEN);
 		cpi->unit_number = cam_sim_unit(sim);
 		cpi->transport = XPORT_NVME;		/* XXX XPORT_PCIE ? */
-		cpi->transport_version = nvme_mmio_read_4(pctrlr, vs);
+		cpi->transport_version = ctrlr->nvme_version;
 		cpi->protocol = PROTO_NVME;
-		cpi->protocol_version = nvme_mmio_read_4(pctrlr, vs);
+		cpi->protocol_version = ctrlr->nvme_version;
 		cpi->xport_specific.nvme.nsid = xpt_path_lun_id(ccb->ccb_h.path);
-		cpi->xport_specific.nvme.domain = pci_get_domain(dev);
-		cpi->xport_specific.nvme.bus = pci_get_bus(dev);
-		cpi->xport_specific.nvme.slot = pci_get_slot(dev);
-		cpi->xport_specific.nvme.function = pci_get_function(dev);
-		cpi->xport_specific.nvme.extra = 0;
 		cpi->ccb_h.status = CAM_REQ_CMP;
 		break;
 	}
@@ -217,22 +238,26 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		struct ccb_trans_settings	*cts;
 		struct ccb_trans_settings_nvme	*nvmep;
 		struct ccb_trans_settings_nvme	*nvmex;
-		device_t dev;
 		uint32_t status, caps;
 
-		dev = pctrlr->dev;
 		cts = &ccb->cts;
 		nvmex = &cts->xport_specific.nvme;
 		nvmep = &cts->proto_specific.nvme;
 
-		status = pcie_read_config(dev, PCIER_LINK_STA, 2);
-		caps = pcie_read_config(dev, PCIER_LINK_CAP, 2);
-		nvmex->valid = CTS_NVME_VALID_SPEC | CTS_NVME_VALID_LINK;
-		nvmex->spec = nvme_mmio_read_4(pctrlr, vs);
-		nvmex->speed = status & PCIEM_LINK_STA_SPEED;
-		nvmex->lanes = (status & PCIEM_LINK_STA_WIDTH) >> 4;
-		nvmex->max_speed = caps & PCIEM_LINK_CAP_MAX_SPEED;
-		nvmex->max_lanes = (caps & PCIEM_LINK_CAP_MAX_WIDTH) >> 4;
+		nvmex->valid = CTS_NVME_VALID_SPEC;
+		nvmex->spec = ctrlr->nvme_version;
+		if (IS_NVMP_CNTRLR(ctrlr)) {
+			status = pcie_read_config(GCNTRLR2PCI(ctrlr)->dev,
+			    PCIER_LINK_STA, 2);
+			caps = pcie_read_config(GCNTRLR2PCI(ctrlr)->dev,
+			    PCIER_LINK_CAP, 2);
+			nvmex->valid |= CTS_NVME_VALID_LINK;
+			nvmex->speed = status & PCIEM_LINK_STA_SPEED;
+			nvmex->lanes = (status & PCIEM_LINK_STA_WIDTH) >> 4;
+			nvmex->max_speed = caps & PCIEM_LINK_CAP_MAX_SPEED;
+			nvmex->max_lanes =
+			    (caps & PCIEM_LINK_CAP_MAX_WIDTH) >> 4;
+		}
 
 		/* XXX these should be something else maybe ? */
 		nvmep->valid = 1;
@@ -273,37 +298,33 @@ static void
 nvme_sim_poll(struct cam_sim *sim)
 {
 
-	nvme_ctrlr_poll(sim2ctrlr(sim));
+	nvmp_ctrlr_poll(sim2ctrlr(sim));
 }
 
 static void *
 nvme_sim_new_controller(struct nvme_controller *ctrlr)
 {
-	struct nvme_pci_controller *pctrlr;
 	struct nvme_sim_softc *sc;
 	struct cam_devq *devq;
 	int max_trans;
 
-	KASSERT_NVMP_CNTRLR(ctrlr);
-	pctrlr = GCNTRLR2PCI(ctrlr);
-	CONFIRMPCIECONTROLLER;
 	max_trans = ctrlr->max_hw_pend_io;
 	devq = cam_simq_alloc(max_trans);
 	if (devq == NULL)
 		return (NULL);
 
 	sc = malloc(sizeof(*sc), M_NVME, M_ZERO | M_WAITOK);
-	sc->s_ctrlr = pctrlr;
+	sc->s_ctrlr = ctrlr;
 
-	sc->s_sim = cam_sim_alloc(nvme_sim_action, nvme_sim_poll,
-	    "nvme", sc, ctrlr->nvmec_unit,
+	sc->s_sim = cam_sim_alloc(nvme_sim_action, IS_NVMP_CNTRLR(ctrlr) ?
+	    nvme_sim_poll : NULL, "nvme", sc, ctrlr->nvmec_unit,
 	    &ctrlr->lockc, max_trans, max_trans, devq);
 	if (sc->s_sim == NULL) {
 		printf("Failed to allocate a sim\n");
 		cam_simq_free(devq);
 		goto err1;
 	}
-	if (xpt_bus_register(sc->s_sim, pctrlr->dev, 0) != CAM_SUCCESS) {
+	if (xpt_bus_register(sc->s_sim, NULL, 0) != CAM_SUCCESS) {
 		printf("Failed to create a bus\n");
 		goto err2;
 	}
@@ -328,11 +349,10 @@ static void *
 nvme_sim_new_ns(struct nvme_namespace *ns, void *sc_arg)
 {
 	struct nvme_sim_softc *sc = sc_arg;
-	struct nvme_pci_controller *pctrlr = sc->s_ctrlr;
+	struct nvme_controller *ctrlr = sc->s_ctrlr;
 	union ccb *ccb;
 
-	CONFIRMPCIECONTROLLER;
-	mtx_lock(&pctrlr->ctrlr.lockc);
+	mtx_lock(&ctrlr->lockc);
 
 	ccb = xpt_alloc_ccb_nowait();
 	if (ccb == NULL) {
@@ -349,7 +369,7 @@ nvme_sim_new_ns(struct nvme_namespace *ns, void *sc_arg)
 
 	xpt_rescan(ccb);
 
-	mtx_unlock(&pctrlr->ctrlr.lockc);
+	mtx_unlock(&ctrlr->lockc);
 
 	return (ns);
 }
@@ -358,21 +378,20 @@ static void
 nvme_sim_controller_fail(void *ctrlr_arg)
 {
 	struct nvme_sim_softc *sc = ctrlr_arg;
-	struct nvme_pci_controller *pctrlr;
+	struct nvme_controller *ctrlr;
 
 	if (sc == NULL) {
 		goto out;
 	}
 
-	pctrlr = sc->s_ctrlr;
+	ctrlr = sc->s_ctrlr;
 
-	CONFIRMPCIECONTROLLER;
-	mtx_lock(&pctrlr->ctrlr.lockc);
+	mtx_lock(&ctrlr->lockc);
 	xpt_async(AC_LOST_DEVICE, sc->s_path, NULL);
 	xpt_free_path(sc->s_path);
 	xpt_bus_deregister(cam_sim_path(sc->s_sim));
 	cam_sim_free(sc->s_sim, /*free_devq*/TRUE);
-	mtx_unlock(&pctrlr->ctrlr.lockc);
+	mtx_unlock(&ctrlr->lockc);
 	free(sc, M_NVME);
 
 out:

@@ -749,55 +749,6 @@ extern int nvme_use_nvd;
 #endif /* _KERNEL */
 
 static inline
-void	nvme_power_state_swapbytes(struct nvme_power_state *s)
-{
-
-	s->mp = le16toh(s->mp);
-	s->enlat = le32toh(s->enlat);
-	s->exlat = le32toh(s->exlat);
-	s->idlp = le16toh(s->idlp);
-	s->actp = le16toh(s->actp);
-}
-
-static inline
-void	nvme_controller_data_swapbytes(struct nvme_controller_data *s)
-{
-	int i;
-
-	s->vid = le16toh(s->vid);
-	s->ssvid = le16toh(s->ssvid);
-	s->ctrlr_id = le16toh(s->ctrlr_id);
-	s->ver = le32toh(s->ver);
-	s->rtd3r = le32toh(s->rtd3r);
-	s->rtd3e = le32toh(s->rtd3e);
-	s->oaes = le32toh(s->oaes);
-	s->ctratt = le32toh(s->ctratt);
-	s->oacs = le16toh(s->oacs);
-	s->wctemp = le16toh(s->wctemp);
-	s->cctemp = le16toh(s->cctemp);
-	s->mtfa = le16toh(s->mtfa);
-	s->hmpre = le32toh(s->hmpre);
-	s->hmmin = le32toh(s->hmmin);
-	s->rpmbs = le32toh(s->rpmbs);
-	s->edstt = le16toh(s->edstt);
-	s->kas = le16toh(s->kas);
-	s->hctma = le16toh(s->hctma);
-	s->mntmt = le16toh(s->mntmt);
-	s->mxtmt = le16toh(s->mxtmt);
-	s->sanicap = le32toh(s->sanicap);
-	s->maxcmd = le16toh(s->maxcmd);
-	s->nn = le32toh(s->nn);
-	s->oncs = le16toh(s->oncs);
-	s->fuses = le16toh(s->fuses);
-	s->awun = le16toh(s->awun);
-	s->awupf = le16toh(s->awupf);
-	s->acwu = le16toh(s->acwu);
-	s->sgls = le32toh(s->sgls);
-	for (i = 0; i < 32; i++)
-		nvme_power_state_swapbytes(&s->power_state[i]);
-}
-
-static inline
 void	nvme_namespace_data_swapbytes(struct nvme_namespace_data *s)
 {
 	int i;

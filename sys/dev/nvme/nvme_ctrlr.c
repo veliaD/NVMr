@@ -811,7 +811,7 @@ nvme_ctrlr_construct_and_submit_aer(struct nvme_pci_controller *pctrlr,
 	req->timeout = FALSE;
 	req->cmd.opc = NVME_OPC_ASYNC_EVENT_REQUEST;
 	epoch_enter(global_epoch);
-	nvme_ctrlr_submit_admin_request(aer->nvmea_ctrlrp, req);
+	nvme_ctrlr_submit_admin_request(aer->nvmea_ctrlrp, req, false);
 }
 
 static void
@@ -955,6 +955,7 @@ nvme_ctrlr_start_config_hook(void *arg)
 	nvme_sysctl_initialize_ctrlr(pctrlr);
 	config_intrhook_disestablish(&pctrlr->config_hook);
 
+	pctrlr->ctrlr.nvme_version = nvme_mmio_read_4(pctrlr, vs);
 	pctrlr->ctrlr.is_initialized = 1;
 	nvme_notify_new_controller(&pctrlr->ctrlr);
 }
@@ -989,10 +990,13 @@ nvme_ctrlr_reset_task(void *arg, int pending)
  * Poll all the queues enabled on the device for completion.
  */
 void
-nvme_ctrlr_poll(struct nvme_pci_controller *pctrlr)
+nvmp_ctrlr_poll(struct nvme_controller *ctrlr)
 {
 	int i;
+	struct nvme_pci_controller *pctrlr;
 
+	KASSERT_NVMP_CNTRLR(ctrlr);
+	pctrlr = GCNTRLR2PCI(ctrlr);
 	CONFIRMPCIECONTROLLER;
 	nvmp_qpair_process_completions(&pctrlr->adminq.gqpair);
 
@@ -1007,13 +1011,13 @@ nvme_ctrlr_poll(struct nvme_pci_controller *pctrlr)
  * interrupts in the controller.
  */
 void
-nvme_ctrlr_intx_handler(void *arg)
+nvmp_ctrlr_intx_handler(void *arg)
 {
 	struct nvme_pci_controller *pctrlr = arg;
 
 	CONFIRMPCIECONTROLLER;
 	nvme_mmio_write_4(pctrlr, intms, 1);
-	nvme_ctrlr_poll(pctrlr);
+	nvmp_ctrlr_poll(&pctrlr->ctrlr);
 	nvme_mmio_write_4(pctrlr, intmc, 1);
 }
 
@@ -1035,7 +1039,7 @@ nvme_ctrlr_configure_intx(struct nvme_pci_controller *pctrlr)
 	}
 
 	bus_setup_intr(pctrlr->dev, pctrlr->res,
-	    INTR_TYPE_MISC | INTR_MPSAFE, NULL, nvme_ctrlr_intx_handler,
+	    INTR_TYPE_MISC | INTR_MPSAFE, NULL, nvmp_ctrlr_intx_handler,
 	    pctrlr, &pctrlr->tag);
 
 	if (pctrlr->tag == NULL) {
@@ -1138,9 +1142,9 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 
 	epoch_enter(global_epoch);
 	if (is_admin_cmd)
-		nvme_ctrlr_submit_admin_request(ctrlr, req);
+		nvme_ctrlr_submit_admin_request(ctrlr, req, false);
 	else
-		nvme_ctrlr_submit_io_request(ctrlr, req);
+		nvme_ctrlr_submit_io_request(ctrlr, req, false);
 
 	mtx_lock(mtx);
 	while (pt->driver_lock != NULL)
@@ -1440,7 +1444,8 @@ nvme_ctrlr_shutdown(struct nvme_pci_controller *pctrlr)
 }
 
 void
-nvmp_submit_adm_request(struct nvme_controller *ctrlr, struct nvme_request *req)
+nvmp_submit_adm_request(struct nvme_controller *ctrlr, struct nvme_request *req,
+    bool ctrlrlckd)
 {
 	struct nvme_pci_controller *pctrlr;
 
@@ -1452,7 +1457,8 @@ nvmp_submit_adm_request(struct nvme_controller *ctrlr, struct nvme_request *req)
 }
 
 void
-nvmp_submit_io_request(struct nvme_controller *ctrlr, struct nvme_request *req)
+nvmp_submit_io_request(struct nvme_controller *ctrlr, struct nvme_request *req,
+    bool ctrlrlckd)
 {
 	struct nvme_pci_qpair       *qpair;
 	struct nvme_pci_controller *pctrlr;

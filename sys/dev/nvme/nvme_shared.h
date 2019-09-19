@@ -599,9 +599,13 @@ struct nvme_controller {
 	/** maximum i/o size in bytes */
 	uint32_t		max_xfer_size;
 
-	uint64_t		guard0;
 	struct nvme_controller_data	cdata;
-	uint64_t		guard1;
+
+	/*
+	 * Present in PCIe transport controllers from version 1.0 and in
+	 * struct nvme_controller_data above from version 1.2
+	 */
+	uint32_t		nvme_version;
 
 	/** minimum page size supported by this controller in bytes */
 	uint32_t		min_page_size;
@@ -633,8 +637,8 @@ struct nvme_controller {
 	int				nvmec_unit;
 	void				*nvmec_tsp;
 	void 				(*nvmec_delist)(struct nvme_controller *);
-	void 				(*nvmec_subadmreq)(struct nvme_controller *, struct nvme_request *);
-	void 				(*nvmec_subioreq)(struct nvme_controller *, struct nvme_request *);
+	void 				(*nvmec_subadmreq)(struct nvme_controller *, struct nvme_request *, bool);
+	void 				(*nvmec_subioreq)(struct nvme_controller *, struct nvme_request *, bool);
 };
 #endif /* _KERNEL */
 
@@ -811,8 +815,10 @@ nvme_allocate_request_vaddr(void *payload, uint32_t payload_size,
 
 void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 
-#define nvme_ctrlr_submit_admin_request(c,r) (c)->nvmec_subadmreq((c), (r))
-#define nvme_ctrlr_submit_io_request(c,r) (c)->nvmec_subioreq((c), (r))
+#define nvme_ctrlr_submit_admin_request(c, r, l) \
+    (c)->nvmec_subadmreq((c), (r), (l))
+#define nvme_ctrlr_submit_io_request(c, r, l) \
+    (c)->nvmec_subioreq((c), (r), (l))
 
 void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
 void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
@@ -983,5 +989,54 @@ int	nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 				   struct nvme_pt_command *pt,
 				   uint32_t nsid, int is_user_buffer,
 				   int is_admin_cmd);
+
+static inline
+void	nvme_power_state_swapbytes(struct nvme_power_state *s)
+{
+
+	s->mp = le16toh(s->mp);
+	s->enlat = le32toh(s->enlat);
+	s->exlat = le32toh(s->exlat);
+	s->idlp = le16toh(s->idlp);
+	s->actp = le16toh(s->actp);
+}
+
+static inline
+void	nvme_controller_data_swapbytes(struct nvme_controller_data *s)
+{
+	int i;
+
+	s->vid = le16toh(s->vid);
+	s->ssvid = le16toh(s->ssvid);
+	s->ctrlr_id = le16toh(s->ctrlr_id);
+	s->ver = le32toh(s->ver);
+	s->rtd3r = le32toh(s->rtd3r);
+	s->rtd3e = le32toh(s->rtd3e);
+	s->oaes = le32toh(s->oaes);
+	s->ctratt = le32toh(s->ctratt);
+	s->oacs = le16toh(s->oacs);
+	s->wctemp = le16toh(s->wctemp);
+	s->cctemp = le16toh(s->cctemp);
+	s->mtfa = le16toh(s->mtfa);
+	s->hmpre = le32toh(s->hmpre);
+	s->hmmin = le32toh(s->hmmin);
+	s->rpmbs = le32toh(s->rpmbs);
+	s->edstt = le16toh(s->edstt);
+	s->kas = le16toh(s->kas);
+	s->hctma = le16toh(s->hctma);
+	s->mntmt = le16toh(s->mntmt);
+	s->mxtmt = le16toh(s->mxtmt);
+	s->sanicap = le32toh(s->sanicap);
+	s->maxcmd = le16toh(s->maxcmd);
+	s->nn = le32toh(s->nn);
+	s->oncs = le16toh(s->oncs);
+	s->fuses = le16toh(s->fuses);
+	s->awun = le16toh(s->awun);
+	s->awupf = le16toh(s->awupf);
+	s->acwu = le16toh(s->acwu);
+	s->sgls = le32toh(s->sgls);
+	for (i = 0; i < 32; i++)
+		nvme_power_state_swapbytes(&s->power_state[i]);
+}
 
 #endif /* __NVME_SHARED_H__ */

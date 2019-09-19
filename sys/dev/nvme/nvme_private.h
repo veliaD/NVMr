@@ -159,6 +159,8 @@ struct nvme_pci_qpair {
     ("%s@%d NOT a PCIe controller!\n", __func__, __LINE__))
 #define KASSERT_NVMP_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_PCIE, \
     ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
+#define IS_NVMP_CNTRLR(c) ((c)->nvmec_ttype == NVMET_PCIE)
+
 /*
  * One of these per allocated PCI device.
  */
@@ -298,9 +300,9 @@ void	nvme_ctrlr_reset(struct nvme_pci_controller *pctrlr);
 /* pctrlr defined as void * to allow use with config_intrhook. */
 void	nvme_ctrlr_start_config_hook(void *ctrlr_arg);
 void	nvmp_submit_adm_request(struct nvme_controller *ctrlr,
-					struct nvme_request *req);
+				struct nvme_request *req, bool ctrlrlckd);
 void	nvmp_submit_io_request(struct nvme_controller *ctrlr,
-					struct nvme_request *req);
+				struct nvme_request *req, bool ctrlrlckd);
 void	nvme_ctrlr_post_failed_request(struct nvme_pci_controller *pctrlr,
 				       struct nvme_request *req);
 
@@ -385,7 +387,7 @@ void	nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 				    uint32_t log_page_size);
 void	nvme_notify_ns(struct nvme_pci_controller *pctrlr, int nsid);
 
-void	nvme_ctrlr_intx_handler(void *arg);
-void	nvme_ctrlr_poll(struct nvme_pci_controller *pctrlr);
+void	nvmp_ctrlr_intx_handler(void *arg);
+void	nvmp_ctrlr_poll(struct nvme_controller *pctrlr);
 
 #endif /* __NVME_PRIVATE_H__ */

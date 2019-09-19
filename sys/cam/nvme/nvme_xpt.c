@@ -736,12 +736,15 @@ nvme_announce_periph(struct cam_periph *periph)
 
 	/* Ask the SIM for its base transfer speed */
 	xpt_path_inq(&cpi, periph->path);
-	printf("%s%d: nvme version %d.%d x%d (max x%d) lanes PCIe Gen%d (max Gen%d) link",
-	    periph->periph_name, periph->unit_number,
+	printf("%s%d: nvme version %d.%d", periph->periph_name,
+	    periph->unit_number,
 	    NVME_MAJOR(nvmex->spec),
-	    NVME_MINOR(nvmex->spec),
-	    nvmex->lanes, nvmex->max_lanes,
-	    nvmex->speed, nvmex->max_speed);
+	    NVME_MINOR(nvmex->spec));
+	if (nvmex->valid & CTS_NVME_VALID_LINK) {
+		printf(" x%d (max x%d) lanes PCIe Gen%d (max Gen%d) link",
+		    nvmex->lanes, nvmex->max_lanes,
+		    nvmex->speed, nvmex->max_speed);
+	}
 	printf("\n");
 }
 
