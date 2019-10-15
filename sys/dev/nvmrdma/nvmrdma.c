@@ -2408,7 +2408,7 @@ nvmr_cntrlr_create(nvmr_addr_t *addr, nvmr_cntrlrprof_t *prof,
 	 Now set up the IO Qs
 	 **********/
 	ibd = cntrlr->nvmrctr_adminqp->nvmrq_cmid->device;
-	reqioqcount = MIN(mp_ncpus, ibd->num_comp_vectors);
+	reqioqcount = MAX(mp_ncpus, ibd->num_comp_vectors);
 	if (reqioqcount == 0) {
 		error = ENOSPC;
 		ERRSPEW("Failed to get sane value for IOQ count, mp_ncpus:%d "
