@@ -209,6 +209,13 @@ delete_path_from_ndisk(struct nvd_disk *ndisk, struct nvd_path *path)
 	}
 
 	mtx_unlock_spin(&ndisk->pathslck);
+
+	/*
+	 * Now that the path cannot be reached via .currpath wait for
+	 * and references to it to drop off.  When delete_path_from_ndisk()
+	 * returns the expectation is that it will be safe to free() the path
+	 */
+	epoch_wait(global_epoch);
 }
 
 static void
@@ -262,24 +269,33 @@ nvd_bio_submit(struct nvd_disk *ndisk, struct bio *bp)
 {
 	int err;
 	struct nvd_path *path, *prevpath, *tmpath;
+	struct nvme_namespace *ns;
 
 	bp->bio_driver1 = NULL;
 
-	/* veliath: The increment below won't scale...*/
+	/* veliaD: The increment below won't scale...*/
 	atomic_add_int(&ndisk->cur_depth, 1);
 
 	prevpath = NULL;
 	err = 0;
 	do {
+		epoch_enter(global_epoch);/* Delay delete_path_from_ndisk()...*/
 		path = (void *)atomic_load_acq_ptr(
 		    (volatile void *)&ndisk->currpath);
 		if ((prevpath != path) && (path != NULL)) {
-			err = nvme_ns_bio_process(path->ns, bp, nvd_done);
+			ns = path->ns; /* Lookup must be in critical-section */
+			epoch_exit(global_epoch); /*...until this point*/
+
+			err = nvme_ns_bio_process(ns, bp, nvd_done);
 			prevpath = path;
 		} else if (path == NULL) {
+			epoch_exit(global_epoch); /*...until this point*/
+
 			DBGSPEW("No paths found, ndisk:%p!\n", ndisk);
 			err = ENODEV;
 		} else {
+			epoch_exit(global_epoch); /*...until this point*/
+
 			KASSERT((prevpath == path) && (err == ESHUTDOWN),
 			    ("prev:%p p:%p e:%d\n", prevpath, path, err));
 
@@ -373,6 +389,7 @@ nvd_ioctl(struct disk *disk, u_long cmd, void *data, int fflag,
 static int
 nvd_dump(void *arg, void *virt, vm_offset_t phys, off_t offset, size_t len)
 {
+	struct nvme_namespace *ns;
 	struct nvd_disk *ndisk;
 	struct nvd_path *path;
 	struct disk *dp;
@@ -381,10 +398,14 @@ nvd_dump(void *arg, void *virt, vm_offset_t phys, off_t offset, size_t len)
 	dp = arg;
 	ndisk = dp->d_drv1;
 
+	epoch_enter(global_epoch);/* Delay delete_path_from_ndisk()...*/
 	path = (void *)atomic_load_acq_ptr((volatile void *)&ndisk->currpath);
 	if (path != NULL) {
-		err = nvme_ns_dump(path->ns, virt, offset, len);
+		ns = path->ns;
+		epoch_exit(global_epoch);
+		err = nvme_ns_dump(ns, virt, offset, len);
 	} else {
+		epoch_exit(global_epoch);
 		err = ENODEV;
 	}
 	return (err);
