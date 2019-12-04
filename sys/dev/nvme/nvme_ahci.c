@@ -1,4 +1,5 @@
 /*-
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
  * Copyright (C) 2017 Olivier Houchard
  *
  * Redistribution and use in source and binary forms, with or without
@@ -51,7 +52,7 @@ static device_method_t nvme_ahci_methods[] = {
 static driver_t nvme_ahci_driver = {
 	"nvme",
 	nvme_ahci_methods,
-	sizeof(struct nvme_controller),
+	sizeof(struct nvme_pci_controller),
 };
 
 DRIVER_MODULE(nvme, ahci, nvme_ahci_driver, nvme_devclass, NULL, 0);
@@ -65,55 +66,55 @@ nvme_ahci_probe (device_t device)
 static int
 nvme_ahci_attach(device_t dev)
 {
-	struct nvme_controller*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller*pctrlr = DEVICE2SOFTC(dev);
 	int ret;
 
 	/* Map MMIO registers */
-	ctrlr->resource_id = 0;
+	pctrlr->resource_id = 0;
 
-	ctrlr->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
-	    &ctrlr->resource_id, RF_ACTIVE);
+	pctrlr->resource = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
+	    &pctrlr->resource_id, RF_ACTIVE);
 
-	if(ctrlr->resource == NULL) {
-		nvme_printf(ctrlr, "unable to allocate mem resource\n");
+	if(pctrlr->resource == NULL) {
+		nvme_printf(&(pctrlr->ctrlr), "unable to allocate mem resource\n");
 		ret = ENOMEM;
 		goto bad;
 	}
-	ctrlr->bus_tag = rman_get_bustag(ctrlr->resource);
-	ctrlr->bus_handle = rman_get_bushandle(ctrlr->resource);
-	ctrlr->regs = (struct nvme_registers *)ctrlr->bus_handle;
+	pctrlr->bus_tag = rman_get_bustag(pctrlr->resource);
+	pctrlr->bus_handle = rman_get_bushandle(pctrlr->resource);
+	pctrlr->regs = (struct nvme_registers *)pctrlr->bus_handle;
 
 	/* Allocate and setup IRQ */
-	ctrlr->rid = 0;
-	ctrlr->res = bus_alloc_resource_any(dev, SYS_RES_IRQ,
-	    &ctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
+	pctrlr->rid = 0;
+	pctrlr->res = bus_alloc_resource_any(dev, SYS_RES_IRQ,
+	    &pctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
 
-	if (ctrlr->res == NULL) {
-		nvme_printf(ctrlr, "unable to allocate shared IRQ\n");
+	if (pctrlr->res == NULL) {
+		nvme_printf(&(pctrlr->ctrlr), "unable to allocate shared IRQ\n");
 		ret = ENOMEM;
 		goto bad;
 	}
 
-	ctrlr->msix_enabled = 0;
-	ctrlr->num_io_queues = 1;
-	if (bus_setup_intr(dev, ctrlr->res,
+	pctrlr->msix_enabled = 0;
+	pctrlr->ctrlr.num_io_queues = 1;
+	if (bus_setup_intr(dev, pctrlr->res,
 	    INTR_TYPE_MISC | INTR_MPSAFE, NULL, nvme_ctrlr_intx_handler,
-	    ctrlr, &ctrlr->tag) != 0) {
-		nvme_printf(ctrlr, "unable to setup intx handler\n");
+	    pctrlr, &pctrlr->tag) != 0) {
+		nvme_printf(&(pctrlr->ctrlr), "unable to setup intx handler\n");
 		ret = ENOMEM;
 		goto bad;
 	}
-	ctrlr->tag = (void *)0x1;
+	pctrlr->tag = (void *)0x1;
 
 	return nvme_attach(dev);
 bad:
-	if (ctrlr->resource != NULL) {
+	if (pctrlr->resource != NULL) {
 		bus_release_resource(dev, SYS_RES_MEMORY,
-		    ctrlr->resource_id, ctrlr->resource);
+		    pctrlr->resource_id, pctrlr->resource);
 	}
-	if (ctrlr->res)
-		bus_release_resource(ctrlr->dev, SYS_RES_IRQ,
-		    rman_get_rid(ctrlr->res), ctrlr->res);
+	if (pctrlr->res)
+		bus_release_resource(pctrlr->dev, SYS_RES_IRQ,
+		    rman_get_rid(pctrlr->res), pctrlr->res);
 	return (ret);
 }
 

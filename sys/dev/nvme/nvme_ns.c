@@ -1,6 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
  * Copyright (C) 2012-2013 Intel Corporation
  * All rights reserved.
  *
@@ -85,7 +86,7 @@ nvme_ns_ioctl(struct cdev *cdev, u_long cmd, caddr_t arg, int flag,
 	case NVME_GET_NSID:
 	{
 		struct nvme_get_nsid *gnsid = (struct nvme_get_nsid *)arg;
-		strncpy(gnsid->cdev, device_get_nameunit(ctrlr->dev),
+		strncpy(gnsid->cdev, ctrlr->nvmec_nameunit,
 		    sizeof(gnsid->cdev));
 		gnsid->nsid = ns->id;
 		break;
@@ -513,6 +514,8 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	uint8_t					flbas_fmt;
 	uint8_t					vwc_present;
 
+	struct nvme_pci_controller *pctrlr;
+
 	ns->ctrlr = ctrlr;
 	ns->id = id;
 
@@ -560,26 +563,32 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		return (ENXIO);
 	}
 
+	ns->boundary = ns->data.noiob * nvme_ns_get_sector_size(ns);
 	/*
 	 * Older Intel devices advertise in vendor specific space an alignment
 	 * that improves performance.  If present use for the stripe size.  NVMe
 	 * 1.3 standardized this as NOIOB, and newer Intel drives use that.
 	 */
-	switch (pci_get_devid(ctrlr->dev)) {
-	case 0x09538086:		/* Intel DC PC3500 */
-	case 0x0a538086:		/* Intel DC PC3520 */
-	case 0x0a548086:		/* Intel DC PC4500 */
-	case 0x0a558086:		/* Dell Intel P4600 */
-		if (ctrlr->cdata.vs[3] != 0)
-			ns->boundary =
-			    (1 << ctrlr->cdata.vs[3]) * ctrlr->min_page_size;
-		else
-			ns->boundary = 0;
-		break;
-	default:
-		ns->boundary = ns->data.noiob * nvme_ns_get_sector_size(ns);
-		break;
+	if (ctrlr->nvmec_ttype == NVMET_PCIE) {
+		pctrlr = GCNTRLR2PCI(ctrlr);
+		CONFIRMPCIECONTROLLER;
+
+		switch (pci_get_devid(pctrlr->dev)) {
+		case 0x09538086:		/* Intel DC PC3500 */
+		case 0x0a538086:		/* Intel DC PC3520 */
+		case 0x0a548086:		/* Intel DC PC4500 */
+		case 0x0a558086:		/* Dell Intel P4600 */
+			if (ctrlr->cdata.vs[3] != 0)
+				ns->boundary = (1 << ctrlr->cdata.vs[3]) *
+				    ctrlr->min_page_size;
+			else
+				ns->boundary = 0;
+			break;
+		default:
+			break;
+		}
 	}
+
 
 	if (nvme_ctrlr_has_dataset_mgmt(&ctrlr->cdata))
 		ns->flags |= NVME_NS_DEALLOCATE_SUPPORTED;
@@ -600,7 +609,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	 * Namespace IDs start at 1, so we need to subtract 1 to create a
 	 *  correct unit number.
 	 */
-	unit = device_get_unit(ctrlr->dev) * NVME_MAX_NAMESPACES + ns->id - 1;
+	unit = ctrlr->nvmec_unit * NVME_MAX_NAMESPACES + ns->id - 1;
 
 	make_dev_args_init(&md_args);
 	md_args.mda_devsw = &nvme_ns_cdevsw;
@@ -608,7 +617,7 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 	md_args.mda_mode = 0600;
 	md_args.mda_si_drv1 = ns;
 	res = make_dev_s(&md_args, &ns->cdev, "nvme%dns%d",
-	    device_get_unit(ctrlr->dev), ns->id);
+	    ctrlr->nvmec_unit, ns->id);
 	if (res != 0)
 		return (ENXIO);
 

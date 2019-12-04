@@ -1542,6 +1542,7 @@ struct bio;
 struct thread;
 
 struct nvme_namespace;
+struct nvme_pci_controller;
 struct nvme_controller;
 struct nvme_consumer;
 
@@ -1564,11 +1565,11 @@ int	nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 				   int is_admin_cmd);
 
 /* Admin functions */
-void	nvme_ctrlr_cmd_set_feature(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *ctrlr,
 				   uint8_t feature, uint32_t cdw11,
 				   void *payload, uint32_t payload_size,
 				   nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_get_feature(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *ctrlr,
 				   uint8_t feature, uint32_t cdw11,
 				   void *payload, uint32_t payload_size,
 				   nvme_cb_fn_t cb_fn, void *cb_arg);
@@ -1604,9 +1605,9 @@ struct nvme_consumer *	nvme_register_consumer(nvme_cons_ns_fn_t    ns_fn,
 void		nvme_unregister_consumer(struct nvme_consumer *consumer);
 
 /* Controller helper functions */
-device_t	nvme_ctrlr_get_device(struct nvme_controller *ctrlr);
+device_t	nvme_ctrlr_get_device(struct nvme_pci_controller *ctrlr);
 const struct nvme_controller_data *
-		nvme_ctrlr_get_data(struct nvme_controller *ctrlr);
+		nvme_ctrlr_get_data(struct nvme_pci_controller *ctrlr);
 static inline bool
 nvme_ctrlr_has_dataset_mgmt(const struct nvme_controller_data *cd)
 {
@@ -1682,6 +1683,14 @@ void	nvme_ns_trim_cmd(struct nvme_command *cmd, uint32_t nsid,
 }
 
 extern int nvme_use_nvd;
+
+void nvme_register_controller(struct nvme_controller *);
+void nvme_unregister_controller(struct nvme_controller *);
+
+#define nvme_ctrlr_submit_admin_request(c, r) (c)->nvmec_subadmreq((c), (r))
+#define nvme_ctrlr_submit_io_request(c, r) (c)->nvmec_subioreq((c), (r))
+
+#define NVME_IS_CTRLR_FAILED(c) ((c)->is_failed)
 
 #endif /* _KERNEL */
 

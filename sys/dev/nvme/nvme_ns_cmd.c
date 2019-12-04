@@ -1,6 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
  * Copyright (C) 2012 Intel Corporation
  * All rights reserved.
  *
@@ -182,13 +183,13 @@ nvme_ns_dump(struct nvme_namespace *ns, void *virt, off_t offset, size_t len)
 		nvme_ns_flush_cmd(cmd, ns->id);
 
 	nvme_ctrlr_submit_io_request(ns->ctrlr, req);
-	if (req->qpair == NULL)
+	if (req->rqpair == NULL)
 		return (ENXIO);
 
 	i = 0;
 	while ((i++ < NVD_DUMP_TIMEOUT) && (status.done == FALSE)) {
 		DELAY(5);
-		nvme_qpair_process_completions(req->qpair);
+		nvmp_qpair_process_completions(req->rqpair);
 	}
 
 	/*

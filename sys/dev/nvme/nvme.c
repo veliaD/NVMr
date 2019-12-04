@@ -1,6 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
+ * Copyright (c) 2019 Dell Inc. or its subsidiaries. All Rights Reserved.
  * Copyright (C) 2012-2014 Intel Corporation
  * All rights reserved.
  *
@@ -33,6 +34,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/conf.h>
 #include <sys/module.h>
+#include <sys/lock.h>
+#include <sys/sx.h>
 
 #include <vm/uma.h>
 
@@ -51,7 +54,6 @@ struct nvme_consumer nvme_consumer[NVME_MAX_CONSUMERS];
 
 uma_zone_t	nvme_request_zone;
 int32_t		nvme_retry_count;
-
 
 MALLOC_DEFINE(M_NVME, "nvme", "nvme(4) memory allocations");
 
@@ -79,13 +81,21 @@ nvme_uninit(void)
 
 SYSUNINIT(nvme_unregister, SI_SUB_DRIVERS, SI_ORDER_SECOND, nvme_uninit, NULL);
 
+/*
+ * The list of NVMe controllers registered with the NVMe sub-system
+ */
+static STAILQ_HEAD(, nvme_controller) nclst_hd =
+    STAILQ_HEAD_INITIALIZER(nclst_hd);
+static struct sx nclst_lock;
+
 int
 nvme_shutdown(device_t dev)
 {
-	struct nvme_controller	*ctrlr;
+	struct nvme_pci_controller	*pctrlr;
 
-	ctrlr = DEVICE2SOFTC(dev);
-	nvme_ctrlr_shutdown(ctrlr);
+	pctrlr = DEVICE2SOFTC(dev);
+	CONFIRMPCIECONTROLLER;
+	nvme_ctrlr_shutdown(pctrlr);
 
 	return (0);
 }
@@ -123,22 +133,56 @@ nvme_dump_completion(struct nvme_completion *cpl)
 	    cpl->cid, p, sc, sct, m, dnr);
 }
 
+void
+nvme_register_controller(struct nvme_controller *ctrlr)
+{
+	nvme_printf(ctrlr,"c:%p\n", ctrlr);
+	sx_xlock(&nclst_lock);
+	STAILQ_INSERT_TAIL(&nclst_hd, ctrlr, nvmec_lst);
+	sx_xunlock(&nclst_lock);
+}
+
+void
+nvme_unregister_controller(struct nvme_controller *ctrlr)
+{
+	nvme_printf(ctrlr,"c:%p\n", ctrlr);
+	sx_xlock(&nclst_lock);
+	STAILQ_REMOVE(&nclst_hd, ctrlr, nvme_controller, nvmec_lst);
+	sx_xunlock(&nclst_lock);
+}
+
+static void
+nvmp_delist_cb(struct nvme_controller *ctrlr)
+{
+	nvme_printf(ctrlr, "nvmp_delist_cb() invoked for ctrlr:%p\n", ctrlr);
+	return;
+}
+
 int
 nvme_attach(device_t dev)
 {
-	struct nvme_controller	*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
 	int			status;
 
-	status = nvme_ctrlr_construct(ctrlr, dev);
+	pctrlr->ctrlr.nvmec_tsp = pctrlr;
+	pctrlr->ctrlr.nvmec_ttype = NVMET_PCIE;
+	pctrlr->ctrlr.nvmec_delist = &nvmp_delist_cb;
+	pctrlr->ctrlr.nvmec_subadmreq = &nvmp_submit_adm_request;
+	pctrlr->ctrlr.nvmec_subioreq = &nvmp_submit_io_request;
+	strncpy(pctrlr->very_first_field, NVMP_STRING, NVME_VFFSTRSZ);
+
+	status = nvme_ctrlr_construct(pctrlr, dev);
 	if (status != 0) {
-		nvme_ctrlr_destruct(ctrlr, dev);
+		nvme_ctrlr_destruct(pctrlr, dev);
 		return (status);
 	}
 
-	ctrlr->config_hook.ich_func = nvme_ctrlr_start_config_hook;
-	ctrlr->config_hook.ich_arg = ctrlr;
+	pctrlr->config_hook.ich_func = nvme_ctrlr_start_config_hook;
+	pctrlr->config_hook.ich_arg = pctrlr;
 
-	config_intrhook_establish(&ctrlr->config_hook);
+	config_intrhook_establish(&pctrlr->config_hook);
+
+	nvme_register_controller(&pctrlr->ctrlr);
 
 	return (0);
 }
@@ -146,9 +190,12 @@ nvme_attach(device_t dev)
 int
 nvme_detach (device_t dev)
 {
-	struct nvme_controller	*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller	*pctrlr = DEVICE2SOFTC(dev);
 
-	nvme_ctrlr_destruct(ctrlr, dev);
+	CONFIRMPCIECONTROLLER;
+	nvme_unregister_controller(&pctrlr->ctrlr);
+
+	nvme_ctrlr_destruct(pctrlr, dev);
 	return (0);
 }
 
@@ -160,6 +207,7 @@ nvme_notify(struct nvme_consumer *cons,
 	void			*ctrlr_cookie;
 	int			cmpset, ns_idx;
 
+	nvme_printf(ctrlr, "Notifying consumer for ctrlr:%p\n", ctrlr);
 	/*
 	 * The consumer may register itself after the nvme devices
 	 *  have registered with the kernel, but before the
@@ -167,37 +215,48 @@ nvme_notify(struct nvme_consumer *cons,
 	 *  return here, and when initialization completes, the
 	 *  controller will make sure the consumer gets notified.
 	 */
-	if (!ctrlr->is_initialized)
+	if (!ctrlr->is_initialized) {
+		nvme_printf(ctrlr, "Uninited:not registering controller:%p\n",
+		    ctrlr);
 		return;
+	}
 
 	cmpset = atomic_cmpset_32(&ctrlr->notification_sent, 0, 1);
-	if (cmpset == 0)
+
+	if (cmpset == 0) {
+		nvme_printf(ctrlr, "Returning w/o registering controller:%u\n",
+		    ctrlr->notification_sent);
 		return;
+	}
 
 	if (cons->ctrlr_fn != NULL)
 		ctrlr_cookie = (*cons->ctrlr_fn)(ctrlr);
 	else
 		ctrlr_cookie = (void *)(uintptr_t)0xdeadc0dedeadc0de;
-	ctrlr->cons_cookie[cons->id] = ctrlr_cookie;
+	ctrlr->ccons_cookie[cons->id] = ctrlr_cookie;
 
 	/* ctrlr_fn has failed.  Nothing to notify here any more. */
 	if (ctrlr_cookie == NULL)
 		return;
 
-	if (ctrlr->is_failed) {
-		ctrlr->cons_cookie[cons->id] = NULL;
+	if (NVME_IS_CTRLR_FAILED(ctrlr)) {
+		ctrlr->ccons_cookie[cons->id] = NULL;
 		if (cons->fail_fn != NULL)
 			(*cons->fail_fn)(ctrlr_cookie);
 		/*
 		 * Do not notify consumers about the namespaces of a
 		 *  failed controller.
 		 */
+		nvme_printf(ctrlr, "Returning w/o examing NSes controller\n");
 		return;
 	}
 	for (ns_idx = 0; ns_idx < min(ctrlr->cdata.nn, NVME_MAX_NAMESPACES); ns_idx++) {
-		ns = &ctrlr->ns[ns_idx];
-		if (ns->data.nsze == 0)
+		nvme_printf(ctrlr, "Examing NS idx:%d\n", ns_idx);
+		ns = &ctrlr->cns[ns_idx];
+		nvme_printf(ctrlr, "\tsize:%lu\n", ns->data.nsze);
+		if (ns->data.nsze == 0) {
 			continue;
+		}
 		if (cons->ns_fn != NULL)
 			ns->cons_cookie[cons->id] =
 			    (*cons->ns_fn)(ns, ctrlr_cookie);
@@ -219,23 +278,18 @@ nvme_notify_new_controller(struct nvme_controller *ctrlr)
 static void
 nvme_notify_new_consumer(struct nvme_consumer *cons)
 {
-	device_t		*devlist;
-	struct nvme_controller	*ctrlr;
-	int			dev_idx, devcount;
+	struct nvme_controller     *ctrlr;
 
-	if (devclass_get_devices(nvme_devclass, &devlist, &devcount))
-		return;
-
-	for (dev_idx = 0; dev_idx < devcount; dev_idx++) {
-		ctrlr = DEVICE2SOFTC(devlist[dev_idx]);
+	printf("NVMe: Notifying consumer\n");
+	sx_slock(&nclst_lock);
+	STAILQ_FOREACH(ctrlr, &nclst_hd, nvmec_lst) {
 		nvme_notify(cons, ctrlr);
 	}
-
-	free(devlist, M_TEMP);
+	sx_sunlock(&nclst_lock);
 }
 
 void
-nvme_notify_async_consumers(struct nvme_controller *ctrlr,
+nvme_notify_async_consumers(struct nvme_pci_controller *pctrlr,
 			    const struct nvme_completion *async_cpl,
 			    uint32_t log_page_id, void *log_page_buffer,
 			    uint32_t log_page_size)
@@ -244,11 +298,12 @@ nvme_notify_async_consumers(struct nvme_controller *ctrlr,
 	void			*ctrlr_cookie;
 	uint32_t		i;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->async_fn != NULL &&
-		    (ctrlr_cookie = ctrlr->cons_cookie[i]) != NULL) {
-			(*cons->async_fn)(ctrlr_cookie, async_cpl,
+		    (ctrlr_cookie = pctrlr->ctrlr.ccons_cookie[i]) != NULL) {
+			(*cons->async_fn)(pctrlr->ctrlr.ccons_cookie[i], async_cpl,
 			    log_page_id, log_page_buffer, log_page_size);
 		}
 	}
@@ -273,8 +328,8 @@ nvme_notify_fail_consumers(struct nvme_controller *ctrlr)
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID &&
-		    (ctrlr_cookie = ctrlr->cons_cookie[i]) != NULL) {
-			ctrlr->cons_cookie[i] = NULL;
+		    (ctrlr_cookie = ctrlr->ccons_cookie[i]) != NULL) {
+			ctrlr->ccons_cookie[i] = NULL;
 			if (cons->fail_fn != NULL)
 				cons->fail_fn(ctrlr_cookie);
 		}
@@ -282,20 +337,21 @@ nvme_notify_fail_consumers(struct nvme_controller *ctrlr)
 }
 
 void
-nvme_notify_ns(struct nvme_controller *ctrlr, int nsid)
+nvme_notify_ns(struct nvme_pci_controller *pctrlr, int nsid)
 {
 	struct nvme_consumer	*cons;
-	struct nvme_namespace	*ns = &ctrlr->ns[nsid - 1];
+	struct nvme_namespace	*ns = &pctrlr->ctrlr.cns[nsid - 1];
 	void			*ctrlr_cookie;
 	uint32_t		i;
 
-	if (!ctrlr->is_initialized)
+	if (!pctrlr->ctrlr.is_initialized)
 		return;
 
+	CONFIRMPCIECONTROLLER;
 	for (i = 0; i < NVME_MAX_CONSUMERS; i++) {
 		cons = &nvme_consumer[i];
 		if (cons->id != INVALID_CONSUMER_ID && cons->ns_fn != NULL &&
-		    (ctrlr_cookie = ctrlr->cons_cookie[i]) != NULL)
+		    (ctrlr_cookie = pctrlr->ctrlr.ccons_cookie[cons->id]) != NULL)
 			ns->cons_cookie[i] = (*cons->ns_fn)(ns, ctrlr_cookie);
 	}
 }
@@ -350,7 +406,15 @@ nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl)
 static int
 nvme_modevent(module_t mod __unused, int type __unused, void *argp __unused)
 {
-       return (0);
+	switch (type) {
+	case MOD_LOAD:
+		sx_init(&nclst_lock, "NVMe controllers list lock");
+		break;
+	default:
+		break;
+	}
+
+	return (0);
 }
 
 static moduledata_t nvme_mod = {

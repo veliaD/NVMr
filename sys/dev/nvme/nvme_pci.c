@@ -47,7 +47,7 @@ static int    nvme_pci_detach(device_t);
 static int    nvme_pci_suspend(device_t);
 static int    nvme_pci_resume(device_t);
 
-static void nvme_ctrlr_setup_interrupts(struct nvme_controller *ctrlr);
+static void nvme_ctrlr_setup_interrupts(struct nvme_pci_controller *pctrlr);
 
 static device_method_t nvme_pci_methods[] = {
 	/* Device interface */
@@ -63,7 +63,7 @@ static device_method_t nvme_pci_methods[] = {
 static driver_t nvme_pci_driver = {
 	"nvme",
 	nvme_pci_methods,
-	sizeof(struct nvme_controller),
+	sizeof(struct nvme_pci_controller),
 };
 
 DRIVER_MODULE(nvme, pci, nvme_pci_driver, nvme_devclass, NULL, 0);
@@ -112,7 +112,7 @@ nvme_match(uint32_t devid, uint16_t subdevice, struct _pcsid *ep)
 static int
 nvme_pci_probe (device_t device)
 {
-	struct nvme_controller *ctrlr = DEVICE2SOFTC(device);
+	struct nvme_pci_controller *pctrlr = DEVICE2SOFTC(device);
 	struct _pcsid	*ep;
 	uint32_t	devid;
 	uint16_t	subdevice;
@@ -127,7 +127,7 @@ nvme_pci_probe (device_t device)
 		++ep;
 	}
 	if (ep->devid)
-		ctrlr->quirks = ep->quirks;
+		pctrlr->quirks = ep->quirks;
 
 	if (ep->desc) {
 		device_set_desc(device, ep->desc);
@@ -147,22 +147,22 @@ nvme_pci_probe (device_t device)
 }
 
 static int
-nvme_ctrlr_allocate_bar(struct nvme_controller *ctrlr)
+nvme_ctrlr_allocate_bar(struct nvme_pci_controller *pctrlr)
 {
 
-	ctrlr->resource_id = PCIR_BAR(0);
+	pctrlr->resource_id = PCIR_BAR(0);
 
-	ctrlr->resource = bus_alloc_resource_any(ctrlr->dev, SYS_RES_MEMORY,
-	    &ctrlr->resource_id, RF_ACTIVE);
+	pctrlr->resource = bus_alloc_resource_any(pctrlr->dev, SYS_RES_MEMORY,
+	    &pctrlr->resource_id, RF_ACTIVE);
 
-	if(ctrlr->resource == NULL) {
-		nvme_printf(ctrlr, "unable to allocate pci resource\n");
+	if(pctrlr->resource == NULL) {
+		nvme_printf(&(pctrlr->ctrlr), "unable to allocate pci resource\n");
 		return (ENOMEM);
 	}
 
-	ctrlr->bus_tag = rman_get_bustag(ctrlr->resource);
-	ctrlr->bus_handle = rman_get_bushandle(ctrlr->resource);
-	ctrlr->regs = (struct nvme_registers *)ctrlr->bus_handle;
+	pctrlr->bus_tag = rman_get_bustag(pctrlr->resource);
+	pctrlr->bus_handle = rman_get_bushandle(pctrlr->resource);
+	pctrlr->regs = (struct nvme_registers *)pctrlr->bus_handle;
 
 	/*
 	 * The NVMe spec allows for the MSI-X table to be placed behind
@@ -171,9 +171,9 @@ nvme_ctrlr_allocate_bar(struct nvme_controller *ctrlr)
 	 *  pci_alloc_msix().  If the table isn't behind BAR 4/5,
 	 *  bus_alloc_resource() will just return NULL which is OK.
 	 */
-	ctrlr->bar4_resource_id = PCIR_BAR(4);
-	ctrlr->bar4_resource = bus_alloc_resource_any(ctrlr->dev, SYS_RES_MEMORY,
-	    &ctrlr->bar4_resource_id, RF_ACTIVE);
+	pctrlr->bar4_resource_id = PCIR_BAR(4);
+	pctrlr->bar4_resource = bus_alloc_resource_any(pctrlr->dev, SYS_RES_MEMORY,
+	    &pctrlr->bar4_resource_id, RF_ACTIVE);
 
 	return (0);
 }
@@ -181,35 +181,35 @@ nvme_ctrlr_allocate_bar(struct nvme_controller *ctrlr)
 static int
 nvme_pci_attach(device_t dev)
 {
-	struct nvme_controller*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller *pctrlr = DEVICE2SOFTC(dev);
 	int status;
 
-	ctrlr->dev = dev;
-	status = nvme_ctrlr_allocate_bar(ctrlr);
+	pctrlr->dev = dev;
+	status = nvme_ctrlr_allocate_bar(pctrlr);
 	if (status != 0)
 		goto bad;
 	pci_enable_busmaster(dev);
-	nvme_ctrlr_setup_interrupts(ctrlr);
+	nvme_ctrlr_setup_interrupts(pctrlr);
 	return nvme_attach(dev);
 bad:
-	if (ctrlr->resource != NULL) {
+	if (pctrlr->resource != NULL) {
 		bus_release_resource(dev, SYS_RES_MEMORY,
-		    ctrlr->resource_id, ctrlr->resource);
+		    pctrlr->resource_id, pctrlr->resource);
 	}
 
-	if (ctrlr->bar4_resource != NULL) {
+	if (pctrlr->bar4_resource != NULL) {
 		bus_release_resource(dev, SYS_RES_MEMORY,
-		    ctrlr->bar4_resource_id, ctrlr->bar4_resource);
+		    pctrlr->bar4_resource_id, pctrlr->bar4_resource);
 	}
 
-	if (ctrlr->tag)
-		bus_teardown_intr(dev, ctrlr->res, ctrlr->tag);
+	if (pctrlr->tag)
+		bus_teardown_intr(dev, pctrlr->res, pctrlr->tag);
 
-	if (ctrlr->res)
+	if (pctrlr->res)
 		bus_release_resource(dev, SYS_RES_IRQ,
-		    rman_get_rid(ctrlr->res), ctrlr->res);
+		    rman_get_rid(pctrlr->res), pctrlr->res);
 
-	if (ctrlr->msix_enabled)
+	if (pctrlr->msix_enabled)
 		pci_release_msi(dev);
 
 	return status;
@@ -218,37 +218,37 @@ bad:
 static int
 nvme_pci_detach(device_t dev)
 {
-	struct nvme_controller*ctrlr = DEVICE2SOFTC(dev);
+	struct nvme_pci_controller *pctrlr = DEVICE2SOFTC(dev);
 	int rv;
 
 	rv = nvme_detach(dev);
-	if (ctrlr->msix_enabled)
+	if (pctrlr->msix_enabled)
 		pci_release_msi(dev);
 	pci_disable_busmaster(dev);
 	return (rv);
 }
 
 static int
-nvme_ctrlr_configure_intx(struct nvme_controller *ctrlr)
+nvme_ctrlr_configure_intx(struct nvme_pci_controller *pctrlr)
 {
 
-	ctrlr->msix_enabled = 0;
-	ctrlr->num_io_queues = 1;
-	ctrlr->rid = 0;
-	ctrlr->res = bus_alloc_resource_any(ctrlr->dev, SYS_RES_IRQ,
-	    &ctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
+	pctrlr->msix_enabled = 0;
+	pctrlr->ctrlr.num_io_queues = 1;
+	pctrlr->rid = 0;
+	pctrlr->res = bus_alloc_resource_any(pctrlr->dev, SYS_RES_IRQ,
+	    &pctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
 
-	if (ctrlr->res == NULL) {
-		nvme_printf(ctrlr, "unable to allocate shared IRQ\n");
+	if (pctrlr->res == NULL) {
+		nvme_printf(&(pctrlr->ctrlr), "unable to allocate shared IRQ\n");
 		return (ENOMEM);
 	}
 
-	bus_setup_intr(ctrlr->dev, ctrlr->res,
+	bus_setup_intr(pctrlr->dev, pctrlr->res,
 	    INTR_TYPE_MISC | INTR_MPSAFE, NULL, nvme_ctrlr_intx_handler,
-	    ctrlr, &ctrlr->tag);
+	    pctrlr, &pctrlr->tag);
 
-	if (ctrlr->tag == NULL) {
-		nvme_printf(ctrlr, "unable to setup intx handler\n");
+	if (pctrlr->tag == NULL) {
+		nvme_printf(&(pctrlr->ctrlr), "unable to setup intx handler\n");
 		return (ENOMEM);
 	}
 
@@ -256,19 +256,19 @@ nvme_ctrlr_configure_intx(struct nvme_controller *ctrlr)
 }
 
 static void
-nvme_ctrlr_setup_interrupts(struct nvme_controller *ctrlr)
+nvme_ctrlr_setup_interrupts(struct nvme_pci_controller *pctrlr)
 {
 	device_t	dev;
 	int		force_intx, num_io_queues, per_cpu_io_queues;
 	int		min_cpus_per_ioq;
 	int		num_vectors_requested, num_vectors_allocated;
 
-	dev = ctrlr->dev;
+	dev = pctrlr->dev;
 
 	force_intx = 0;
 	TUNABLE_INT_FETCH("hw.nvme.force_intx", &force_intx);
 	if (force_intx || pci_msix_count(dev) < 2) {
-		nvme_ctrlr_configure_intx(ctrlr);
+		nvme_ctrlr_configure_intx(pctrlr);
 		return;
 	}
 
@@ -298,12 +298,12 @@ again:
 	num_vectors_requested = num_io_queues + 1;
 	num_vectors_allocated = num_vectors_requested;
 	if (pci_alloc_msix(dev, &num_vectors_allocated) != 0) {
-		nvme_ctrlr_configure_intx(ctrlr);
+		nvme_ctrlr_configure_intx(pctrlr);
 		return;
 	}
 	if (num_vectors_allocated < 2) {
 		pci_release_msi(dev);
-		nvme_ctrlr_configure_intx(ctrlr);
+		nvme_ctrlr_configure_intx(pctrlr);
 		return;
 	}
 	if (num_vectors_allocated != num_vectors_requested) {
@@ -312,24 +312,24 @@ again:
 		goto again;
 	}
 
-	ctrlr->msix_enabled = 1;
-	ctrlr->num_io_queues = num_io_queues;
+	pctrlr->msix_enabled = 1;
+	pctrlr->ctrlr.num_io_queues = num_io_queues;
 }
 
 static int
 nvme_pci_suspend(device_t dev)
 {
-	struct nvme_controller	*ctrlr;
+	struct nvme_pci_controller	*pctrlr;
 
-	ctrlr = DEVICE2SOFTC(dev);
-	return (nvme_ctrlr_suspend(ctrlr));
+	pctrlr = DEVICE2SOFTC(dev);
+	return (nvme_ctrlr_suspend(pctrlr));
 }
 
 static int
 nvme_pci_resume(device_t dev)
 {
-	struct nvme_controller	*ctrlr;
+	struct nvme_pci_controller	*pctrlr;
 
-	ctrlr = DEVICE2SOFTC(dev);
-	return (nvme_ctrlr_resume(ctrlr));
+	pctrlr = DEVICE2SOFTC(dev);
+	return (nvme_ctrlr_resume(pctrlr));
 }

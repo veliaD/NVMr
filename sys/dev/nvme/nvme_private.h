@@ -49,7 +49,7 @@
 
 #include "nvme.h"
 
-#define DEVICE2SOFTC(dev) ((struct nvme_controller *) device_get_softc(dev))
+#define DEVICE2SOFTC(dev) ((struct nvme_pci_controller *) device_get_softc(dev))
 
 MALLOC_DECLARE(M_NVME);
 
@@ -134,7 +134,7 @@ extern devclass_t nvme_devclass;
 struct nvme_request {
 
 	struct nvme_command		cmd;
-	struct nvme_qpair		*qpair;
+	struct nvme_qpair		*rqpair;
 	union {
 		void			*payload;
 		struct bio		*bio;
@@ -150,7 +150,7 @@ struct nvme_request {
 
 struct nvme_async_event_request {
 
-	struct nvme_controller		*ctrlr;
+	struct nvme_controller		*nvmea_ctrlrp;
 	struct nvme_request		*req;
 	struct nvme_completion		cpl;
 	uint32_t			log_page_id;
@@ -162,7 +162,7 @@ struct nvme_tracker {
 
 	TAILQ_ENTRY(nvme_tracker)	tailq;
 	struct nvme_request		*req;
-	struct nvme_qpair		*qpair;
+	struct nvme_pci_qpair		*qpair;
 	struct callout			timer;
 	bus_dmamap_t			payload_dma_map;
 	uint16_t			cid;
@@ -171,10 +171,22 @@ struct nvme_tracker {
 	bus_addr_t			prp_bus_addr;
 };
 
-struct nvme_qpair {
+enum nvme_transport {
+	NVMET_PCIE = 0xBF83E31D,
+};
 
-	struct nvme_controller	*ctrlr;
-	uint32_t		id;
+struct nvme_qpair {
+	uint32_t		qid;
+	uint32_t		num_qentries;
+	volatile boolean_t	qis_enabled;
+	struct mtx		qlock __aligned(CACHE_LINE_SIZE);
+	enum nvme_transport	qttype;
+	struct nvme_controller  *gqctrlr;
+};
+
+struct nvme_pci_qpair {
+
+	struct nvme_pci_controller	*qpctrlr;
 	int			domain;
 	int			cpu;
 
@@ -183,7 +195,6 @@ struct nvme_qpair {
 	struct resource		*res;
 	void 			*tag;
 
-	uint32_t		num_entries;
 	uint32_t		num_trackers;
 	uint32_t		sq_tdbl_off;
 	uint32_t		cq_hdbl_off;
@@ -214,10 +225,7 @@ struct nvme_qpair {
 
 	struct nvme_tracker	**act_tr;
 
-	bool			is_enabled;
-
-	struct mtx		lock __aligned(CACHE_LINE_SIZE);
-
+	struct nvme_qpair	gqpair;
 } __aligned(CACHE_LINE_SIZE);
 
 struct nvme_namespace {
@@ -232,20 +240,83 @@ struct nvme_namespace {
 	struct mtx			lock;
 };
 
+struct nvme_controller {
+	struct mtx		lockc;
+
+	uint32_t		ready_timeout_in_ms;
+	uint32_t		cquirks;
+#define QUIRK_DELAY_B4_CHK_RDY 1		/* Can't touch MMIO on disable */
+	uint32_t		num_io_queues;
+	uint32_t		max_hw_pend_io;
+
+	struct task		reset_task;
+	struct task		fail_req_task;
+	struct taskqueue	*taskqueue;
+
+	/** maximum i/o size in bytes */
+	uint32_t		max_xfer_size;
+
+	struct nvme_controller_data	cdata;
+
+	/*
+	 * Present in PCIe transport controllers from version 1.0 and in
+	 * struct nvme_controller_data and above from version 1.2
+	 */
+	uint32_t		nvme_version;
+
+	/** minimum page size supported by this controller in bytes */
+	uint32_t		min_page_size;
+	struct nvme_namespace		cns[NVME_MAX_NAMESPACES];
+
+	struct cdev			*ccdev;
+
+	/** bit mask of event types currently enabled for async events */
+	uint32_t			async_event_config;
+
+	uint32_t			num_aers;
+	struct nvme_async_event_request	aer[NVME_MAX_ASYNC_EVENTS];
+
+	void				*ccons_cookie[NVME_MAX_CONSUMERS];
+
+	uint32_t			is_resetting;
+	uint32_t			is_initialized;
+	uint32_t			notification_sent;
+
+	volatile boolean_t		is_failed;
+	STAILQ_HEAD(, nvme_request)	fail_req;
+
+	STAILQ_ENTRY(nvme_controller)	nvmec_lst;
+
+	/** timeout period in seconds */
+	uint32_t		timeout_period;
+
+	enum nvme_transport		nvmec_ttype;
+	int				nvmec_unit;
+	char				nvmec_nameunit[SPECNAMELEN + 1];
+	void				*nvmec_tsp;
+	void 				(*nvmec_delist)(struct nvme_controller *);
+	void 				(*nvmec_subadmreq)(struct nvme_controller *, struct nvme_request *);
+	void 				(*nvmec_subioreq)(struct nvme_controller *, struct nvme_request *);
+};
+#define NVME_VFFSTRSZ 32
+
+#define NVMP_STRING "NVMe over PCIe"
+#define CONFIRMPCIECONTROLLER KASSERT(strncmp(pctrlr->very_first_field, \
+    NVMP_STRING, sizeof(pctrlr->very_first_field)) == 0, \
+    ("%s@%d NOT a PCIe controller!\n", __func__, __LINE__))
+#define KASSERT_NVMP_CNTRLR(c) KASSERT((c)->nvmec_ttype == NVMET_PCIE, \
+    ("%s@%d c:%p t:%d\n", __func__, __LINE__, (c), (c)->nvmec_ttype))
+#define IS_NVMP_CNTRLR(c) ((c)->nvmec_ttype == NVMET_PCIE)
+
 /*
  * One of these per allocated PCI device.
  */
-struct nvme_controller {
-
+struct nvme_pci_controller {
+	char			very_first_field[NVME_VFFSTRSZ+1];
 	device_t		dev;
-
-	struct mtx		lock;
 	int			domain;
-	uint32_t		ready_timeout_in_ms;
-	uint32_t		quirks;
-#define	QUIRK_DELAY_B4_CHK_RDY	1		/* Can't touch MMIO on disable */
-#define	QUIRK_DISABLE_TIMEOUT	2		/* Disable broken completion timeout feature */
 
+	uint32_t		quirks;
 	bus_space_tag_t		bus_tag;
 	bus_space_handle_t	bus_handle;
 	int			resource_id;
@@ -262,17 +333,10 @@ struct nvme_controller {
 	uint32_t		msix_enabled;
 	uint32_t		enable_aborts;
 
-	uint32_t		num_io_queues;
-	uint32_t		max_hw_pend_io;
-
 	/* Fields for tracking progress during controller initialization. */
 	struct intr_config_hook	config_hook;
 	uint32_t		ns_identified;
 	uint32_t		queues_created;
-
-	struct task		reset_task;
-	struct task		fail_req_task;
-	struct taskqueue	*taskqueue;
 
 	/* For shared legacy interrupt. */
 	int			rid;
@@ -282,49 +346,24 @@ struct nvme_controller {
 	bus_dma_tag_t		hw_desc_tag;
 	bus_dmamap_t		hw_desc_map;
 
-	/** maximum i/o size in bytes */
-	uint32_t		max_xfer_size;
-
-	/** minimum page size supported by this controller in bytes */
-	uint32_t		min_page_size;
-
 	/** interrupt coalescing time period (in microseconds) */
 	uint32_t		int_coal_time;
 
 	/** interrupt coalescing threshold */
 	uint32_t		int_coal_threshold;
 
-	/** timeout period in seconds */
-	uint32_t		timeout_period;
-
 	/** doorbell stride */
 	uint32_t		dstrd;
 
-	struct nvme_qpair	adminq;
-	struct nvme_qpair	*ioq;
+	struct nvme_pci_qpair	adminq;
+	struct nvme_pci_qpair	*ioq;
 
-	struct nvme_registers		*regs;
+	struct nvme_registers	*regs;
 
-	struct nvme_controller_data	cdata;
-	struct nvme_namespace		ns[NVME_MAX_NAMESPACES];
-
-	struct cdev			*cdev;
-
-	/** bit mask of event types currently enabled for async events */
-	uint32_t			async_event_config;
-
-	uint32_t			num_aers;
-	struct nvme_async_event_request	aer[NVME_MAX_ASYNC_EVENTS];
-
-	void				*cons_cookie[NVME_MAX_CONSUMERS];
-
-	uint32_t			is_resetting;
-	uint32_t			is_initialized;
-	uint32_t			notification_sent;
-
-	bool				is_failed;
-	STAILQ_HEAD(, nvme_request)	fail_req;
+	struct nvme_controller	ctrlr;
 };
+
+#define GCNTRLR2PCI(c)  __containerof((c), struct nvme_pci_controller, ctrlr)
 
 #define nvme_mmio_offsetof(reg)						       \
 	offsetof(struct nvme_registers, reg)
@@ -346,100 +385,103 @@ struct nvme_controller {
 		    (val & 0xFFFFFFFF00000000ULL) >> 32);		       \
 	} while (0);
 
+#define NVMESPEW(c, format, ...) printf("nvme%d:<%s@%d> " format, \
+    (c)->nvmec_unit, __func__, __LINE__, ## __VA_ARGS__)
+
 #define nvme_printf(ctrlr, fmt, args...)	\
-    device_printf(ctrlr->dev, fmt, ##args)
+    NVMESPEW(ctrlr, fmt, ##args)
 
 void	nvme_ns_test(struct nvme_namespace *ns, u_long cmd, caddr_t arg);
 
-void	nvme_ctrlr_cmd_identify_controller(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *ctrlr,
 					   void *payload,
 					   nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_identify_namespace(struct nvme_controller *ctrlr,
 					  uint32_t nsid, void *payload,
 					  nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_set_interrupt_coalescing(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_set_interrupt_coalescing(struct nvme_pci_controller *ctrlr,
 						uint32_t microseconds,
 						uint32_t threshold,
 						nvme_cb_fn_t cb_fn,
 						void *cb_arg);
-void	nvme_ctrlr_cmd_get_error_page(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_get_error_page(struct nvme_pci_controller *ctrlr,
 				      struct nvme_error_information_entry *payload,
 				      uint32_t num_entries, /* 0 = max */
 				      nvme_cb_fn_t cb_fn,
 				      void *cb_arg);
-void	nvme_ctrlr_cmd_get_health_information_page(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_get_health_information_page(struct nvme_pci_controller *ctrlr,
 						   uint32_t nsid,
 						   struct nvme_health_information_page *payload,
 						   nvme_cb_fn_t cb_fn,
 						   void *cb_arg);
-void	nvme_ctrlr_cmd_get_firmware_page(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_get_firmware_page(struct nvme_pci_controller *ctrlr,
 					 struct nvme_firmware_page *payload,
 					 nvme_cb_fn_t cb_fn,
 					 void *cb_arg);
-void	nvme_ctrlr_cmd_create_io_cq(struct nvme_controller *ctrlr,
-				    struct nvme_qpair *io_que,
+void	nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *ctrlr,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_create_io_sq(struct nvme_controller *ctrlr,
-				    struct nvme_qpair *io_que,
+void	nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *ctrlr,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_delete_io_cq(struct nvme_controller *ctrlr,
-				    struct nvme_qpair *io_que,
+void	nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *ctrlr,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_delete_io_sq(struct nvme_controller *ctrlr,
-				    struct nvme_qpair *io_que,
+void	nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *ctrlr,
+				    struct nvme_pci_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_set_num_queues(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_set_num_queues(struct nvme_pci_controller *ptrlr,
 				      uint32_t num_queues, nvme_cb_fn_t cb_fn,
 				      void *cb_arg);
-void	nvme_ctrlr_cmd_set_async_event_config(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_cmd_set_async_event_config(struct nvme_pci_controller *ctrlr,
 					      uint32_t state,
 					      nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_abort(struct nvme_controller *ctrlr, uint16_t cid,
+void	nvme_ctrlr_cmd_abort(struct nvme_pci_controller *ctrlr, uint16_t cid,
 			     uint16_t sqid, nvme_cb_fn_t cb_fn, void *cb_arg);
 
 void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
 
-int	nvme_ctrlr_construct(struct nvme_controller *ctrlr, device_t dev);
-void	nvme_ctrlr_destruct(struct nvme_controller *ctrlr, device_t dev);
-void	nvme_ctrlr_shutdown(struct nvme_controller *ctrlr);
-int	nvme_ctrlr_hw_reset(struct nvme_controller *ctrlr);
-void	nvme_ctrlr_reset(struct nvme_controller *ctrlr);
+int	nvme_ctrlr_construct(struct nvme_pci_controller *ctrlr, device_t dev);
+void	nvme_ctrlr_destruct(struct nvme_pci_controller *ctrlr, device_t dev);
+void	nvme_ctrlr_shutdown(struct nvme_pci_controller *ctrlr);
+int	nvme_ctrlr_hw_reset(struct nvme_pci_controller *ctrlr);
+void	nvme_ctrlr_reset(struct nvme_pci_controller *ctrlr);
 /* ctrlr defined as void * to allow use with config_intrhook. */
 void	nvme_ctrlr_start_config_hook(void *ctrlr_arg);
-void	nvme_ctrlr_submit_admin_request(struct nvme_controller *ctrlr,
+void	nvmp_submit_adm_request(struct nvme_controller *ctrlr,
 					struct nvme_request *req);
-void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
+void	nvmp_submit_io_request(struct nvme_controller *ctrlr,
 				     struct nvme_request *req);
-void	nvme_ctrlr_post_failed_request(struct nvme_controller *ctrlr,
+void	nvme_ctrlr_post_failed_request(struct nvme_pci_controller *ctrlr,
 				       struct nvme_request *req);
 
-int	nvme_qpair_construct(struct nvme_qpair *qpair,
+int	nvme_qpair_construct(struct nvme_pci_qpair *qpair,
 			     uint32_t num_entries, uint32_t num_trackers,
-			     struct nvme_controller *ctrlr);
-void	nvme_qpair_submit_tracker(struct nvme_qpair *qpair,
+			     struct nvme_pci_controller *ctrlr);
+void	nvme_qpair_submit_tracker(struct nvme_pci_qpair *qpair,
 				  struct nvme_tracker *tr);
-bool	nvme_qpair_process_completions(struct nvme_qpair *qpair);
-void	nvme_qpair_submit_request(struct nvme_qpair *qpair,
+bool	nvmp_qpair_process_completions(struct nvme_qpair *qpair);
+void	nvme_qpair_submit_request(struct nvme_pci_qpair *qpair,
 				  struct nvme_request *req);
-void	nvme_qpair_reset(struct nvme_qpair *qpair);
-void	nvme_qpair_fail(struct nvme_qpair *qpair);
+void	nvme_qpair_reset(struct nvme_pci_qpair *qpair);
+void	nvmp_qpair_fail(struct nvme_pci_qpair *qpair);
 void	nvme_qpair_manual_complete_request(struct nvme_qpair *qpair,
 					   struct nvme_request *req,
                                            uint32_t sct, uint32_t sc);
 
-void	nvme_admin_qpair_enable(struct nvme_qpair *qpair);
-void	nvme_admin_qpair_disable(struct nvme_qpair *qpair);
-void	nvme_admin_qpair_destroy(struct nvme_qpair *qpair);
+void	nvme_admin_qpair_enable(struct nvme_pci_qpair *qpair);
+void	nvme_admin_qpair_disable(struct nvme_pci_qpair *qpair);
+void	nvme_admin_qpair_destroy(struct nvme_pci_qpair *qpair);
 
-void	nvme_io_qpair_enable(struct nvme_qpair *qpair);
-void	nvme_io_qpair_disable(struct nvme_qpair *qpair);
-void	nvme_io_qpair_destroy(struct nvme_qpair *qpair);
+void	nvme_io_qpair_enable(struct nvme_pci_qpair *qpair);
+void	nvme_io_qpair_disable(struct nvme_pci_qpair *qpair);
+void	nvme_io_qpair_destroy(struct nvme_pci_qpair *qpair);
 
 int	nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 			  struct nvme_controller *ctrlr);
 void	nvme_ns_destruct(struct nvme_namespace *ns);
 
-void	nvme_sysctl_initialize_ctrlr(struct nvme_controller *ctrlr);
+void	nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *ctrlr);
 
 void	nvme_dump_command(struct nvme_command *cmd);
 void	nvme_dump_completion(struct nvme_completion *cpl);
@@ -547,18 +589,18 @@ nvme_allocate_request_ccb(union ccb *ccb, nvme_cb_fn_t cb_fn, void *cb_arg)
 
 #define nvme_free_request(req)	uma_zfree(nvme_request_zone, req)
 
-void	nvme_notify_async_consumers(struct nvme_controller *ctrlr,
+void	nvme_notify_async_consumers(struct nvme_pci_controller *ctrlr,
 				    const struct nvme_completion *async_cpl,
 				    uint32_t log_page_id, void *log_page_buffer,
 				    uint32_t log_page_size);
 void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
 void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
-void	nvme_notify_ns(struct nvme_controller *ctrlr, int nsid);
+void	nvme_notify_ns(struct nvme_pci_controller *ctrlr, int nsid);
 
 void	nvme_ctrlr_intx_handler(void *arg);
-void	nvme_ctrlr_poll(struct nvme_controller *ctrlr);
+void	nvmp_ctrlr_poll(struct nvme_controller *ctrlr);
 
-int	nvme_ctrlr_suspend(struct nvme_controller *ctrlr);
-int	nvme_ctrlr_resume(struct nvme_controller *ctrlr);
+int	nvme_ctrlr_suspend(struct nvme_pci_controller *ctrlr);
+int	nvme_ctrlr_resume(struct nvme_pci_controller *ctrlr);
 
 #endif /* __NVME_PRIVATE_H__ */
