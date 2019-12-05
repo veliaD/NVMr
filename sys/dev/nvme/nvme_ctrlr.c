@@ -548,7 +548,7 @@ nvme_ctrlr_delete_qpairs(struct nvme_pci_controller *pctrlr)
 	return (0);
 }
 
-static int
+int
 nvme_ctrlr_construct_namespaces(struct nvme_controller *ctrlr)
 {
 	struct nvme_namespace	*ns;

@@ -38,12 +38,7 @@
 #include <sys/param.h>
 #include <sys/endian.h>
 
-#define	NVME_PASSTHROUGH_CMD		_IOWR('n', 0, struct nvme_pt_command)
-#define	NVME_RESET_CONTROLLER		_IO('n', 1)
-#define	NVME_GET_NSID			_IOR('n', 2, struct nvme_get_nsid)
-
-#define	NVME_IO_TEST			_IOWR('n', 100, struct nvme_io_test)
-#define	NVME_BIO_TEST			_IOWR('n', 101, struct nvme_io_test)
+#include <dev/nvme/nvme_shared.h>
 
 /*
  * Macros to deal with NVME revisions, as defined VS register
@@ -57,9 +52,6 @@
  *  log pages.
  */
 #define NVME_GLOBAL_NAMESPACE_TAG	((uint32_t)0xFFFFFFFF)
-
-/* Cap nvme to 1MB transfers driver explodes with larger sizes */
-#define NVME_MAX_XFER_SIZE		(MAXPHYS < (1<<20) ? MAXPHYS : (1<<20))
 
 /* Register field definitions */
 #define NVME_CAP_LO_REG_MQES_SHIFT			(0)
@@ -104,21 +96,6 @@
 #define NVME_CAP_HI_MPSMAX(x) \
 	(((x) >> NVME_CAP_HI_REG_MPSMAX_SHIFT) & NVME_CAP_HI_REG_MPSMAX_MASK)
 
-#define NVME_CC_REG_EN_SHIFT				(0)
-#define NVME_CC_REG_EN_MASK				(0x1)
-#define NVME_CC_REG_CSS_SHIFT				(4)
-#define NVME_CC_REG_CSS_MASK				(0x7)
-#define NVME_CC_REG_MPS_SHIFT				(7)
-#define NVME_CC_REG_MPS_MASK				(0xF)
-#define NVME_CC_REG_AMS_SHIFT				(11)
-#define NVME_CC_REG_AMS_MASK				(0x7)
-#define NVME_CC_REG_SHN_SHIFT				(14)
-#define NVME_CC_REG_SHN_MASK				(0x3)
-#define NVME_CC_REG_IOSQES_SHIFT			(16)
-#define NVME_CC_REG_IOSQES_MASK				(0xF)
-#define NVME_CC_REG_IOCQES_SHIFT			(20)
-#define NVME_CC_REG_IOCQES_MASK				(0xF)
-
 #define NVME_CSTS_REG_RDY_SHIFT				(0)
 #define NVME_CSTS_REG_RDY_MASK				(0x1)
 #define NVME_CSTS_REG_CFS_SHIFT				(1)
@@ -141,25 +118,6 @@
 
 #define NVME_CMD_FUSE_SHIFT				(8)
 #define NVME_CMD_FUSE_MASK				(0x3)
-
-#define NVME_STATUS_P_SHIFT				(0)
-#define NVME_STATUS_P_MASK				(0x1)
-#define NVME_STATUS_SC_SHIFT				(1)
-#define NVME_STATUS_SC_MASK				(0xFF)
-#define NVME_STATUS_SCT_SHIFT				(9)
-#define NVME_STATUS_SCT_MASK				(0x7)
-#define NVME_STATUS_CRD_SHIFT				(12)
-#define NVME_STATUS_CRD_MASK				(0x3)
-#define NVME_STATUS_M_SHIFT				(14)
-#define NVME_STATUS_M_MASK				(0x1)
-#define NVME_STATUS_DNR_SHIFT				(15)
-#define NVME_STATUS_DNR_MASK				(0x1)
-
-#define NVME_STATUS_GET_P(st)				(((st) >> NVME_STATUS_P_SHIFT) & NVME_STATUS_P_MASK)
-#define NVME_STATUS_GET_SC(st)				(((st) >> NVME_STATUS_SC_SHIFT) & NVME_STATUS_SC_MASK)
-#define NVME_STATUS_GET_SCT(st)				(((st) >> NVME_STATUS_SCT_SHIFT) & NVME_STATUS_SCT_MASK)
-#define NVME_STATUS_GET_M(st)				(((st) >> NVME_STATUS_M_SHIFT) & NVME_STATUS_M_MASK)
-#define NVME_STATUS_GET_DNR(st)				(((st) >> NVME_STATUS_DNR_SHIFT) & NVME_STATUS_DNR_MASK)
 
 #define NVME_PWR_ST_MPS_SHIFT				(0)
 #define NVME_PWR_ST_MPS_MASK				(0x1)
@@ -539,59 +497,6 @@ struct nvme_registers
 
 _Static_assert(sizeof(struct nvme_registers) == 0x1008, "bad size for nvme_registers");
 
-struct nvme_command
-{
-	/* dword 0 */
-	uint8_t opc;		/* opcode */
-	uint8_t fuse;		/* fused operation */
-	uint16_t cid;		/* command identifier */
-
-	/* dword 1 */
-	uint32_t nsid;		/* namespace identifier */
-
-	/* dword 2-3 */
-	uint32_t rsvd2;
-	uint32_t rsvd3;
-
-	/* dword 4-5 */
-	uint64_t mptr;		/* metadata pointer */
-
-	/* dword 6-7 */
-	uint64_t prp1;		/* prp entry 1 */
-
-	/* dword 8-9 */
-	uint64_t prp2;		/* prp entry 2 */
-
-	/* dword 10-15 */
-	uint32_t cdw10;		/* command-specific */
-	uint32_t cdw11;		/* command-specific */
-	uint32_t cdw12;		/* command-specific */
-	uint32_t cdw13;		/* command-specific */
-	uint32_t cdw14;		/* command-specific */
-	uint32_t cdw15;		/* command-specific */
-} __packed;
-
-_Static_assert(sizeof(struct nvme_command) == 16 * 4, "bad size for nvme_command");
-
-struct nvme_completion {
-
-	/* dword 0 */
-	uint32_t		cdw0;	/* command-specific */
-
-	/* dword 1 */
-	uint32_t		rsvd1;
-
-	/* dword 2 */
-	uint16_t		sqhd;	/* submission queue head pointer */
-	uint16_t		sqid;	/* submission queue identifier */
-
-	/* dword 3 */
-	uint16_t		cid;	/* command identifier */
-	uint16_t		status;
-} __packed;
-
-_Static_assert(sizeof(struct nvme_completion) == 4 * 4, "bad size for nvme_completion");
-
 struct nvme_dsm_range {
 	uint32_t attributes;
 	uint32_t length;
@@ -602,61 +507,6 @@ struct nvme_dsm_range {
 #define NVME_MAX_DSM_TRIM		4096
 
 _Static_assert(sizeof(struct nvme_dsm_range) == 16, "bad size for nvme_dsm_ranage");
-
-/* status code types */
-enum nvme_status_code_type {
-	NVME_SCT_GENERIC		= 0x0,
-	NVME_SCT_COMMAND_SPECIFIC	= 0x1,
-	NVME_SCT_MEDIA_ERROR		= 0x2,
-	NVME_SCT_PATH_RELATED		= 0x3,
-	/* 0x3-0x6 - reserved */
-	NVME_SCT_VENDOR_SPECIFIC	= 0x7,
-};
-
-/* generic command status codes */
-enum nvme_generic_command_status_code {
-	NVME_SC_SUCCESS				= 0x00,
-	NVME_SC_INVALID_OPCODE			= 0x01,
-	NVME_SC_INVALID_FIELD			= 0x02,
-	NVME_SC_COMMAND_ID_CONFLICT		= 0x03,
-	NVME_SC_DATA_TRANSFER_ERROR		= 0x04,
-	NVME_SC_ABORTED_POWER_LOSS		= 0x05,
-	NVME_SC_INTERNAL_DEVICE_ERROR		= 0x06,
-	NVME_SC_ABORTED_BY_REQUEST		= 0x07,
-	NVME_SC_ABORTED_SQ_DELETION		= 0x08,
-	NVME_SC_ABORTED_FAILED_FUSED		= 0x09,
-	NVME_SC_ABORTED_MISSING_FUSED		= 0x0a,
-	NVME_SC_INVALID_NAMESPACE_OR_FORMAT	= 0x0b,
-	NVME_SC_COMMAND_SEQUENCE_ERROR		= 0x0c,
-	NVME_SC_INVALID_SGL_SEGMENT_DESCR	= 0x0d,
-	NVME_SC_INVALID_NUMBER_OF_SGL_DESCR	= 0x0e,
-	NVME_SC_DATA_SGL_LENGTH_INVALID		= 0x0f,
-	NVME_SC_METADATA_SGL_LENGTH_INVALID	= 0x10,
-	NVME_SC_SGL_DESCRIPTOR_TYPE_INVALID	= 0x11,
-	NVME_SC_INVALID_USE_OF_CMB		= 0x12,
-	NVME_SC_PRP_OFFET_INVALID		= 0x13,
-	NVME_SC_ATOMIC_WRITE_UNIT_EXCEEDED	= 0x14,
-	NVME_SC_OPERATION_DENIED		= 0x15,
-	NVME_SC_SGL_OFFSET_INVALID		= 0x16,
-	/* 0x17 - reserved */
-	NVME_SC_HOST_ID_INCONSISTENT_FORMAT	= 0x18,
-	NVME_SC_KEEP_ALIVE_TIMEOUT_EXPIRED	= 0x19,
-	NVME_SC_KEEP_ALIVE_TIMEOUT_INVALID	= 0x1a,
-	NVME_SC_ABORTED_DUE_TO_PREEMPT		= 0x1b,
-	NVME_SC_SANITIZE_FAILED			= 0x1c,
-	NVME_SC_SANITIZE_IN_PROGRESS		= 0x1d,
-	NVME_SC_SGL_DATA_BLOCK_GRAN_INVALID	= 0x1e,
-	NVME_SC_NOT_SUPPORTED_IN_CMB		= 0x1f,
-	NVME_SC_NAMESPACE_IS_WRITE_PROTECTED	= 0x20,
-	NVME_SC_COMMAND_INTERRUPTED		= 0x21,
-	NVME_SC_TRANSIENT_TRANSPORT_ERROR	= 0x22,
-
-	NVME_SC_LBA_OUT_OF_RANGE		= 0x80,
-	NVME_SC_CAPACITY_EXCEEDED		= 0x81,
-	NVME_SC_NAMESPACE_NOT_READY		= 0x82,
-	NVME_SC_RESERVATION_CONFLICT		= 0x83,
-	NVME_SC_FORMAT_IN_PROGRESS		= 0x84,
-};
 
 /* command specific status codes */
 enum nvme_command_specific_status_code {
@@ -727,48 +577,6 @@ enum nvme_path_related_status_code {
 	NVME_SC_COMMAND_ABOTHED_BY_HOST		= 0x71,
 };
 
-/* admin opcodes */
-enum nvme_admin_opcode {
-	NVME_OPC_DELETE_IO_SQ			= 0x00,
-	NVME_OPC_CREATE_IO_SQ			= 0x01,
-	NVME_OPC_GET_LOG_PAGE			= 0x02,
-	/* 0x03 - reserved */
-	NVME_OPC_DELETE_IO_CQ			= 0x04,
-	NVME_OPC_CREATE_IO_CQ			= 0x05,
-	NVME_OPC_IDENTIFY			= 0x06,
-	/* 0x07 - reserved */
-	NVME_OPC_ABORT				= 0x08,
-	NVME_OPC_SET_FEATURES			= 0x09,
-	NVME_OPC_GET_FEATURES			= 0x0a,
-	/* 0x0b - reserved */
-	NVME_OPC_ASYNC_EVENT_REQUEST		= 0x0c,
-	NVME_OPC_NAMESPACE_MANAGEMENT		= 0x0d,
-	/* 0x0e-0x0f - reserved */
-	NVME_OPC_FIRMWARE_ACTIVATE		= 0x10,
-	NVME_OPC_FIRMWARE_IMAGE_DOWNLOAD	= 0x11,
-	/* 0x12-0x13 - reserved */
-	NVME_OPC_DEVICE_SELF_TEST		= 0x14,
-	NVME_OPC_NAMESPACE_ATTACHMENT		= 0x15,
-	/* 0x16-0x17 - reserved */
-	NVME_OPC_KEEP_ALIVE			= 0x18,
-	NVME_OPC_DIRECTIVE_SEND			= 0x19,
-	NVME_OPC_DIRECTIVE_RECEIVE		= 0x1a,
-	/* 0x1b - reserved */
-	NVME_OPC_VIRTUALIZATION_MANAGEMENT	= 0x1c,
-	NVME_OPC_NVME_MI_SEND			= 0x1d,
-	NVME_OPC_NVME_MI_RECEIVE		= 0x1e,
-	/* 0x1f-0x7b - reserved */
-	NVME_OPC_DOORBELL_BUFFER_CONFIG		= 0x7c,
-
-	NVME_OPC_FORMAT_NVM			= 0x80,
-	NVME_OPC_SECURITY_SEND			= 0x81,
-	NVME_OPC_SECURITY_RECEIVE		= 0x82,
-	/* 0x83 - reserved */
-	NVME_OPC_SANITIZE			= 0x84,
-	/* 0x85 - reserved */
-	NVME_OPC_GET_LBA_STATUS			= 0x86,
-};
-
 /* nvme nvm opcodes */
 enum nvme_nvm_opcode {
 	NVME_OPC_FLUSH				= 0x00,
@@ -790,43 +598,6 @@ enum nvme_nvm_opcode {
 	NVME_OPC_RESERVATION_RELEASE		= 0x15,
 };
 
-enum nvme_feature {
-	/* 0x00 - reserved */
-	NVME_FEAT_ARBITRATION			= 0x01,
-	NVME_FEAT_POWER_MANAGEMENT		= 0x02,
-	NVME_FEAT_LBA_RANGE_TYPE		= 0x03,
-	NVME_FEAT_TEMPERATURE_THRESHOLD		= 0x04,
-	NVME_FEAT_ERROR_RECOVERY		= 0x05,
-	NVME_FEAT_VOLATILE_WRITE_CACHE		= 0x06,
-	NVME_FEAT_NUMBER_OF_QUEUES		= 0x07,
-	NVME_FEAT_INTERRUPT_COALESCING		= 0x08,
-	NVME_FEAT_INTERRUPT_VECTOR_CONFIGURATION = 0x09,
-	NVME_FEAT_WRITE_ATOMICITY		= 0x0A,
-	NVME_FEAT_ASYNC_EVENT_CONFIGURATION	= 0x0B,
-	NVME_FEAT_AUTONOMOUS_POWER_STATE_TRANSITION = 0x0C,
-	NVME_FEAT_HOST_MEMORY_BUFFER		= 0x0D,
-	NVME_FEAT_TIMESTAMP			= 0x0E,
-	NVME_FEAT_KEEP_ALIVE_TIMER		= 0x0F,
-	NVME_FEAT_HOST_CONTROLLED_THERMAL_MGMT	= 0x10,
-	NVME_FEAT_NON_OP_POWER_STATE_CONFIG	= 0x11,
-	NVME_FEAT_READ_RECOVERY_LEVEL_CONFIG	= 0x12,
-	NVME_FEAT_PREDICTABLE_LATENCY_MODE_CONFIG = 0x13,
-	NVME_FEAT_PREDICTABLE_LATENCY_MODE_WINDOW = 0x14,
-	NVME_FEAT_LBA_STATUS_INFORMATION_ATTRIBUTES = 0x15,
-	NVME_FEAT_HOST_BEHAVIOR_SUPPORT		= 0x16,
-	NVME_FEAT_SANITIZE_CONFIG		= 0x17,
-	NVME_FEAT_ENDURANCE_GROUP_EVENT_CONFIGURATION = 0x18,
-	/* 0x19-0x77 - reserved */
-	/* 0x78-0x7f - NVMe Management Interface */
-	NVME_FEAT_SOFTWARE_PROGRESS_MARKER	= 0x80,
-	NVME_FEAT_HOST_IDENTIFIER		= 0x81,
-	NVME_FEAT_RESERVATION_NOTIFICATION_MASK	= 0x82,
-	NVME_FEAT_RESERVATION_PERSISTENCE	= 0x83,
-	NVME_FEAT_NAMESPACE_WRITE_PROTECTION_CONFIG = 0x84,
-	/* 0x85-0xBF - command set specific (reserved) */
-	/* 0xC0-0xFF - vendor specific */
-};
-
 enum nvme_dsm_attribute {
 	NVME_DSM_ATTR_INTEGRAL_READ		= 0x1,
 	NVME_DSM_ATTR_INTEGRAL_WRITE		= 0x2,
@@ -837,436 +608,6 @@ enum nvme_activate_action {
 	NVME_AA_REPLACE_NO_ACTIVATE		= 0x0,
 	NVME_AA_REPLACE_ACTIVATE		= 0x1,
 	NVME_AA_ACTIVATE			= 0x2,
-};
-
-struct nvme_power_state {
-	/** Maximum Power */
-	uint16_t	mp;			/* Maximum Power */
-	uint8_t		ps_rsvd1;
-	uint8_t		mps_nops;		/* Max Power Scale, Non-Operational State */
-
-	uint32_t	enlat;			/* Entry Latency */
-	uint32_t	exlat;			/* Exit Latency */
-
-	uint8_t		rrt;			/* Relative Read Throughput */
-	uint8_t		rrl;			/* Relative Read Latency */
-	uint8_t		rwt;			/* Relative Write Throughput */
-	uint8_t		rwl;			/* Relative Write Latency */
-
-	uint16_t	idlp;			/* Idle Power */
-	uint8_t		ips;			/* Idle Power Scale */
-	uint8_t		ps_rsvd8;
-
-	uint16_t	actp;			/* Active Power */
-	uint8_t		apw_aps;		/* Active Power Workload, Active Power Scale */
-	uint8_t		ps_rsvd10[9];
-} __packed;
-
-_Static_assert(sizeof(struct nvme_power_state) == 32, "bad size for nvme_power_state");
-
-#define NVME_SERIAL_NUMBER_LENGTH	20
-#define NVME_MODEL_NUMBER_LENGTH	40
-#define NVME_FIRMWARE_REVISION_LENGTH	8
-
-struct nvme_controller_data {
-
-	/* bytes 0-255: controller capabilities and features */
-
-	/** pci vendor id */
-	uint16_t		vid;
-
-	/** pci subsystem vendor id */
-	uint16_t		ssvid;
-
-	/** serial number */
-	uint8_t			sn[NVME_SERIAL_NUMBER_LENGTH];
-
-	/** model number */
-	uint8_t			mn[NVME_MODEL_NUMBER_LENGTH];
-
-	/** firmware revision */
-	uint8_t			fr[NVME_FIRMWARE_REVISION_LENGTH];
-
-	/** recommended arbitration burst */
-	uint8_t			rab;
-
-	/** ieee oui identifier */
-	uint8_t			ieee[3];
-
-	/** multi-interface capabilities */
-	uint8_t			mic;
-
-	/** maximum data transfer size */
-	uint8_t			mdts;
-
-	/** Controller ID */
-	uint16_t		ctrlr_id;
-
-	/** Version */
-	uint32_t		ver;
-
-	/** RTD3 Resume Latency */
-	uint32_t		rtd3r;
-
-	/** RTD3 Enter Latency */
-	uint32_t		rtd3e;
-
-	/** Optional Asynchronous Events Supported */
-	uint32_t		oaes;	/* bitfield really */
-
-	/** Controller Attributes */
-	uint32_t		ctratt;	/* bitfield really */
-
-	/** Read Recovery Levels Supported */
-	uint16_t		rrls;
-
-	uint8_t			reserved1[9];
-
-	/** Controller Type */
-	uint8_t			cntrltype;
-
-	/** FRU Globally Unique Identifier */
-	uint8_t			fguid[16];
-
-	/** Command Retry Delay Time 1 */
-	uint16_t		crdt1;
-
-	/** Command Retry Delay Time 2 */
-	uint16_t		crdt2;
-
-	/** Command Retry Delay Time 3 */
-	uint16_t		crdt3;
-
-	uint8_t			reserved2[122];
-
-	/* bytes 256-511: admin command set attributes */
-
-	/** optional admin command support */
-	uint16_t		oacs;
-
-	/** abort command limit */
-	uint8_t			acl;
-
-	/** asynchronous event request limit */
-	uint8_t			aerl;
-
-	/** firmware updates */
-	uint8_t			frmw;
-
-	/** log page attributes */
-	uint8_t			lpa;
-
-	/** error log page entries */
-	uint8_t			elpe;
-
-	/** number of power states supported */
-	uint8_t			npss;
-
-	/** admin vendor specific command configuration */
-	uint8_t			avscc;
-
-	/** Autonomous Power State Transition Attributes */
-	uint8_t			apsta;
-
-	/** Warning Composite Temperature Threshold */
-	uint16_t		wctemp;
-
-	/** Critical Composite Temperature Threshold */
-	uint16_t		cctemp;
-
-	/** Maximum Time for Firmware Activation */
-	uint16_t		mtfa;
-
-	/** Host Memory Buffer Preferred Size */
-	uint32_t		hmpre;
-
-	/** Host Memory Buffer Minimum Size */
-	uint32_t		hmmin;
-
-	/** Name space capabilities  */
-	struct {
-		/* if nsmgmt, report tnvmcap and unvmcap */
-		uint8_t    tnvmcap[16];
-		uint8_t    unvmcap[16];
-	} __packed untncap;
-
-	/** Replay Protected Memory Block Support */
-	uint32_t		rpmbs; /* Really a bitfield */
-
-	/** Extended Device Self-test Time */
-	uint16_t		edstt;
-
-	/** Device Self-test Options */
-	uint8_t			dsto; /* Really a bitfield */
-
-	/** Firmware Update Granularity */
-	uint8_t			fwug;
-
-	/** Keep Alive Support */
-	uint16_t		kas;
-
-	/** Host Controlled Thermal Management Attributes */
-	uint16_t		hctma; /* Really a bitfield */
-
-	/** Minimum Thermal Management Temperature */
-	uint16_t		mntmt;
-
-	/** Maximum Thermal Management Temperature */
-	uint16_t		mxtmt;
-
-	/** Sanitize Capabilities */
-	uint32_t		sanicap; /* Really a bitfield */
-
-	/** Host Memory Buffer Minimum Descriptor Entry Size */
-	uint32_t		hmminds;
-
-	/** Host Memory Maximum Descriptors Entries */
-	uint16_t		hmmaxd;
-
-	/** NVM Set Identifier Maximum */
-	uint16_t		nsetidmax;
-
-	/** Endurance Group Identifier Maximum */
-	uint16_t		endgidmax;
-
-	/** ANA Transition Time */
-	uint8_t			anatt;
-
-	/** Asymmetric Namespace Access Capabilities */
-	uint8_t			anacap;
-
-	/** ANA Group Identifier Maximum */
-	uint32_t		anagrpmax;
-
-	/** Number of ANA Group Identifiers */
-	uint32_t		nanagrpid;
-
-	/** Persistent Event Log Size */
-	uint32_t		pels;
-
-	uint8_t			reserved3[156];
-	/* bytes 512-703: nvm command set attributes */
-
-	/** submission queue entry size */
-	uint8_t			sqes;
-
-	/** completion queue entry size */
-	uint8_t			cqes;
-
-	/** Maximum Outstanding Commands */
-	uint16_t		maxcmd;
-
-	/** number of namespaces */
-	uint32_t		nn;
-
-	/** optional nvm command support */
-	uint16_t		oncs;
-
-	/** fused operation support */
-	uint16_t		fuses;
-
-	/** format nvm attributes */
-	uint8_t			fna;
-
-	/** volatile write cache */
-	uint8_t			vwc;
-
-	/** Atomic Write Unit Normal */
-	uint16_t		awun;
-
-	/** Atomic Write Unit Power Fail */
-	uint16_t		awupf;
-
-	/** NVM Vendor Specific Command Configuration */
-	uint8_t			nvscc;
-
-	/** Namespace Write Protection Capabilities */
-	uint8_t			nwpc;
-
-	/** Atomic Compare & Write Unit */
-	uint16_t		acwu;
-	uint16_t		reserved6;
-
-	/** SGL Support */
-	uint32_t		sgls;
-
-	/** Maximum Number of Allowed Namespaces */
-	uint32_t		mnan;
-
-	/* bytes 540-767: Reserved */
-	uint8_t			reserved7[224];
-
-	/** NVM Subsystem NVMe Qualified Name */
-	uint8_t			subnqn[256];
-
-	/* bytes 1024-1791: Reserved */
-	uint8_t			reserved8[768];
-
-	/* bytes 1792-2047: NVMe over Fabrics specification */
-	uint8_t			reserved9[256];
-
-	/* bytes 2048-3071: power state descriptors */
-	struct nvme_power_state power_state[32];
-
-	/* bytes 3072-4095: vendor specific */
-	uint8_t			vs[1024];
-} __packed __aligned(4);
-
-_Static_assert(sizeof(struct nvme_controller_data) == 4096, "bad size for nvme_controller_data");
-
-struct nvme_namespace_data {
-
-	/** namespace size */
-	uint64_t		nsze;
-
-	/** namespace capacity */
-	uint64_t		ncap;
-
-	/** namespace utilization */
-	uint64_t		nuse;
-
-	/** namespace features */
-	uint8_t			nsfeat;
-
-	/** number of lba formats */
-	uint8_t			nlbaf;
-
-	/** formatted lba size */
-	uint8_t			flbas;
-
-	/** metadata capabilities */
-	uint8_t			mc;
-
-	/** end-to-end data protection capabilities */
-	uint8_t			dpc;
-
-	/** end-to-end data protection type settings */
-	uint8_t			dps;
-
-	/** Namespace Multi-path I/O and Namespace Sharing Capabilities */
-	uint8_t			nmic;
-
-	/** Reservation Capabilities */
-	uint8_t			rescap;
-
-	/** Format Progress Indicator */
-	uint8_t			fpi;
-
-	/** Deallocate Logical Block Features */
-	uint8_t			dlfeat;
-
-	/** Namespace Atomic Write Unit Normal  */
-	uint16_t		nawun;
-
-	/** Namespace Atomic Write Unit Power Fail */
-	uint16_t		nawupf;
-
-	/** Namespace Atomic Compare & Write Unit */
-	uint16_t		nacwu;
-
-	/** Namespace Atomic Boundary Size Normal */
-	uint16_t		nabsn;
-
-	/** Namespace Atomic Boundary Offset */
-	uint16_t		nabo;
-
-	/** Namespace Atomic Boundary Size Power Fail */
-	uint16_t		nabspf;
-
-	/** Namespace Optimal IO Boundary */
-	uint16_t		noiob;
-
-	/** NVM Capacity */
-	uint8_t			nvmcap[16];
-
-	/** Namespace Preferred Write Granularity  */
-	uint16_t		npwg;
-
-	/** Namespace Preferred Write Alignment */
-	uint16_t		npwa;
-
-	/** Namespace Preferred Deallocate Granularity */
-	uint16_t		npdg;
-
-	/** Namespace Preferred Deallocate Alignment */
-	uint16_t		npda;
-
-	/** Namespace Optimal Write Size */
-	uint16_t		nows;
-
-	/* bytes 74-91: Reserved */
-	uint8_t			reserved5[18];
-
-	/** ANA Group Identifier */
-	uint32_t		anagrpid;
-
-	/* bytes 96-98: Reserved */
-	uint8_t			reserved6[3];
-
-	/** Namespace Attributes */
-	uint8_t			nsattr;
-
-	/** NVM Set Identifier */
-	uint16_t		nvmsetid;
-
-	/** Endurance Group Identifier */
-	uint16_t		endgid;
-
-	/** Namespace Globally Unique Identifier */
-	uint8_t			nguid[16];
-
-	/** IEEE Extended Unique Identifier */
-	uint8_t			eui64[8];
-
-	/** lba format support */
-	uint32_t		lbaf[16];
-
-	uint8_t			reserved7[192];
-
-	uint8_t			vendor_specific[3712];
-} __packed __aligned(4);
-
-_Static_assert(sizeof(struct nvme_namespace_data) == 4096, "bad size for nvme_namepsace_data");
-
-enum nvme_log_page {
-
-	/* 0x00 - reserved */
-	NVME_LOG_ERROR			= 0x01,
-	NVME_LOG_HEALTH_INFORMATION	= 0x02,
-	NVME_LOG_FIRMWARE_SLOT		= 0x03,
-	NVME_LOG_CHANGED_NAMESPACE	= 0x04,
-	NVME_LOG_COMMAND_EFFECT		= 0x05,
-	NVME_LOG_DEVICE_SELF_TEST	= 0x06,
-	NVME_LOG_TELEMETRY_HOST_INITIATED = 0x07,
-	NVME_LOG_TELEMETRY_CONTROLLER_INITIATED = 0x08,
-	NVME_LOG_ENDURANCE_GROUP_INFORMATION = 0x09,
-	NVME_LOG_PREDICTABLE_LATENCY_PER_NVM_SET = 0x0a,
-	NVME_LOG_PREDICTABLE_LATENCY_EVENT_AGGREGATE = 0x0b,
-	NVME_LOG_ASYMMETRIC_NAMESPAVE_ACCESS = 0x0c,
-	NVME_LOG_PERSISTENT_EVENT_LOG	= 0x0d,
-	NVME_LOG_LBA_STATUS_INFORMATION	= 0x0e,
-	NVME_LOG_ENDURANCE_GROUP_EVENT_AGGREGATE = 0x0f,
-	/* 0x06-0x7F - reserved */
-	/* 0x80-0xBF - I/O command set specific */
-	NVME_LOG_RES_NOTIFICATION	= 0x80,
-	NVME_LOG_SANITIZE_STATUS	= 0x81,
-	/* 0x82-0xBF - reserved */
-	/* 0xC0-0xFF - vendor specific */
-
-	/*
-	 * The following are Intel Specific log pages, but they seem
-	 * to be widely implemented.
-	 */
-	INTEL_LOG_READ_LAT_LOG		= 0xc1,
-	INTEL_LOG_WRITE_LAT_LOG		= 0xc2,
-	INTEL_LOG_TEMP_STATS		= 0xc5,
-	INTEL_LOG_ADD_SMART		= 0xca,
-	INTEL_LOG_DRIVE_MKT_NAME	= 0xdd,
-
-	/*
-	 * HGST log page, with lots ofs sub pages.
-	 */
-	HGST_INFO_LOG			= 0xc1,
 };
 
 struct nvme_error_information_entry {
@@ -1473,59 +814,6 @@ enum nvme_io_test_flags {
 	NVME_TEST_FLAG_REFTHREAD =	0x1,
 };
 
-struct nvme_pt_command {
-
-	/*
-	 * cmd is used to specify a passthrough command to a controller or
-	 *  namespace.
-	 *
-	 * The following fields from cmd may be specified by the caller:
-	 *	* opc  (opcode)
-	 *	* nsid (namespace id) - for admin commands only
-	 *	* cdw10-cdw15
-	 *
-	 * Remaining fields must be set to 0 by the caller.
-	 */
-	struct nvme_command	cmd;
-
-	/*
-	 * cpl returns completion status for the passthrough command
-	 *  specified by cmd.
-	 *
-	 * The following fields will be filled out by the driver, for
-	 *  consumption by the caller:
-	 *	* cdw0
-	 *	* status (except for phase)
-	 *
-	 * Remaining fields will be set to 0 by the driver.
-	 */
-	struct nvme_completion	cpl;
-
-	/* buf is the data buffer associated with this passthrough command. */
-	void *			buf;
-
-	/*
-	 * len is the length of the data buffer associated with this
-	 *  passthrough command.
-	 */
-	uint32_t		len;
-
-	/*
-	 * is_read = 1 if the passthrough command will read data into the
-	 *  supplied buffer from the controller.
-	 *
-	 * is_read = 0 if the passthrough command will write data from the
-	 *  supplied buffer to the controller.
-	 */
-	uint32_t		is_read;
-
-	/*
-	 * driver_lock is used by the driver only.  It must be set to 0
-	 *  by the caller.
-	 */
-	struct mtx *		driver_lock;
-};
-
 struct nvme_get_nsid {
 	char		cdev[SPECNAMELEN + 1];
 	uint32_t	nsid;
@@ -1546,8 +834,6 @@ struct nvme_pci_controller;
 struct nvme_controller;
 struct nvme_consumer;
 
-typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
-
 typedef void *(*nvme_cons_ns_fn_t)(struct nvme_namespace *, void *);
 typedef void *(*nvme_cons_ctrlr_fn_t)(struct nvme_controller *);
 typedef void (*nvme_cons_async_fn_t)(void *, const struct nvme_completion *,
@@ -1559,11 +845,6 @@ enum nvme_namespace_flags {
 	NVME_NS_FLUSH_SUPPORTED		= 0x2,
 };
 
-int	nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
-				   struct nvme_pt_command *pt,
-				   uint32_t nsid, int is_user_buffer,
-				   int is_admin_cmd);
-
 /* Admin functions */
 void	nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *ctrlr,
 				   uint8_t feature, uint32_t cdw11,
@@ -1573,10 +854,6 @@ void	nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *ctrlr,
 				   uint8_t feature, uint32_t cdw11,
 				   void *payload, uint32_t payload_size,
 				   nvme_cb_fn_t cb_fn, void *cb_arg);
-void	nvme_ctrlr_cmd_get_log_page(struct nvme_controller *ctrlr,
-				    uint8_t log_page, uint32_t nsid,
-				    void *payload, uint32_t payload_size,
-				    nvme_cb_fn_t cb_fn, void *cb_arg);
 
 /* NVM I/O functions */
 int	nvme_ns_cmd_write(struct nvme_namespace *ns, void *payload,
@@ -1605,9 +882,9 @@ struct nvme_consumer *	nvme_register_consumer(nvme_cons_ns_fn_t    ns_fn,
 void		nvme_unregister_consumer(struct nvme_consumer *consumer);
 
 /* Controller helper functions */
-device_t	nvme_ctrlr_get_device(struct nvme_pci_controller *ctrlr);
+device_t	nvme_ctrlr_get_device(struct nvme_pci_controller *pctrlr);
 const struct nvme_controller_data *
-		nvme_ctrlr_get_data(struct nvme_pci_controller *ctrlr);
+		nvme_ctrlr_get_data(struct nvme_pci_controller *pctrlr);
 static inline bool
 nvme_ctrlr_has_dataset_mgmt(const struct nvme_controller_data *cd)
 {
@@ -1684,89 +961,7 @@ void	nvme_ns_trim_cmd(struct nvme_command *cmd, uint32_t nsid,
 
 extern int nvme_use_nvd;
 
-void nvme_register_controller(struct nvme_controller *);
-void nvme_unregister_controller(struct nvme_controller *);
-
-#define nvme_ctrlr_submit_admin_request(c, r) (c)->nvmec_subadmreq((c), (r))
-#define nvme_ctrlr_submit_io_request(c, r) (c)->nvmec_subioreq((c), (r))
-
-#define NVME_IS_CTRLR_FAILED(c) ((c)->is_failed)
-
 #endif /* _KERNEL */
-
-/* Endianess conversion functions for NVMe structs */
-static inline
-void	nvme_completion_swapbytes(struct nvme_completion *s)
-{
-
-	s->cdw0 = le32toh(s->cdw0);
-	/* omit rsvd1 */
-	s->sqhd = le16toh(s->sqhd);
-	s->sqid = le16toh(s->sqid);
-	/* omit cid */
-	s->status = le16toh(s->status);
-}
-
-static inline
-void	nvme_power_state_swapbytes(struct nvme_power_state *s)
-{
-
-	s->mp = le16toh(s->mp);
-	s->enlat = le32toh(s->enlat);
-	s->exlat = le32toh(s->exlat);
-	s->idlp = le16toh(s->idlp);
-	s->actp = le16toh(s->actp);
-}
-
-static inline
-void	nvme_controller_data_swapbytes(struct nvme_controller_data *s)
-{
-	int i;
-
-	s->vid = le16toh(s->vid);
-	s->ssvid = le16toh(s->ssvid);
-	s->ctrlr_id = le16toh(s->ctrlr_id);
-	s->ver = le32toh(s->ver);
-	s->rtd3r = le32toh(s->rtd3r);
-	s->rtd3e = le32toh(s->rtd3e);
-	s->oaes = le32toh(s->oaes);
-	s->ctratt = le32toh(s->ctratt);
-	s->rrls = le16toh(s->rrls);
-	s->crdt1 = le16toh(s->crdt1);
-	s->crdt2 = le16toh(s->crdt2);
-	s->crdt3 = le16toh(s->crdt3);
-	s->oacs = le16toh(s->oacs);
-	s->wctemp = le16toh(s->wctemp);
-	s->cctemp = le16toh(s->cctemp);
-	s->mtfa = le16toh(s->mtfa);
-	s->hmpre = le32toh(s->hmpre);
-	s->hmmin = le32toh(s->hmmin);
-	s->rpmbs = le32toh(s->rpmbs);
-	s->edstt = le16toh(s->edstt);
-	s->kas = le16toh(s->kas);
-	s->hctma = le16toh(s->hctma);
-	s->mntmt = le16toh(s->mntmt);
-	s->mxtmt = le16toh(s->mxtmt);
-	s->sanicap = le32toh(s->sanicap);
-	s->hmminds = le32toh(s->hmminds);
-	s->hmmaxd = le16toh(s->hmmaxd);
-	s->nsetidmax = le16toh(s->nsetidmax);
-	s->endgidmax = le16toh(s->endgidmax);
-	s->anagrpmax = le32toh(s->anagrpmax);
-	s->nanagrpid = le32toh(s->nanagrpid);
-	s->pels = le32toh(s->pels);
-	s->maxcmd = le16toh(s->maxcmd);
-	s->nn = le32toh(s->nn);
-	s->oncs = le16toh(s->oncs);
-	s->fuses = le16toh(s->fuses);
-	s->awun = le16toh(s->awun);
-	s->awupf = le16toh(s->awupf);
-	s->acwu = le16toh(s->acwu);
-	s->sgls = le32toh(s->sgls);
-	s->mnan = le32toh(s->mnan);
-	for (i = 0; i < 32; i++)
-		nvme_power_state_swapbytes(&s->power_state[i]);
-}
 
 static inline
 void	nvme_namespace_data_swapbytes(struct nvme_namespace_data *s)
