@@ -101,4 +101,8 @@ to128(void *p)
 
 uint64_t le48dec(const void *pp);
 char * uint128_to_str(uint128_t u, char *buf, size_t buflen);
+
+#define MAX_IP_STR_LEN   39
+#define MAX_PORT_STR_LEN 5
+
 #endif

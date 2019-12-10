@@ -615,6 +615,8 @@ struct nvme_namespace_data {
 _Static_assert(sizeof(struct nvme_namespace_data) == NVME_CNS_SZ,
     "bad size for nvme_namepsace_data");
 
+typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
+
 #ifdef _KERNEL
 struct nvme_namespace {
 
@@ -699,8 +701,6 @@ struct nvme_controller {
 
 void nvme_register_controller(struct nvme_controller *);
 void nvme_unregister_controller(struct nvme_controller *);
-
-typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
 
 struct nvme_qpair {
 	uint32_t		qid;

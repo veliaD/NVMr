@@ -40,13 +40,13 @@ __FBSDID("$FreeBSD$");
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <sysexits.h>
 
 #include "nvmecontrol.h"
 #include "comnd.h"
 
 /* Tables for command line parsing */
-
-#define NVME_MAX_UNIT 256
 
 static cmd_fn_t devlist;
 
@@ -78,25 +78,40 @@ devlist(const struct cmd *f, int argc, char *argv[])
 {
 	struct nvme_controller_data	cdata;
 	struct nvme_namespace_data	nsdata;
-	char				name[64];
+	char				name[64], *eptr;
 	uint8_t				mn[64];
 	uint32_t			i;
 	int				ctrlr, fd, found, ret;
+	DIR				*dirp;
+	struct dirent			*dp;
+	size_t				prfxlen;
 
 	if (arg_parse(argc, argv, f))
 		return;
 
 	ctrlr = -1;
 	found = 0;
+	dirp = opendir(_PATH_DEV);
+	if (dirp == NULL) {
+		err(EX_OSFILE, "Could not open dir "_PATH_DEV);
+	}
 
-	while (ctrlr < NVME_MAX_UNIT) {
-		ctrlr++;
-		sprintf(name, "%s%d", NVME_CTRLR_PREFIX, ctrlr);
+	prfxlen = strlen(NVME_CTRLR_PREFIX);
+	while (dp = readdir(dirp), dp != NULL) {
+		if (strncmp(dp->d_name, NVME_CTRLR_PREFIX, prfxlen) != 0) {
+			continue;
+		}
 
-		ret = open_dev(name, &fd, 0, 0);
+		errno = 0;
+		ctrlr = (int)strtol(dp->d_name + prfxlen, &eptr, 10);
+		if ((errno != 0) || (*eptr != '\0')) {
+			continue;
+		}
 
-		if (ret == EACCES) {
-			warnx("could not open "_PATH_DEV"%s\n", name);
+		ret = open_dev(dp->d_name, &fd, 0, 0);
+
+		if (ret != 0) {
+			warnx("could not open "_PATH_DEV"%s\n", dp->d_name);
 			continue;
 		} else if (ret != 0)
 			continue;
@@ -104,13 +119,13 @@ devlist(const struct cmd *f, int argc, char *argv[])
 		found++;
 		read_controller_data(fd, &cdata);
 		nvme_strvis(mn, cdata.mn, sizeof(mn), NVME_MODEL_NUMBER_LENGTH);
-		printf("%6s: %s\n", name, mn);
+		printf("%14s: %s\n", dp->d_name, mn);
 
 		for (i = 0; i < cdata.nn; i++) {
 			read_namespace_data(fd, i + 1, &nsdata);
 			if (nsdata.nsze == 0)
 				continue;
-			sprintf(name, "%s%d%s%d", NVME_CTRLR_PREFIX, ctrlr,
+			sprintf(dp->d_name, "%s%d%s%d", NVME_CTRLR_PREFIX, ctrlr,
 			    NVME_NS_PREFIX, i + 1);
 			printf("  %10s (%lldMB)\n",
 				name,
@@ -121,6 +136,8 @@ devlist(const struct cmd *f, int argc, char *argv[])
 
 		close(fd);
 	}
+
+	closedir(dirp);
 
 	if (found == 0)
 		printf("No NVMe controllers found.\n");
