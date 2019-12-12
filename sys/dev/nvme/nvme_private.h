@@ -92,13 +92,6 @@ MALLOC_DECLARE(M_NVME);
 #define NVME_INT_COAL_TIME	(0)	/* disabled */
 #define NVME_INT_COAL_THRESHOLD (0)	/* 0-based */
 
-#define NVME_MAX_CONSUMERS	(2)
-#define NVME_MAX_ASYNC_EVENTS	(8)
-
-#define NVME_DEFAULT_TIMEOUT_PERIOD	(30)    /* in seconds */
-#define NVME_MIN_TIMEOUT_PERIOD		(5)
-#define NVME_MAX_TIMEOUT_PERIOD		(120)
-
 #define NVME_DEFAULT_RETRY_COUNT	(4)
 
 /* Maximum log page size to fetch for AERs. */
@@ -115,14 +108,6 @@ MALLOC_DECLARE(M_NVME);
 extern uma_zone_t	nvme_request_zone;
 extern int32_t		nvme_retry_count;
 extern bool		nvme_verbose_cmd_dump;
-
-extern devclass_t nvme_devclass;
-
-#define NVME_REQUEST_VADDR	1
-#define NVME_REQUEST_NULL	2 /* For requests with no payload. */
-#define NVME_REQUEST_UIO	3
-#define NVME_REQUEST_BIO	4
-#define NVME_REQUEST_CCB        5
 
 struct nvme_tracker {
 
@@ -180,8 +165,6 @@ struct nvme_pci_qpair {
 
 	struct nvme_qpair	gqpair;
 } __aligned(CACHE_LINE_SIZE);
-
-#define NVME_VFFSTRSZ 32
 
 #define NVMP_STRING "NVMe over PCIe"
 #define CONFIRMPCIECONTROLLER KASSERT(strncmp(pctrlr->very_first_field, \
@@ -276,6 +259,10 @@ struct nvme_pci_controller {
 
 void	nvme_ns_test(struct nvme_namespace *ns, u_long cmd, caddr_t arg);
 
+void	nvme_ctrlr_cmd_identify_nsdesclist(struct nvme_controller *ctrlr,
+					  uint32_t nsid, void *payload,
+					  size_t payload_sz, nvme_cb_fn_t cb_fn,
+					  void *cb_arg);
 void	nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *ctrlr,
 					   void *payload,
 					   nvme_cb_fn_t cb_fn, void *cb_arg);
@@ -321,9 +308,6 @@ void	nvme_ctrlr_cmd_set_async_event_config(struct nvme_pci_controller *ctrlr,
 					      nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_abort(struct nvme_pci_controller *ctrlr, uint16_t cid,
 			     uint16_t sqid, nvme_cb_fn_t cb_fn, void *cb_arg);
-
-void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
-
 int	nvme_ctrlr_construct(struct nvme_pci_controller *ctrlr, device_t dev);
 void	nvme_ctrlr_destruct(struct nvme_pci_controller *ctrlr, device_t dev);
 void	nvme_ctrlr_shutdown(struct nvme_pci_controller *ctrlr);
@@ -362,7 +346,6 @@ void	nvme_io_qpair_destroy(struct nvme_pci_qpair *qpair);
 
 int	nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 			  struct nvme_controller *ctrlr);
-void	nvme_ns_destruct(struct nvme_namespace *ns);
 
 void	nvme_sysctl_initialize_ctrlr(struct nvme_pci_controller *ctrlr);
 
@@ -404,11 +387,12 @@ nvme_single_map(void *arg, bus_dma_segment_t *seg, int nseg, int error)
 }
 
 static __inline struct nvme_request *
-nvme_allocate_request_bio(struct bio *bio, nvme_cb_fn_t cb_fn, void *cb_arg)
+nvme_allocate_request_bio(struct bio *bio, nvme_cb_fn_t cb_fn, void *cb_arg1,
+    void *cb_arg2)
 {
 	struct nvme_request *req;
 
-	req = _nvme_allocate_request(cb_fn, cb_arg);
+	req = _nvme_allocate_request(cb_fn, cb_arg1, cb_arg2);
 	if (req != NULL) {
 		req->type = NVME_REQUEST_BIO;
 		req->u.bio = bio;
@@ -421,7 +405,7 @@ nvme_allocate_request_ccb(union ccb *ccb, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request *req;
 
-	req = _nvme_allocate_request(cb_fn, cb_arg);
+	req = _nvme_allocate_request(cb_fn, cb_arg, NULL);
 	if (req != NULL) {
 		req->type = NVME_REQUEST_CCB;
 		req->u.payload = ccb;
@@ -430,14 +414,10 @@ nvme_allocate_request_ccb(union ccb *ccb, nvme_cb_fn_t cb_fn, void *cb_arg)
 	return (req);
 }
 
-#define nvme_free_request(req)	uma_zfree(nvme_request_zone, req)
-
 void	nvme_notify_async_consumers(struct nvme_pci_controller *ctrlr,
 				    const struct nvme_completion *async_cpl,
 				    uint32_t log_page_id, void *log_page_buffer,
 				    uint32_t log_page_size);
-void	nvme_notify_fail_consumers(struct nvme_controller *ctrlr);
-void	nvme_notify_new_controller(struct nvme_controller *ctrlr);
 void	nvme_notify_ns(struct nvme_pci_controller *ctrlr, int nsid);
 
 void	nvme_ctrlr_intx_handler(void *arg);

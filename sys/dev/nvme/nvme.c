@@ -390,9 +390,9 @@ nvme_unregister_consumer(struct nvme_consumer *consumer)
 }
 
 void
-nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl)
+nvme_completion_poll_cb(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct nvme_completion_poll_status	*status = arg;
+	struct nvme_completion_poll_status	*status = arg1;
 
 	/*
 	 * Copy status into the argument passed by the caller, so that

@@ -455,7 +455,7 @@ nvme_qpair_complete_tracker(struct nvme_tracker *tr,
 			    BUS_DMASYNC_POSTREAD | BUS_DMASYNC_POSTWRITE);
 		}
 		if (req->cb_fn)
-			req->cb_fn(req->cb_arg, cpl);
+			req->cb_fn(req->cb_arg1, req->cb_arg2, cpl);
 	}
 
 	mtx_lock(&qpair->gqpair.qlock);
@@ -531,7 +531,7 @@ nvme_qpair_manual_complete_request(struct nvme_qpair *qpair,
 	}
 
 	if (req->cb_fn)
-		req->cb_fn(req->cb_arg, &cpl);
+		req->cb_fn(req->cb_arg1, req->cb_arg2, &cpl);
 
 	nvme_free_request(req);
 }
@@ -887,9 +887,9 @@ nvme_io_qpair_destroy(struct nvme_pci_qpair *qpair)
 }
 
 static void
-nvme_abort_complete(void *arg, const struct nvme_completion *status)
+nvme_abort_complete(void *arg1, void *arg2, const struct nvme_completion *status)
 {
-	struct nvme_tracker	*tr = arg;
+	struct nvme_tracker	*tr = arg1;
 
 	/*
 	 * If cdw0 == 1, the controller was not able to abort the command

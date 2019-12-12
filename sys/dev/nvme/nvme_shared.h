@@ -245,6 +245,23 @@ struct nvme_power_state {
 _Static_assert(sizeof(struct nvme_power_state) == 32, "bad size for nvme_power_state");
 
 
+struct nvme_namespace_desclist {
+	/** byte 0: Namespace Identifier Type **/
+	uint8_t			ndl_nidt;
+
+	/** byte 1: Namespace Identifier Length **/
+	uint8_t			ndl_nidl;
+
+	/** bytes 2-3: Reserved **/
+	uint16_t		ndl_resv0;
+
+	/** bytes 4 to (ndl_nidl + 3): Namespace Identifier **/
+	uint8_t			ndl_nid[0];
+
+} __packed __aligned(4);
+_Static_assert(sizeof(struct nvme_namespace_desclist) == 4,
+    "bad size for struct nvme_namespace_desclist");
+
 #define NVME_CNS_SZ 4096 /* Data size returned from Identify Admin Command */
 
 struct nvme_controller_data {
@@ -500,6 +517,14 @@ struct nvme_controller_data {
 _Static_assert(sizeof(struct nvme_controller_data) == NVME_CNS_SZ,
     "bad size for nvme_controller_data");
 
+#define NSDESC_EUI64 1
+#define NSDESC_NGUID 2
+#define NSDESC_NUUID 3
+
+#define NS_EUI64SZ 8
+#define NS_NGUIDSZ 16
+#define NS_NUUIDSZ 16
+
 struct nvme_namespace_data {
 
 	/** namespace size */
@@ -615,9 +640,20 @@ struct nvme_namespace_data {
 _Static_assert(sizeof(struct nvme_namespace_data) == NVME_CNS_SZ,
     "bad size for nvme_namepsace_data");
 
-typedef void (*nvme_cb_fn_t)(void *, const struct nvme_completion *);
+typedef void (*nvme_cb_fn_t)(void *, void *, const struct nvme_completion *);
 
 #ifdef _KERNEL
+struct nvme_ns_gid {
+	boolean_t			eui64_available;
+	uint8_t				eui64[NS_EUI64SZ];
+
+	boolean_t			nguid_available;
+	uint8_t				nguid[NS_NGUIDSZ];
+
+	boolean_t			nuuid_available;
+	uint8_t				nuuid[NS_NUUIDSZ];
+};
+
 struct nvme_namespace {
 
 	struct nvme_controller		*ctrlr;
@@ -628,6 +664,9 @@ struct nvme_namespace {
 	void				*cons_cookie[NVME_MAX_CONSUMERS];
 	uint32_t			boundary;
 	struct mtx			lock;
+
+	void				*nvmens_conscookie;
+	struct nvme_ns_gid		nns_gids;
 };
 
 enum nvme_transport {
@@ -723,7 +762,8 @@ struct nvme_request {
 	uint32_t			payload_size;
 	boolean_t			timeout;
 	nvme_cb_fn_t			cb_fn;
-	void				*cb_arg;
+	void				*cb_arg1;
+	void				*cb_arg2;
 	int32_t				retries;
 	STAILQ_ENTRY(nvme_request)	stailq;
 };
@@ -817,25 +857,26 @@ struct nvme_completion_poll_status {
 
 #ifdef _KERNEL
 static __inline struct nvme_request *
-_nvme_allocate_request(nvme_cb_fn_t cb_fn, void *cb_arg)
+_nvme_allocate_request(nvme_cb_fn_t cb_fn, void *cb_arg1, void *cb_arg2)
 {
 	struct nvme_request *req;
 
 	req = uma_zalloc(nvme_request_zone, M_NOWAIT | M_ZERO);
 	if (req != NULL) {
 		req->cb_fn = cb_fn;
-		req->cb_arg = cb_arg;
+		req->cb_arg1 = cb_arg1;
+		req->cb_arg2 = cb_arg2;
 		req->timeout = TRUE;
 	}
 	return (req);
 }
 
 static __inline struct nvme_request *
-nvme_allocate_request_null(nvme_cb_fn_t cb_fn, void *cb_arg)
+nvme_allocate_request_null(nvme_cb_fn_t cb_fn, void *cb_arg1, void *cb_arg2)
 {
 	struct nvme_request *req;
 
-	req = _nvme_allocate_request(cb_fn, cb_arg);
+	req = _nvme_allocate_request(cb_fn, cb_arg1, cb_arg2);
 	if (req != NULL)
 		req->type = NVME_REQUEST_NULL;
 	return (req);
@@ -843,11 +884,11 @@ nvme_allocate_request_null(nvme_cb_fn_t cb_fn, void *cb_arg)
 
 static __inline struct nvme_request *
 nvme_allocate_request_vaddr(void *payload, uint32_t payload_size,
-    nvme_cb_fn_t cb_fn, void *cb_arg)
+    nvme_cb_fn_t cb_fn, void *cb_arg1, void *cb_arg2)
 {
 	struct nvme_request *req;
 
-	req = _nvme_allocate_request(cb_fn, cb_arg);
+	req = _nvme_allocate_request(cb_fn, cb_arg1, cb_arg2);
 	if (req != NULL) {
 		req->type = NVME_REQUEST_VADDR;
 		req->u.payload = payload;
@@ -857,7 +898,7 @@ nvme_allocate_request_vaddr(void *payload, uint32_t payload_size,
 }
 #endif /* _KERNEL */
 
-void	nvme_completion_poll_cb(void *arg, const struct nvme_completion *cpl);
+void	nvme_completion_poll_cb(void *arg1, void *arg2, const struct nvme_completion *cpl);
 
 #define nvme_ctrlr_submit_admin_request(c, r) (c)->nvmec_subadmreq((c), (r))
 #define nvme_ctrlr_submit_io_request(c, r) (c)->nvmec_subioreq((c), (r))

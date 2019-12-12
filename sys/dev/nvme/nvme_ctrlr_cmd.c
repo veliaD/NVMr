@@ -33,6 +33,25 @@ __FBSDID("$FreeBSD$");
 #include "nvme_private.h"
 
 void
+nvme_ctrlr_cmd_identify_nsdesclist(struct nvme_controller *ctrlr, uint32_t nsid,
+	void *payload, size_t payload_sz, nvme_cb_fn_t cb_fn, void *cb_arg)
+{
+	struct nvme_request *req;
+	struct nvme_command *cmd;
+
+	req = nvme_allocate_request_vaddr(payload, payload_sz, cb_fn, cb_arg,
+	    NULL);
+
+	cmd = &req->cmd;
+	cmd->opc = NVME_OPC_IDENTIFY;
+	cmd->cdw10 = htole32(3);
+
+	cmd->nsid = htole32(nsid);
+
+	nvme_ctrlr_submit_admin_request(ctrlr, req);
+}
+
+void
 nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *payload,
 	nvme_cb_fn_t cb_fn, void *cb_arg)
 {
@@ -41,7 +60,7 @@ nvme_ctrlr_cmd_identify_controller(struct nvme_pci_controller *pctrlr, void *pay
 
 	CONFIRMPCIECONTROLLER;
 	req = nvme_allocate_request_vaddr(payload,
-	    sizeof(struct nvme_controller_data), cb_fn, cb_arg);
+	    sizeof(struct nvme_controller_data), cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_IDENTIFY;
@@ -63,7 +82,7 @@ nvme_ctrlr_cmd_identify_namespace(struct nvme_controller *ctrlr, uint32_t nsid,
 	struct nvme_command *cmd;
 
 	req = nvme_allocate_request_vaddr(payload,
-	    sizeof(struct nvme_namespace_data), cb_fn, cb_arg);
+	    sizeof(struct nvme_namespace_data), cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_IDENTIFY;
@@ -84,7 +103,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_pci_controller *pctrlr,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_CREATE_IO_CQ;
@@ -109,7 +128,7 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_pci_controller *pctrlr,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_CREATE_IO_SQ;
@@ -134,7 +153,7 @@ nvme_ctrlr_cmd_delete_io_cq(struct nvme_pci_controller *pctrlr,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_DELETE_IO_CQ;
@@ -156,7 +175,7 @@ nvme_ctrlr_cmd_delete_io_sq(struct nvme_pci_controller *pctrlr,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_DELETE_IO_SQ;
@@ -179,7 +198,7 @@ nvme_ctrlr_cmd_set_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_SET_FEATURES;
@@ -198,7 +217,7 @@ nvme_ctrlr_cmd_get_feature(struct nvme_pci_controller *pctrlr, uint8_t feature,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_GET_FEATURES;
@@ -267,7 +286,7 @@ nvme_ctrlr_cmd_get_log_page(struct nvme_controller *ctrlr, uint8_t log_page,
 	struct nvme_request *req;
 	struct nvme_command *cmd;
 
-	req = nvme_allocate_request_vaddr(payload, payload_size, cb_fn, cb_arg);
+	req = nvme_allocate_request_vaddr(payload, payload_size, cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_GET_LOG_PAGE;
@@ -331,7 +350,7 @@ nvme_ctrlr_cmd_abort(struct nvme_pci_controller *pctrlr, uint16_t cid,
 	struct nvme_command *cmd;
 
 	CONFIRMPCIECONTROLLER;
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	req = nvme_allocate_request_null(cb_fn, cb_arg, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_ABORT;

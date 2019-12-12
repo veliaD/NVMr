@@ -160,9 +160,9 @@ nvme_ns_bio_test(void *arg)
 }
 
 static void
-nvme_ns_io_test_cb(void *arg, const struct nvme_completion *cpl)
+nvme_ns_io_test_cb(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct nvme_io_test_thread	*tth = arg;
+	struct nvme_io_test_thread	*tth = arg1;
 	struct timeval			t;
 
 	tth->io_completed++;
@@ -216,7 +216,7 @@ nvme_ns_io_test(void *arg)
 
 	memset(&cpl, 0, sizeof(cpl));
 
-	nvme_ns_io_test_cb(tth, &cpl);
+	nvme_ns_io_test_cb(tth, NULL, &cpl);
 
 	error = tsleep(tth, 0, "test_wait", tth->time*hz*2);
 

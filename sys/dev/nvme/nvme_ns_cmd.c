@@ -39,7 +39,7 @@ nvme_ns_cmd_read(struct nvme_namespace *ns, void *payload, uint64_t lba,
 	struct nvme_request	*req;
 
 	req = nvme_allocate_request_vaddr(payload,
-	    lba_count*nvme_ns_get_sector_size(ns), cb_fn, cb_arg);
+	    lba_count*nvme_ns_get_sector_size(ns), cb_fn, cb_arg, ns);
 
 	if (req == NULL)
 		return (ENOMEM);
@@ -59,7 +59,11 @@ nvme_ns_cmd_read_bio(struct nvme_namespace *ns, struct bio *bp,
 	uint64_t		lba;
 	uint64_t		lba_count;
 
-	req = nvme_allocate_request_bio(bp, cb_fn, cb_arg);
+	if (NVME_IS_CTRLR_FAILED(ns->ctrlr)) {
+		return (ESHUTDOWN);
+	}
+
+	req = nvme_allocate_request_bio(bp, cb_fn, cb_arg, ns);
 
 	if (req == NULL)
 		return (ENOMEM);
@@ -80,7 +84,7 @@ nvme_ns_cmd_write(struct nvme_namespace *ns, void *payload, uint64_t lba,
 	struct nvme_request	*req;
 
 	req = nvme_allocate_request_vaddr(payload,
-	    lba_count*nvme_ns_get_sector_size(ns), cb_fn, cb_arg);
+	    lba_count*nvme_ns_get_sector_size(ns), cb_fn, cb_arg, ns);
 
 	if (req == NULL)
 		return (ENOMEM);
@@ -100,7 +104,11 @@ nvme_ns_cmd_write_bio(struct nvme_namespace *ns, struct bio *bp,
 	uint64_t		lba;
 	uint64_t		lba_count;
 
-	req = nvme_allocate_request_bio(bp, cb_fn, cb_arg);
+	if (NVME_IS_CTRLR_FAILED(ns->ctrlr)) {
+		return (ESHUTDOWN);
+	}
+
+	req = nvme_allocate_request_bio(bp, cb_fn, cb_arg, ns);
 
 	if (req == NULL)
 		return (ENOMEM);
@@ -120,8 +128,12 @@ nvme_ns_cmd_deallocate(struct nvme_namespace *ns, void *payload,
 	struct nvme_request	*req;
 	struct nvme_command	*cmd;
 
+	if (NVME_IS_CTRLR_FAILED(ns->ctrlr)) {
+		return (ESHUTDOWN);
+	}
+
 	req = nvme_allocate_request_vaddr(payload,
-	    num_ranges * sizeof(struct nvme_dsm_range), cb_fn, cb_arg);
+	    num_ranges * sizeof(struct nvme_dsm_range), cb_fn, cb_arg, ns);
 
 	if (req == NULL)
 		return (ENOMEM);
@@ -144,7 +156,11 @@ nvme_ns_cmd_flush(struct nvme_namespace *ns, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	struct nvme_request	*req;
 
-	req = nvme_allocate_request_null(cb_fn, cb_arg);
+	if (NVME_IS_CTRLR_FAILED(ns->ctrlr)) {
+		return (ESHUTDOWN);
+	}
+
+	req = nvme_allocate_request_null(cb_fn, cb_arg, ns);
 
 	if (req == NULL)
 		return (ENOMEM);
@@ -169,7 +185,7 @@ nvme_ns_dump(struct nvme_namespace *ns, void *virt, off_t offset, size_t len)
 
 	status.done = FALSE;
 	req = nvme_allocate_request_vaddr(virt, len, nvme_completion_poll_cb,
-	    &status);
+	    &status, ns);
 	if (req == NULL)
 		return (ENOMEM);
 

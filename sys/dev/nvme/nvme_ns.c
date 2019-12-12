@@ -48,8 +48,8 @@ __FBSDID("$FreeBSD$");
 
 #include "nvme_private.h"
 
-static void		nvme_bio_child_inbed(struct bio *parent, int bio_error);
-static void		nvme_bio_child_done(void *arg,
+static void		nvme_bio_child_inbed(struct bio *parent, struct nvme_namespace *ns, int bio_error);
+static void		nvme_bio_child_done(void *arg1, void *arg2,
 					    const struct nvme_completion *cpl);
 static uint32_t		nvme_get_num_segments(uint64_t addr, uint64_t size,
 					      uint32_t alignment);
@@ -125,9 +125,9 @@ nvme_ns_close(struct cdev *dev __unused, int flags, int fmt __unused,
 }
 
 static void
-nvme_ns_strategy_done(void *arg, const struct nvme_completion *cpl)
+nvme_ns_strategy_done(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct bio *bp = arg;
+	struct bio *bp = arg1;
 
 	/*
 	 * TODO: add more extensive translation of NVMe status codes
@@ -240,20 +240,37 @@ nvme_ns_get_stripesize(struct nvme_namespace *ns)
 }
 
 static void
-nvme_ns_bio_done(void *arg, const struct nvme_completion *status)
+nvme_ns_bio_done(void *arg1, void *arg2, const struct nvme_completion *status)
 {
-	struct bio	*bp = arg;
+	struct bio	*bp = arg1;
+	struct nvme_namespace	*ns = arg2;
 	nvme_cb_fn_t	bp_cb_fn;
+	uint16_t stat;
+	uint8_t sc, sct;
 
 	bp_cb_fn = bp->bio_driver1;
 
 	if (bp->bio_driver2)
 		free(bp->bio_driver2, M_NVME);
 
+	/*
+	 * TODO: add more extensive translation of NVMe status codes
+	 *  to different bio error codes (especially ESHUTDOWN situations)
+	 */
 	if (nvme_completion_is_error(status)) {
 		bp->bio_flags |= BIO_ERROR;
-		if (bp->bio_error == 0)
-			bp->bio_error = EIO;
+		if (bp->bio_error == 0) {
+			stat = le16toh(status->status);
+			sc  = NVME_STATUS_GET_SC(stat);
+			sct = NVME_STATUS_GET_SCT(stat);
+
+			if ((sct == NVME_SCT_GENERIC) &&
+			    (sc == NVME_SC_ABORTED_BY_REQUEST)) {
+				bp->bio_error = ESHUTDOWN;
+			} else {
+				bp->bio_error = EIO;
+			}
+		}
 	}
 
 	if ((bp->bio_flags & BIO_ERROR) == 0)
@@ -261,14 +278,15 @@ nvme_ns_bio_done(void *arg, const struct nvme_completion *status)
 	else
 		bp->bio_resid = bp->bio_bcount;
 
-	bp_cb_fn(bp, status);
+	bp_cb_fn(bp, ns, status);
 }
 
 static void
-nvme_bio_child_inbed(struct bio *parent, int bio_error)
+nvme_bio_child_inbed(struct bio *parent, struct nvme_namespace *ns, int bio_error)
 {
 	struct nvme_completion	parent_cpl;
 	int			children, inbed;
+	enum nvme_generic_command_status_code sc;
 
 	if (bio_error != 0) {
 		parent->bio_flags |= BIO_ERROR;
@@ -286,24 +304,48 @@ nvme_bio_child_inbed(struct bio *parent, int bio_error)
 	if (inbed == children) {
 		bzero(&parent_cpl, sizeof(parent_cpl));
 		if (parent->bio_flags & BIO_ERROR) {
-			parent_cpl.status &= ~(NVME_STATUS_SC_MASK << NVME_STATUS_SC_SHIFT);
-			parent_cpl.status |= (NVME_SC_DATA_TRANSFER_ERROR) << NVME_STATUS_SC_SHIFT;
+			sc = (parent->bio_error == ESHUTDOWN) ?
+			    NVME_SC_ABORTED_BY_REQUEST :
+			    NVME_SC_DATA_TRANSFER_ERROR;
+
+			/* Set SCT to NVME_SCT_GENERIC */
+			parent_cpl.status &= ~(NVME_STATUS_SC_MASK <<
+			    NVME_STATUS_SC_SHIFT);
+			parent_cpl.status |= sc << NVME_STATUS_SC_SHIFT;
 		}
-		nvme_ns_bio_done(parent, &parent_cpl);
+		nvme_ns_bio_done(parent, ns, &parent_cpl);
 	}
 }
 
 static void
-nvme_bio_child_done(void *arg, const struct nvme_completion *cpl)
+nvme_bio_child_done(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct bio		*child = arg;
+	struct bio		*child = arg1;
+	struct nvme_namespace	*ns = arg2;
 	struct bio		*parent;
 	int			bio_error;
+	uint16_t		stat;
+	uint8_t			sc, sct;
 
 	parent = child->bio_parent;
 	g_destroy_bio(child);
-	bio_error = nvme_completion_is_error(cpl) ? EIO : 0;
-	nvme_bio_child_inbed(parent, bio_error);
+
+	if (nvme_completion_is_error(cpl)) {
+		stat = le16toh(cpl->status);
+		sc  = NVME_STATUS_GET_SC(stat);
+		sct = NVME_STATUS_GET_SCT(stat);
+
+		if ((sct == NVME_SCT_GENERIC) &&
+		    (sc == NVME_SC_ABORTED_BY_REQUEST)) {
+			bio_error = ESHUTDOWN;
+		} else {
+			bio_error = EIO;
+		}
+	} else {
+		bio_error = 0;
+	}
+
+	nvme_bio_child_inbed(parent, ns, bio_error);
 }
 
 static uint32_t
@@ -433,7 +475,7 @@ nvme_ns_split_bio(struct nvme_namespace *ns, struct bio *bp,
 		child = child_bios[i];
 		err = nvme_ns_bio_process(ns, child, nvme_bio_child_done);
 		if (err != 0) {
-			nvme_bio_child_inbed(bp, err);
+			nvme_bio_child_inbed(bp, ns, err);
 			g_destroy_bio(child);
 		}
 	}
@@ -495,6 +537,143 @@ nvme_ns_bio_process(struct nvme_namespace *ns, struct bio *bp,
 
 	return (err);
 }
+
+static inline bool
+all_zeroes(uint8_t *ptr, size_t len)
+{
+	boolean_t retval;
+
+	retval = true;
+	while(len != 0) {
+		if (ptr[len] != 0) {
+			retval = false;
+			break;
+		}
+		len--;
+	}
+
+	return retval;
+}
+
+#define ALL_ZEROES(field) \
+	all_zeroes(field, sizeof(field))
+
+static void
+nvme_ns_find_uid(struct nvme_controller *gctrlr, uint32_t id,
+    struct nvme_namespace *ns)
+{
+	struct nvme_completion_poll_status	status;
+	uint8_t					*desclist, *crsr;
+	struct nvme_namespace_desclist		*desc;
+
+
+	ns->nns_gids.eui64_available = false;
+	ns->nns_gids.nguid_available = false;
+	ns->nns_gids.nuuid_available = false;
+
+	/* Attempt to find the globally unique IDs for namespace via CNS3 */
+
+	desclist = malloc(NVME_CNS_SZ, M_NVME, M_ZERO | M_WAITOK);
+	status.done = FALSE;
+	nvme_ctrlr_cmd_identify_nsdesclist(gctrlr, id, desclist, NVME_CNS_SZ,
+	    nvme_completion_poll_cb, &status);
+	while (status.done == FALSE) {
+		DELAY(5);
+	}
+
+	if (!nvme_completion_is_error(&status.cpl)) {
+		crsr = desclist;
+		do {
+			desc = (struct nvme_namespace_desclist *)crsr;
+			DBGSPEW("t:%hhu l:%hhu\n", desc->ndl_nidt,
+			    desc->ndl_nidl);
+			if (desc->ndl_nidl == 0) {
+				break;
+			}
+
+			switch(desc->ndl_nidt) {
+			case NSDESC_EUI64:
+				if ((desc->ndl_nid + sizeof(ns->nns_gids.
+				    eui64)) > (desclist + NVME_CNS_SZ)) {
+					ERRSPEW("Insufficient bytes in CNS3 "
+					    "response for EUI64 UID:%ld\n",
+					    crsr - desclist);
+					break;
+				}
+				ns->nns_gids.eui64_available = true;
+				memcpy(ns->nns_gids.eui64, desc->ndl_nid,
+				    sizeof(ns->nns_gids.eui64));
+				break;
+
+			case NSDESC_NGUID:
+				if ((desc->ndl_nid + sizeof(ns->nns_gids.
+				    nguid)) > (desclist + NVME_CNS_SZ)) {
+					ERRSPEW("Insufficient bytes in CNS3 "
+					    "response for NGUID UID:%ld\n",
+					    crsr - desclist);
+					break;
+				}
+				ns->nns_gids.nguid_available = true;
+				memcpy(ns->nns_gids.nguid, desc->ndl_nid,
+				    sizeof(ns->nns_gids.nguid));
+				break;
+
+			case NSDESC_NUUID:
+				if ((desc->ndl_nid + sizeof(ns->nns_gids.
+				    nuuid)) > (desclist + NVME_CNS_SZ)) {
+					ERRSPEW("Insufficient bytes in CNS3 "
+					    "response for NUUID UID:%ld\n",
+					    crsr - desclist);
+					break;
+				}
+				ns->nns_gids.nuuid_available = true;
+				memcpy(ns->nns_gids.nuuid, desc->ndl_nid,
+				    sizeof(ns->nns_gids.nuuid));
+				break;
+
+			default:
+				ERRSPEW("Unsupported Globally Unique NS ID "
+				    "t:%hhu l:%hhu\n", desc->ndl_nidt,
+				    desc->ndl_nidl);
+			}
+
+			crsr += desc->ndl_nidl +
+			    sizeof(struct nvme_namespace_desclist);
+		} while (crsr < (desclist + NVME_CNS_SZ));
+	}
+
+	free(desclist, M_NVME);
+
+	/* If the NGUID is not available through CNS3 check the CNS0 response */
+	if (!ns->nns_gids.nguid_available) {
+		if (!ALL_ZEROES(ns->data.nguid)) {
+			nvme_printf(gctrlr, "Found NGUID in CNS0 for NSID:%u\n",
+			    id);
+			memcpy(ns->nns_gids.nguid, ns->data.nguid,
+			    sizeof(ns->nns_gids.nguid));
+			ns->nns_gids.nguid_available = true;
+		} else {
+			nvme_printf(gctrlr, "No NGUID in CNS0 for NSID:%u\n",
+			    id);
+		}
+	}
+
+	/* If the EUI64 is not available through CNS3 check the CNS0 response */
+	if (!ns->nns_gids.eui64_available) {
+		if (!ALL_ZEROES(ns->data.eui64)) {
+			nvme_printf(gctrlr, "Found EUI64 in CNS0 for NSID:%u\n",
+			    id);
+			memcpy(ns->nns_gids.eui64, ns->data.eui64,
+			    sizeof(ns->nns_gids.eui64));
+			ns->nns_gids.eui64_available = true;
+		} else {
+			nvme_printf(gctrlr, "No EUI64 in CNS0 for NSID:%u\n",
+			    id);
+		}
+	}
+
+}
+
 
 int
 nvme_ns_ioctl_process(struct nvme_namespace *ns, u_long cmd, caddr_t arg,
@@ -597,6 +776,18 @@ nvme_ns_construct(struct nvme_namespace *ns, uint32_t id,
 		NVME_CTRLR_DATA_VWC_PRESENT_MASK;
 	if (vwc_present)
 		ns->flags |= NVME_NS_FLUSH_SUPPORTED;
+
+	/* Check for Multi-Pathing support */
+	if (ns->data.nmic & NVME_NS_DATA_NMIC_MAY_BE_SHARED_MASK) {
+		DBGSPEW("Invoking nvme_ns_find_uid(c:%p i:%u n:%p)\n", ctrlr,
+		    id, ns);
+		/* Populate the ns structure with the global IDs */
+		nvme_ns_find_uid(ctrlr, id, ns);
+		DBGSPEW("Done w/nvme_ns_find_uid()\n");
+	} else {
+		DBGSPEW("Not invoking nvme_ns_find_uid() for c:%p id:%u\n",
+		    ctrlr, id);
+	}
 
 	/*
 	 * cdev may have already been created, if we are reconstructing the

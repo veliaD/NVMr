@@ -651,9 +651,9 @@ nvme_ctrlr_log_critical_warnings(struct nvme_pci_controller *pctrlr,
 }
 
 static void
-nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
+nvme_ctrlr_async_event_log_page_cb(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct nvme_async_event_request		*aer = arg;
+	struct nvme_async_event_request		*aer = arg1;
 	struct nvme_health_information_page	*health_info;
 	struct nvme_ns_list			*nsl;
 	struct nvme_error_information_entry	*err;
@@ -755,9 +755,9 @@ nvme_ctrlr_async_event_log_page_cb(void *arg, const struct nvme_completion *cpl)
 }
 
 static void
-nvme_ctrlr_async_event_cb(void *arg, const struct nvme_completion *cpl)
+nvme_ctrlr_async_event_cb(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct nvme_async_event_request	*aer = arg;
+	struct nvme_async_event_request	*aer = arg1;
 	struct nvme_pci_controller *pctrlr;
 
 	KASSERT_NVMP_CNTRLR(aer->nvmea_ctrlrp);
@@ -811,7 +811,7 @@ nvme_ctrlr_construct_and_submit_aer(struct nvme_pci_controller *pctrlr,
 
 	CONFIRMPCIECONTROLLER;
 	aer->nvmea_ctrlrp = &pctrlr->ctrlr;
-	req = nvme_allocate_request_null(nvme_ctrlr_async_event_cb, aer);
+	req = nvme_allocate_request_null(nvme_ctrlr_async_event_cb, aer, NULL);
 	aer->req = req;
 
 	/*
@@ -1049,9 +1049,9 @@ nvme_ctrlr_intx_handler(void *arg)
 }
 
 static void
-nvme_pt_done(void *arg, const struct nvme_completion *cpl)
+nvme_pt_done(void *arg1, void *arg2, const struct nvme_completion *cpl)
 {
-	struct nvme_pt_command *pt = arg;
+	struct nvme_pt_command *pt = arg1;
 	struct mtx *mtx = pt->driver_lock;
 	uint16_t status;
 
@@ -1112,12 +1112,12 @@ nvme_ctrlr_passthrough_cmd(struct nvme_controller *ctrlr,
 				goto err;
 			}
 			req = nvme_allocate_request_vaddr(buf->b_data, pt->len, 
-			    nvme_pt_done, pt);
+			    nvme_pt_done, pt, NULL);
 		} else
 			req = nvme_allocate_request_vaddr(pt->buf, pt->len,
-			    nvme_pt_done, pt);
+			    nvme_pt_done, pt, NULL);
 	} else
-		req = nvme_allocate_request_null(nvme_pt_done, pt);
+		req = nvme_allocate_request_null(nvme_pt_done, pt, NULL);
 
 	/* Assume user space already converted to little-endian */
 	req->cmd.opc = pt->cmd.opc;

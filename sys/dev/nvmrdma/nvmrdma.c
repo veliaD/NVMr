@@ -199,7 +199,7 @@ nvmr_nreq_compl(nvmr_qpair_t q, struct nvmr_ncommcont *commp, struct nvme_comple
 	}
 	
 	if (req->cb_fn) {
-		req->cb_fn(req->cb_arg, c);
+		req->cb_fn(req->cb_arg1, req->cb_arg2, c);
 	}
 
 	commp->nvmrsnd_req = NULL;
@@ -1878,7 +1878,7 @@ nvmr_qpair_create(nvmr_cntrlr_t cntrlr, nvmr_qpair_t *qp, uint16_t qid,
 	    HOSTNQN_TEMPLATE, nvrdma_host_uuid_string);
 
 	req = nvme_allocate_request_vaddr(&ncdata, sizeof(ncdata),
-	    nvme_completion_poll_cb, &status);
+	    nvme_completion_poll_cb, &status, NULL);
 	cmd = (nvmr_communion_t *)&req->cmd;
 	cmd->nvmrcu_conn.nvmrcn_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
 	cmd->nvmrcu_conn.nvmrcn_nvmf.nvmf_fctype = NVMF_FCTYPE_CONNECT;
@@ -1933,7 +1933,7 @@ nvmr_admin_identify(nvmr_cntrlr_t cntrlr, uint16_t cntid, uint32_t nsid,
 
 	req = nvme_allocate_request_vaddr(&cntrlr->nvmrctr_nvmec.cdata,
 	    sizeof(struct nvme_controller_data), nvme_completion_poll_cb,
-	    &status);
+	    &status, NULL);
 	cmd = (nvmr_communion_t *)&req->cmd;
 	cmd->nvmrcu_idnt.nvmrid_nvmf.nvmf_opc = NVME_OPC_IDENTIFY;
 	cmd->nvmrcu_idnt.nvmrid_nvmf.nvmf_nsid = htole32(nsid);
@@ -1975,7 +1975,7 @@ nvmr_admin_propset(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t value,
 		goto out;
 	}
 
-	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status);
+	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status, NULL);
 	cmd = (nvmr_communion_t *)&req->cmd;
 	cmd->nvmrcu_prst.nvmrps_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
 	cmd->nvmrcu_prst.nvmrps_nvmf.nvmf_fctype = NVMF_FCTYPE_PROPSET;
@@ -2067,7 +2067,7 @@ nvmr_req_ioq_count(nvmr_cntrlr_t cntrlr, uint16_t nioqs, uint16_t *nalloced)
 
 	qcount = nioqs - 1; /* 0 based */
 
-	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status);
+	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status, NULL);
 	cmd = (nvmr_communion_t *)&req->cmd;
 	cmd->nvmrcu_stft.nvmrsf_nvmf.nvmf_opc = NVME_OPC_SET_FEATURES;
 	cmd->nvmrcu_stft.nvmrsf_fid = htole32(NVME_FEAT_NUMBER_OF_QUEUES);
@@ -2115,7 +2115,7 @@ nvmr_admin_propget(nvmr_cntrlr_t cntrlr, uint32_t offset, uint64_t *valuep,
 		goto out;
 	}
 
-	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status);
+	req = nvme_allocate_request_null(nvme_completion_poll_cb, &status, NULL);
 	cmd = (nvmr_communion_t *)&req->cmd;
 	cmd->nvmrcu_prgt.nvmrpg_nvmf.nvmf_opc = NVME_OPC_FABRIC_COMMAND;
 	cmd->nvmrcu_prgt.nvmrpg_nvmf.nvmf_fctype = NVMF_FCTYPE_PROPGET;
@@ -2182,7 +2182,7 @@ nvmr_qpair_manual_complete_request(struct nvme_qpair *qpair,
 	}
 
 	if (req->cb_fn)
-		req->cb_fn(req->cb_arg, &cpl);
+		req->cb_fn(req->cb_arg1, req->cb_arg2, &cpl);
 
 	nvme_free_request(req);
 	
@@ -2839,7 +2839,7 @@ nvmr_discovery(nvmr_ioctl_t *nvmri)
 
 	buf = malloc(nvmri->nvmri_retlen, M_NVMR, M_WAITOK|M_ZERO);
 	req = nvme_allocate_request_vaddr(buf, nvmri->nvmri_retlen,
-	    nvme_completion_poll_cb, &status);
+	    nvme_completion_poll_cb, &status, NULL);
 
 	cmd = &req->cmd;
 	cmd->opc = NVME_OPC_GET_LOG_PAGE;

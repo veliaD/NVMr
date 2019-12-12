@@ -64,9 +64,9 @@ struct nvme_sim_softc
 };
 
 static void
-nvme_sim_nvmeio_done(void *ccb_arg, const struct nvme_completion *cpl)
+nvme_sim_nvmeio_done(void *ccb_arg1, void *ccb_arg2, const struct nvme_completion *cpl)
 {
-	union ccb *ccb = (union ccb *)ccb_arg;
+	union ccb *ccb = (union ccb *)ccb_arg1;
 
 	/*
 	 * Let the periph know the completion, and let it sort out what
@@ -98,14 +98,15 @@ nvme_sim_nvmeio(struct cam_sim *sim, union ccb *ccb)
 	/* SG LIST ??? */
 	if ((nvmeio->ccb_h.flags & CAM_DATA_MASK) == CAM_DATA_BIO)
 		req = nvme_allocate_request_bio((struct bio *)payload,
-		    nvme_sim_nvmeio_done, ccb);
+		    nvme_sim_nvmeio_done, ccb, NULL);
 	else if ((nvmeio->ccb_h.flags & CAM_DATA_SG) == CAM_DATA_SG)
 		req = nvme_allocate_request_ccb(ccb, nvme_sim_nvmeio_done, ccb);
 	else if (payload == NULL)
-		req = nvme_allocate_request_null(nvme_sim_nvmeio_done, ccb);
+		req = nvme_allocate_request_null(nvme_sim_nvmeio_done, ccb,
+		    NULL);
 	else
 		req = nvme_allocate_request_vaddr(payload, size,
-		    nvme_sim_nvmeio_done, ccb);
+		    nvme_sim_nvmeio_done, ccb, NULL);
 
 	if (req == NULL) {
 		nvmeio->ccb_h.status = CAM_RESRC_UNAVAIL;
